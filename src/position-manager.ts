@@ -313,7 +313,8 @@ export class PositionManager {
           position.peakPrice = currentPrice;
         }
 
-        // Условие 1: Take Profit (из конфига, должно быть 2.5x)
+        // Условие 1: Take Profit - выходим сразу как только видим 2.5x или выше
+        // Не ждем больше, чтобы не резать себе прибыль
         if (multiplier >= config.takeProfitMultiplier) {
           await this.closePosition(position, 'take_profit', currentPrice);
           return;
