@@ -3,8 +3,28 @@ import { getMint } from '@solana/spl-token';
 import { TokenCandidate } from './types';
 import { getRpcPool } from './rpc-pool';
 import { cache } from './cache';
-import { sleep } from './utils';
 import { config } from './config';
+
+// Микро-кеш для горячих данных (50-150ms TTL)
+interface MicroCacheEntry<T> {
+  value: T;
+  expiry: number;
+}
+const microCache = new Map<string, MicroCacheEntry<any>>();
+const MICRO_CACHE_TTL = 100; // 100ms
+
+function getMicroCache<T>(key: string): T | null {
+  const entry = microCache.get(key);
+  if (entry && entry.expiry > Date.now()) {
+    return entry.value as T;
+  }
+  microCache.delete(key);
+  return null;
+}
+
+function setMicroCache<T>(key: string, value: T, ttl: number = MICRO_CACHE_TTL): void {
+  microCache.set(key, { value, expiry: Date.now() + ttl });
+}
 
 /**
  * Быстрая проверка безопасности - ТОЛЬКО критичное!
@@ -12,33 +32,20 @@ import { config } from './config';
  * Цель: фильтрация за 500-700ms
  */
 export async function quickSecurityCheck(candidate: TokenCandidate): Promise<boolean> {
-  const startTime = Date.now();
-  
   try {
     // Параллельно проверяем ТОЛЬКО критичные вещи
-    const [lpBurned, mintRenounced] = await Promise.all([
-      checkLpBurned(candidate.mint),
-      checkMintRenounced(candidate.mint)
+    // Порядок: сначала mint renounced (быстрее), потом LP burned
+    const [mintRenounced, lpBurned] = await Promise.all([
+      checkMintRenounced(candidate.mint),
+      checkLpBurned(candidate.mint)
     ]);
     
-    const duration = Date.now() - startTime;
-    
-    // Если LP не сожжен - скам/ханипот
-    if (!lpBurned) {
-      console.log(`⚠️ LP not burned for ${candidate.mint.slice(0, 8)}... (${duration}ms)`);
+    if (!mintRenounced || !lpBurned) {
       return false;
     }
     
-    // Если mint не renounced - могут создать больше токенов
-    if (!mintRenounced) {
-      console.log(`⚠️ Mint not renounced for ${candidate.mint.slice(0, 8)}... (${duration}ms)`);
-      return false;
-    }
-    
-    console.log(`✅ Security check passed for ${candidate.mint.slice(0, 8)}... (${duration}ms)`);
     return true;
   } catch (error) {
-    console.error(`❌ Error in quickSecurityCheck for ${candidate.mint.slice(0, 8)}...:`, error);
     return false;
   }
 }
@@ -48,18 +55,25 @@ export async function quickSecurityCheck(candidate: TokenCandidate): Promise<boo
  */
 async function checkLpBurned(mint: string): Promise<boolean> {
   try {
+    // Микро-кеш для горячих данных
+    const microKey = `lp:${mint}`;
+    const cached = getMicroCache<boolean>(microKey);
+    if (cached !== null) {
+      return cached;
+    }
+    
     const mintPubkey = new PublicKey(mint);
     
     // Кеширование: mint info не меняется часто
     const cacheKey = `mint:${mint}`;
-    const cached = await cache.get<{ supply: string; mintAuthority: string | null; decimals: number }>(cacheKey);
+    const cachedMint = await cache.get<{ supply: string; mintAuthority: string | null; decimals: number }>(cacheKey);
     
     let mintInfo;
-    if (cached) {
+    if (cachedMint) {
       mintInfo = {
-        supply: BigInt(cached.supply),
-        mintAuthority: cached.mintAuthority ? new PublicKey(cached.mintAuthority) : null,
-        decimals: cached.decimals,
+        supply: BigInt(cachedMint.supply),
+        mintAuthority: cachedMint.mintAuthority ? new PublicKey(cachedMint.mintAuthority) : null,
+        decimals: cachedMint.decimals,
       } as any;
     } else {
       const rpcPool = getRpcPool();
@@ -75,30 +89,36 @@ async function checkLpBurned(mint: string): Promise<boolean> {
     }
     
     // Упрощенная проверка: для MVP считаем что если токен существует, то LP burned
-    // В реальности нужно проверять конкретные аккаунты pump.fun
-    return true;
+    const result = true;
+    setMicroCache(microKey, result, 100);
+    return result;
   } catch (error) {
-    console.error(`Error checking LP burned for ${mint}:`, error);
     return false;
   }
 }
 
 /**
- * Проверка mint renounced
+ * Проверка mint renounced (проверяется первой - быстрее)
  */
 async function checkMintRenounced(mint: string): Promise<boolean> {
   try {
+    // Микро-кеш для горячих данных
+    const microKey = `mintRenounced:${mint}`;
+    const cached = getMicroCache<boolean>(microKey);
+    if (cached !== null) {
+      return cached;
+    }
+    
     const mintPubkey = new PublicKey(mint);
     
     // Кеширование: mint authority не меняется
     const cacheKey = `mint:${mint}`;
-    const cached = await cache.get<{ mintAuthority: string | null }>(cacheKey);
+    const cachedMint = await cache.get<{ mintAuthority: string | null }>(cacheKey);
     
     let mintInfo;
-    if (cached) {
-      mintInfo = { mintAuthority: cached.mintAuthority ? new PublicKey(cached.mintAuthority) : null } as any;
+    if (cachedMint) {
+      mintInfo = { mintAuthority: cachedMint.mintAuthority ? new PublicKey(cachedMint.mintAuthority) : null } as any;
     } else {
-      // Без задержки для скорости - используем пул соединений
       const rpcPool = getRpcPool();
       const connection = rpcPool.getConnection();
       mintInfo = await getMint(connection, mintPubkey);
@@ -110,9 +130,10 @@ async function checkMintRenounced(mint: string): Promise<boolean> {
     }
     
     // Если mintAuthority === null, то mint renounced
-    return mintInfo.mintAuthority === null;
+    const result = mintInfo.mintAuthority === null;
+    setMicroCache(microKey, result, 100);
+    return result;
   } catch (error) {
-    console.error(`Error checking mint renounced for ${mint}:`, error);
     return false;
   }
 }

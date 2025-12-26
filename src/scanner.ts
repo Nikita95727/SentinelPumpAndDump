@@ -175,7 +175,7 @@ export class TokenScanner {
     }
   }
 
-  private async handleMessage(data: WebSocket.Data): Promise<void> {
+  private handleMessage(data: WebSocket.Data): void {
     try {
       const message = JSON.parse(data.toString());
 
@@ -221,7 +221,7 @@ export class TokenScanner {
       // ЭКСПЕРИМЕНТ: Обрабатываем ТОЛЬКО queue1
       // Обрабатываем уведомление сразу (queue1 обрабатывается в processLogNotification)
       // Не добавляем в notificationQueue и не обрабатываем queue2/queue3
-      this.processLogNotification(notification, true); // isPriority = true для queue1
+      void this.processLogNotification(notification, true); // isPriority = true для queue1
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);

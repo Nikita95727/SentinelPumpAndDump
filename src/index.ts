@@ -79,20 +79,9 @@ class PumpFunSniper {
     if (!this.positionManager || this.isShuttingDown) return;
 
     try {
-      console.log(`🆕 New token: ${candidate.mint.slice(0, 8)}... (age: ${((Date.now() - candidate.createdAt) / 1000).toFixed(1)}s)`);
-      
       // Пытаемся открыть позицию (НЕ ждем батч!)
-      const opened = await this.positionManager.tryOpenPosition(candidate);
-      
-      if (opened) {
-        const stats = this.positionManager.getStats();
-        console.log(`✅ Position opened for ${candidate.mint.slice(0, 8)}...`);
-        console.log(`📊 Active: ${stats.activePositions}/${config.maxOpenPositions}`);
-      } else {
-        console.log(`⏭️ Skipped ${candidate.mint.slice(0, 8)}... (no slots or failed checks)`);
-      }
+      await this.positionManager.tryOpenPosition(candidate);
     } catch (error) {
-      console.error('❌ Error handling new token:', error);
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'error',

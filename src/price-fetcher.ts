@@ -22,6 +22,8 @@ export class PumpFunPriceFetcher {
   private rpcPool = getRpcPool();
   private priceCache = new Map<string, TokenPrice>();
   private readonly CACHE_TTL = 2000; // 2 секунды
+  private readonly MICRO_CACHE_TTL = 100; // 100ms для повторных запросов
+  private microPriceCache = new Map<string, { price: number; expiry: number }>();
   private solUsdPrice = 170;
 
   constructor() {
@@ -34,8 +36,16 @@ export class PumpFunPriceFetcher {
    * Получает цену одного токена в SOL
    */
   async getPrice(tokenMint: string): Promise<number> {
+    // Микро-кеш для повторных запросов в пределах 100ms
+    const microCached = this.microPriceCache.get(tokenMint);
+    if (microCached && microCached.expiry > Date.now()) {
+      return microCached.price;
+    }
+    
     const cached = this.priceCache.get(tokenMint);
     if (cached && (Date.now() - cached.timestamp) < this.CACHE_TTL) {
+      // Обновляем микро-кеш
+      this.microPriceCache.set(tokenMint, { price: cached.priceInSol, expiry: Date.now() + this.MICRO_CACHE_TTL });
       return cached.priceInSol;
     }
 
@@ -45,8 +55,9 @@ export class PumpFunPriceFetcher {
       const accountInfo = await connection.getAccountInfo(bondingCurvePda);
       
       if (!accountInfo) {
-        // Токен слишком новый или не существует - используем fallback
-        return this.calculateFallbackPrice();
+        const fallbackPrice = this.calculateFallbackPrice();
+        this.microPriceCache.set(tokenMint, { price: fallbackPrice, expiry: Date.now() + this.MICRO_CACHE_TTL });
+        return fallbackPrice;
       }
 
       const price = this.parseBondingCurvePrice(accountInfo.data);
@@ -56,11 +67,14 @@ export class PumpFunPriceFetcher {
         priceInUsd: price * this.solUsdPrice,
         timestamp: Date.now()
       });
+      
+      this.microPriceCache.set(tokenMint, { price, expiry: Date.now() + this.MICRO_CACHE_TTL });
 
       return price;
     } catch (error) {
-      console.error(`Error fetching price for ${tokenMint.slice(0, 8)}...:`, error);
-      return this.calculateFallbackPrice();
+      const fallbackPrice = this.calculateFallbackPrice();
+      this.microPriceCache.set(tokenMint, { price: fallbackPrice, expiry: Date.now() + this.MICRO_CACHE_TTL });
+      return fallbackPrice;
     }
   }
 
