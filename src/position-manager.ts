@@ -4,7 +4,7 @@ import { config } from './config';
 import { logger } from './logger';
 import { getCurrentTimestamp, sleep, calculateSlippage, formatUsd } from './utils';
 import { quickSecurityCheck } from './quick-filters';
-import { PriceFetcher } from './price-fetcher';
+import { priceFetcher } from './price-fetcher';
 import { TokenFilters } from './filters';
 
 const MAX_POSITIONS = 10;
@@ -17,7 +17,6 @@ export class PositionManager {
   private positions = new Map<string, Position>();
   private connection: Connection;
   private filters: TokenFilters;
-  private priceFetcher: PriceFetcher;
   private currentDeposit: number;
   private peakDeposit: number;
   private positionSize: number; // Размер позиции = currentDeposit / MAX_POSITIONS
@@ -25,7 +24,6 @@ export class PositionManager {
   constructor(connection: Connection, initialDeposit: number) {
     this.connection = connection;
     this.filters = new TokenFilters(connection);
-    this.priceFetcher = new PriceFetcher();
     this.currentDeposit = initialDeposit;
     this.peakDeposit = initialDeposit;
     this.positionSize = initialDeposit / MAX_POSITIONS;
@@ -39,13 +37,28 @@ export class PositionManager {
    * Возвращает true если позиция открыта, false если нет свободных слотов или проверка не прошла
    */
   async tryOpenPosition(candidate: TokenCandidate): Promise<boolean> {
+    // 0. Фильтр: исключаем SOL токен
+    const SOL_MINT = 'So11111111111111111111111111111111111111112';
+    if (candidate.mint === SOL_MINT) {
+      console.log(`⏭️ Skipped SOL token (not a pump.fun token)`);
+      return false;
+    }
+
     // 1. Проверка: есть ли свободные слоты?
     if (this.positions.size >= MAX_POSITIONS) {
       console.log(`⏭️ No free slots (${this.positions.size}/${MAX_POSITIONS})`);
       return false;
     }
 
-    // 2. Быстрая проверка безопасности (ТОЛЬКО критичное!)
+    // 2. Проверка: достаточно ли средств для открытия позиции?
+    // В симуляции проверяем что можем "выделить" средства на позицию
+    const requiredAmount = this.positionSize; // Нужно выделить positionSize
+    if (this.currentDeposit < requiredAmount) {
+      console.log(`⏭️ Insufficient deposit: ${this.currentDeposit.toFixed(6)} SOL < ${requiredAmount.toFixed(6)} SOL (need for position)`);
+      return false;
+    }
+
+    // 3. Быстрая проверка безопасности (ТОЛЬКО критичное!)
     const securityCheckStart = Date.now();
     const passed = await quickSecurityCheck(candidate);
     const securityCheckDuration = Date.now() - securityCheckStart;
@@ -110,8 +123,9 @@ export class PositionManager {
 
     this.positions.set(candidate.mint, position);
 
-    // Обновляем депозит
-    this.currentDeposit -= this.positionSize;
+    // В симуляции вычитаем только invested (средства вложены в позицию)
+    // При закрытии добавим grossProfit (возврат + прибыль/убыток)
+    this.currentDeposit -= invested;
     if (this.currentDeposit < 0) {
       this.currentDeposit = 0;
     }
@@ -204,18 +218,24 @@ export class PositionManager {
 
       console.log(`💰 CLOSED: ${position.token.slice(0, 8)}... | ${multiplier.toFixed(2)}x | ${profit.toFixed(6)} SOL | ${reason}`);
 
-      // Обновляем депозит
+      // Обновляем депозит (симуляция)
+      // При открытии мы вычли invested, теперь добавляем grossProfit
+      // Результат: currentDeposit += (grossProfit - invested) = прибыль/убыток
       this.currentDeposit += grossProfit;
       if (this.currentDeposit > this.peakDeposit) {
         this.peakDeposit = this.currentDeposit;
+      }
+      if (this.currentDeposit < 0) {
+        this.currentDeposit = 0; // Защита от отрицательного депозита
       }
 
       // Удаляем из активных
       this.positions.delete(position.token);
       position.status = 'closed';
 
-      // Обновляем размер позиции (compound)
-      this.positionSize = this.currentDeposit / MAX_POSITIONS;
+      // Обновляем размер позиции (compound) - но не меньше минимального
+      const minPositionSize = 0.001; // Минимальный размер позиции
+      this.positionSize = Math.max(this.currentDeposit / MAX_POSITIONS, minPositionSize);
 
       // Логируем
       logger.log({
@@ -242,13 +262,19 @@ export class PositionManager {
   private async getCurrentPrice(token: string): Promise<number> {
     // Используем кэшированную цену если есть
     const position = this.positions.get(token);
-    if (position?.currentPrice) {
+    if (position?.currentPrice && position.currentPrice > 0) {
       return position.currentPrice;
     }
 
-    // Иначе запрашиваем
-    const prices = await this.priceFetcher.getPricesBatch([token]);
-    return prices.get(token) || position?.entryPrice || 0;
+    // Запрашиваем цену через priceFetcher (bonding curve)
+    const price = await priceFetcher.getPrice(token);
+    
+    if (price > 0) {
+      return price;
+    }
+    
+    // Fallback: используем entryPrice
+    return position?.entryPrice || 0;
   }
 
   /**
@@ -258,13 +284,20 @@ export class PositionManager {
     if (this.positions.size === 0) return;
 
     const tokens = Array.from(this.positions.keys());
-    const prices = await this.priceFetcher.getPricesBatch(tokens);
+    const prices = await priceFetcher.getPricesBatch(tokens);
 
     // Кэшируем в объектах позиций
-    for (const [token, price] of prices.entries()) {
+    for (const token of tokens) {
       const position = this.positions.get(token);
       if (position && position.status === 'active') {
-        position.currentPrice = price;
+        const price = prices.get(token);
+        
+        if (price && price > 0) {
+          position.currentPrice = price;
+        } else {
+          // При ошибке используем entryPrice
+          position.currentPrice = position.entryPrice;
+        }
       }
     }
   }

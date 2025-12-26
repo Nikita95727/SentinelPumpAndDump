@@ -1,104 +1,177 @@
+import { Connection, PublicKey } from '@solana/web3.js';
 import { config } from './config';
+import { getRpcPool } from './rpc-pool';
+
+const PUMP_FUN_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+const PUMP_FUN_BONDING_CURVE_SEED = 'bonding-curve';
+const VIRTUAL_SOL_RESERVES = 30_000_000_000; // 30 SOL в lamports
+const VIRTUAL_TOKEN_RESERVES = 1_073_000_000_000_000; // Виртуальные резервы токенов
+const LAMPORTS_PER_SOL = 1_000_000_000;
+
+interface TokenPrice {
+  priceInSol: number;
+  priceInUsd: number;
+  timestamp: number;
+}
 
 /**
- * Класс для батч-запросов цен токенов
- * Оптимизирует API запросы: вместо 10 запросов делает 1 батч-запрос
+ * Получает цены pump.fun токенов напрямую из bonding curve контракта
+ * НЕ использует Jupiter API (новые токены не индексируются сразу)
  */
-export class PriceFetcher {
-  private priceCache = new Map<string, { price: number; timestamp: number }>();
+export class PumpFunPriceFetcher {
+  private rpcPool = getRpcPool();
+  private priceCache = new Map<string, TokenPrice>();
   private readonly CACHE_TTL = 2000; // 2 секунды
+  private solUsdPrice = 170;
+
+  constructor() {
+    this.updateSolPrice();
+    // Обновляем цену SOL каждые 30 секунд
+    setInterval(() => this.updateSolPrice(), 30_000);
+  }
+
+  /**
+   * Получает цену одного токена в SOL
+   */
+  async getPrice(tokenMint: string): Promise<number> {
+    const cached = this.priceCache.get(tokenMint);
+    if (cached && (Date.now() - cached.timestamp) < this.CACHE_TTL) {
+      return cached.priceInSol;
+    }
+
+    try {
+      const bondingCurvePda = await this.getBondingCurvePDA(tokenMint);
+      const connection = this.rpcPool.getConnection();
+      const accountInfo = await connection.getAccountInfo(bondingCurvePda);
+      
+      if (!accountInfo) {
+        // Токен слишком новый или не существует - используем fallback
+        return this.calculateFallbackPrice();
+      }
+
+      const price = this.parseBondingCurvePrice(accountInfo.data);
+      
+      this.priceCache.set(tokenMint, {
+        priceInSol: price,
+        priceInUsd: price * this.solUsdPrice,
+        timestamp: Date.now()
+      });
+
+      return price;
+    } catch (error) {
+      console.error(`Error fetching price for ${tokenMint.slice(0, 8)}...:`, error);
+      return this.calculateFallbackPrice();
+    }
+  }
 
   /**
    * Получает цены для нескольких токенов батчем
    */
-  async getPricesBatch(tokens: string[]): Promise<Map<string, number>> {
-    const result = new Map<string, number>();
-    const toFetch: string[] = [];
-
-    // 1. Проверяем кэш
-    for (const token of tokens) {
-      const cached = this.priceCache.get(token);
-      if (cached && (Date.now() - cached.timestamp) < this.CACHE_TTL) {
-        result.set(token, cached.price);
-      } else {
-        toFetch.push(token);
-      }
-    }
-
-    // 2. Запрашиваем только те что не в кэше (батчем через Jupiter API)
-    if (toFetch.length > 0) {
-      const prices = await this.fetchPricesFromJupiter(toFetch);
-
-      for (const [token, price] of prices.entries()) {
-        result.set(token, price);
-        this.priceCache.set(token, { price, timestamp: Date.now() });
-      }
-    }
-
-    return result;
-  }
-
-  /**
-   * Получает цену одного токена (использует батч внутри)
-   */
-  async getPrice(token: string): Promise<number> {
-    const prices = await this.getPricesBatch([token]);
-    return prices.get(token) || 0;
-  }
-
-  /**
-   * Запрашивает цены через Jupiter API
-   */
-  private async fetchPricesFromJupiter(tokens: string[]): Promise<Map<string, number>> {
+  async getPricesBatch(tokenMints: string[]): Promise<Map<string, number>> {
     const prices = new Map<string, number>();
-
-    // Параллельно запрашиваем цены для всех токенов
-    const pricePromises = tokens.map(async (token) => {
-      try {
-        const price = await this.getJupiterQuote(token);
-        return { token, price };
-      } catch (error) {
-        console.error(`Error fetching price for ${token.slice(0, 8)}...:`, error);
-        return { token, price: 0 };
+    const toFetch: string[] = [];
+    
+    // 1. Проверяем кэш
+    for (const mint of tokenMints) {
+      const cached = this.priceCache.get(mint);
+      if (cached && (Date.now() - cached.timestamp) < this.CACHE_TTL) {
+        prices.set(mint, cached.priceInSol);
+      } else {
+        toFetch.push(mint);
       }
-    });
+    }
 
-    const results = await Promise.all(pricePromises);
-    for (const { token, price } of results) {
-      prices.set(token, price);
+    // 2. Запрашиваем только те что не в кэше
+    if (toFetch.length > 0) {
+      const results = await Promise.allSettled(
+        toFetch.map(mint => this.getPrice(mint))
+      );
+
+      results.forEach((result, index) => {
+        const mint = toFetch[index];
+        if (result.status === 'fulfilled') {
+          prices.set(mint, result.value);
+        } else {
+          // При ошибке используем fallback
+          prices.set(mint, this.calculateFallbackPrice());
+        }
+      });
     }
 
     return prices;
   }
 
   /**
-   * Получает котировку от Jupiter API
+   * Получает PDA адрес bonding curve для токена
    */
-  private async getJupiterQuote(tokenMint: string): Promise<number> {
+  private async getBondingCurvePDA(tokenMint: string): Promise<PublicKey> {
+    const [pda] = await PublicKey.findProgramAddress(
+      [
+        Buffer.from(PUMP_FUN_BONDING_CURVE_SEED),
+        new PublicKey(tokenMint).toBuffer()
+      ],
+      PUMP_FUN_PROGRAM
+    );
+    return pda;
+  }
+
+  /**
+   * Парсит цену из данных bonding curve аккаунта
+   */
+  private parseBondingCurvePrice(data: Buffer): number {
     try {
-      // Jupiter API endpoint для получения цены
-      const SOL_MINT = 'So11111111111111111111111111111111111111112';
-      const url = `https://quote-api.jup.ag/v6/quote?inputMint=${tokenMint}&outputMint=${SOL_MINT}&amount=1000000&slippageBps=50`;
-
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`Jupiter API error: ${response.status}`);
-      }
-
-      const data = await response.json() as { outAmount?: string; inAmount?: string };
+      // Структура данных bonding curve (примерно):
+      // offset 24: realTokenReserves (u64)
+      // offset 32: realSolReserves (u64)
       
-      // Извлекаем цену из котировки
-      if (data.outAmount && data.inAmount) {
-        // Цена = outAmount / inAmount (сколько SOL за 1 токен)
-        const price = Number(data.outAmount) / Number(data.inAmount);
-        return price;
+      const realTokenReserves = Number(data.readBigUInt64LE(24));
+      const realSolReserves = Number(data.readBigUInt64LE(32));
+
+      if (realTokenReserves > 0 && realSolReserves > 0) {
+        // Цена = SOL_reserves / Token_reserves
+        // Конвертируем в правильные единицы
+        const solAmount = realSolReserves / LAMPORTS_PER_SOL;
+        const tokenAmount = realTokenReserves / 1e9; // Предполагаем 9 decimals для токенов
+        return solAmount / tokenAmount;
       }
 
-      return 0;
+      // Если резервы не инициализированы - используем fallback
+      return this.calculateFallbackPrice();
     } catch (error) {
-      console.error(`Error getting Jupiter quote for ${tokenMint}:`, error);
-      // Fallback: возвращаем минимальную цену
-      return 0.00000001;
+      console.error('Error parsing bonding curve price:', error);
+      return this.calculateFallbackPrice();
+    }
+  }
+
+  /**
+   * Вычисляет fallback цену на основе виртуальных резервов
+   */
+  private calculateFallbackPrice(): number {
+    const solAmount = VIRTUAL_SOL_RESERVES / LAMPORTS_PER_SOL;
+    const tokenAmount = VIRTUAL_TOKEN_RESERVES / 1e9;
+    return solAmount / tokenAmount;
+  }
+
+  /**
+   * Обновляет цену SOL в USD
+   */
+  private async updateSolPrice(): Promise<void> {
+    try {
+      const response = await fetch(
+        'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
+        { signal: AbortSignal.timeout(5000) }
+      );
+      
+      if (response.ok) {
+        const data = await response.json() as { solana?: { usd?: number } };
+        if (data.solana?.usd) {
+          this.solUsdPrice = data.solana.usd;
+          console.log(`📊 SOL/USD updated: $${this.solUsdPrice.toFixed(2)}`);
+        }
+      }
+    } catch (error) {
+      // При ошибке используем значение по умолчанию
+      console.warn('Error updating SOL price, using default:', error);
     }
   }
 
@@ -110,3 +183,5 @@ export class PriceFetcher {
   }
 }
 
+// Экспортируем singleton instance
+export const priceFetcher = new PumpFunPriceFetcher();

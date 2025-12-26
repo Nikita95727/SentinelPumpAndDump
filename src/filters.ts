@@ -1085,58 +1085,30 @@ export class TokenFilters {
       try {
         await sleep(config.rpcRequestDelay);
         
-        // Пытаемся получить цену через Jupiter API (приоритет)
-        try {
-          await sleep(config.rpcRequestDelay);
-          const jupiterQuote = await this.getJupiterQuote(mint);
-          if (jupiterQuote > 0) {
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'info',
-              token: mint,
-              message: `Entry price from Jupiter: ${jupiterQuote.toFixed(8)} SOL (attempt ${attempt + 1})`,
-            });
-            return jupiterQuote;
-          }
-        } catch (jupiterError: any) {
-          // Если 429 - ждем дольше и повторяем
-          if (jupiterError?.message?.includes('429') || jupiterError?.message?.includes('rate limit')) {
-            const retryDelay = config.rateLimitRetryDelay * (attempt + 1);
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'warning',
-              token: mint,
-              message: `Jupiter API rate limit, retrying after ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries})`,
-            });
-            await sleep(retryDelay);
-            continue;
-          }
-          // Другие ошибки Jupiter - пробуем fallback
+        // Получаем цену напрямую из bonding curve контракта pump.fun
+        // НЕ используем Jupiter API - новые токены не индексируются сразу
+        const { priceFetcher } = await import('./price-fetcher');
+        const price = await priceFetcher.getPrice(mint);
+        
+        if (price > 0) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: mint,
+            message: `Entry price from bonding curve: ${price.toFixed(8)} SOL (attempt ${attempt + 1})`,
+          });
+          return price;
         }
 
-        // Fallback: получаем цену через bonding curve формулу на основе supply
-        const mintPubkey = new PublicKey(mint);
-        const connection = this.rpcPool.getConnection(); // Используем пул соединений
-      const mintInfo = await getMint(connection, mintPubkey);
-        const supply = Number(mintInfo.supply);
-        const decimals = mintInfo.decimals;
-
-        // Упрощенная формула bonding curve для pump.fun
-        // pump.fun использует формулу: price = (virtualTokenReserves / virtualSolReserves) * (1 - fee)
-        // Для симуляции используем приблизительный расчет на основе supply
-        const basePrice = 0.0001; // Базовая цена
-        const supplyNormalized = supply / Math.pow(10, decimals);
-        const priceMultiplier = Math.log10(supplyNormalized / 1e9 + 1) / 10;
-        const estimatedPrice = basePrice * (1 + priceMultiplier);
-
+        // Fallback: минимальная цена если bonding curve не доступен
+        const fallbackPrice = 0.00001;
         logger.log({
           timestamp: getCurrentTimestamp(),
-          type: 'info',
+          type: 'warning',
           token: mint,
-          message: `Entry price from bonding curve formula: ${estimatedPrice.toFixed(8)} SOL (supply: ${supplyNormalized.toFixed(2)}, attempt ${attempt + 1})`,
+          message: `Bonding curve not available, using fallback price: ${fallbackPrice.toFixed(8)} SOL (attempt ${attempt + 1})`,
         });
-
-        return estimatedPrice;
+        return fallbackPrice;
       } catch (error: any) {
         lastError = error;
         
@@ -1180,33 +1152,5 @@ export class TokenFilters {
     return fallbackPrice; // Возвращаем минимальную цену вместо 0, чтобы симулятор мог продолжить
   }
 
-  private async getJupiterQuote(mint: string): Promise<number> {
-    try {
-      // Используем Jupiter API для получения цены
-      // Для покупки 0.001 SOL токена
-      const amount = 1000000; // 0.001 SOL в lamports
-      
-      const quoteUrl = `https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${mint}&amount=${amount}&slippageBps=250`;
-      
-      const response = await fetch(quoteUrl);
-      if (!response.ok) {
-        throw new Error(`Jupiter API error: ${response.statusText}`);
-      }
-
-      const quote = await response.json() as { outAmount?: string };
-      
-      if (quote.outAmount) {
-        // Конвертируем outAmount в цену
-        const tokensReceived = Number(quote.outAmount) / 1e6; // Предполагаем 6 decimals
-        const solSpent = amount / 1e9;
-        return solSpent / tokensReceived; // Цена в SOL за токен
-      }
-
-      return 0;
-    } catch (error) {
-      console.error(`Error getting Jupiter quote for ${mint}:`, error);
-      return 0;
-    }
-  }
 }
 

@@ -98,7 +98,7 @@ async function checkMintRenounced(mint: string): Promise<boolean> {
     if (cached) {
       mintInfo = { mintAuthority: cached.mintAuthority ? new PublicKey(cached.mintAuthority) : null } as any;
     } else {
-      await sleep(50); // Минимальная задержка для rate limiting
+      // Без задержки для скорости - используем пул соединений
       const rpcPool = getRpcPool();
       const connection = rpcPool.getConnection();
       mintInfo = await getMint(connection, mintPubkey);
