@@ -9,8 +9,9 @@ export interface Position {
   token: string;
   batchId?: number; // Опционально для обратной совместимости
   entryPrice: number;
-  investedSol: number;
+  investedSol: number; // Amount actually invested (after entry fees)
   investedUsd?: number; // Опционально
+  reservedAmount?: number; // Amount reserved/locked for this position (for accounting)
   entryTime: number;
   localHigh?: number; // локальный максимум для трейлинг-стопа (опционально)
   peakPrice: number; // пиковая цена для трейлинг-стопа

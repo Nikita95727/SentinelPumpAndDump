@@ -13,20 +13,111 @@ const MAX_HOLD_TIME = 90_000; // 90 секунд
 const TRAILING_STOP_PCT = 0.25;
 const CHECK_INTERVAL = 2000; // Проверка каждые 2 секунды
 
+/**
+ * Single source of truth for account balance
+ * All balance modifications MUST go through this class
+ */
+class Account {
+  private totalBalance: number;
+  private lockedBalance: number;
+  private peakBalance: number;
+
+  constructor(initialBalance: number) {
+    this.totalBalance = initialBalance;
+    this.lockedBalance = 0;
+    this.peakBalance = initialBalance;
+  }
+
+  getFreeBalance(): number {
+    return this.totalBalance - this.lockedBalance;
+  }
+
+  getTotalBalance(): number {
+    return this.totalBalance;
+  }
+
+  getLockedBalance(): number {
+    return this.lockedBalance;
+  }
+
+  getPeakBalance(): number {
+    return this.peakBalance;
+  }
+
+  /**
+   * Reserve funds for a position
+   * Returns true if successful, false if insufficient funds
+   */
+  reserve(amount: number): boolean {
+    if (this.getFreeBalance() < amount || amount <= 0) {
+      return false;
+    }
+    this.lockedBalance += amount;
+    // Invariant: freeBalance >= 0 always
+    if (this.getFreeBalance() < 0) {
+      this.lockedBalance -= amount; // Rollback
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Release reserved funds and update total balance with net proceeds
+   * proceeds = investedAmount * multiplier - exitFees
+   * reservedAmount = amount that was locked
+   */
+  release(reservedAmount: number, proceeds: number): void {
+    if (reservedAmount < 0 || this.lockedBalance < reservedAmount) {
+      // Invalid state - log but don't crash
+      console.error(`⚠️ Invalid release: reservedAmount=${reservedAmount}, lockedBalance=${this.lockedBalance}`);
+      return;
+    }
+    
+    // Release the locked amount
+    this.lockedBalance -= reservedAmount;
+    
+    // Update total balance: add net profit/loss
+    // netChange = proceeds - reservedAmount
+    // This correctly accounts for: we locked reservedAmount, got back proceeds
+    const netChange = proceeds - reservedAmount;
+    this.totalBalance += netChange;
+    
+    // Update peak
+    if (this.totalBalance > this.peakBalance) {
+      this.peakBalance = this.totalBalance;
+    }
+    
+    // Invariants
+    if (this.lockedBalance < 0) {
+      this.lockedBalance = 0;
+    }
+    if (this.totalBalance < 0) {
+      this.totalBalance = 0;
+    }
+  }
+
+  /**
+   * Get position size based on current free balance
+   */
+  getPositionSize(maxPositions: number, minPositionSize: number = 0.001): number {
+    const free = this.getFreeBalance();
+    if (free <= 0) {
+      return minPositionSize;
+    }
+    return Math.max(free / maxPositions, minPositionSize);
+  }
+}
+
 export class PositionManager {
   private positions = new Map<string, Position>();
   private connection: Connection;
   private filters: TokenFilters;
-  private currentDeposit: number;
-  private peakDeposit: number;
-  private positionSize: number; // Размер позиции = currentDeposit / MAX_POSITIONS
+  private account: Account; // Single source of truth for balance
 
   constructor(connection: Connection, initialDeposit: number) {
     this.connection = connection;
     this.filters = new TokenFilters(connection);
-    this.currentDeposit = initialDeposit;
-    this.peakDeposit = initialDeposit;
-    this.positionSize = initialDeposit / MAX_POSITIONS;
+    this.account = new Account(initialDeposit);
 
     // Централизованное обновление цен каждые 2 секунды
     setInterval(() => this.updateAllPrices(), CHECK_INTERVAL);
@@ -40,24 +131,51 @@ export class PositionManager {
     // 0. Фильтр: исключаем SOL токен
     const SOL_MINT = 'So11111111111111111111111111111111111111112';
     if (candidate.mint === SOL_MINT) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `Skipped SOL token (not a pump.fun token)`,
+      });
       return false;
     }
 
     // 1. Проверка: есть ли свободные слоты?
     if (this.positions.size >= MAX_POSITIONS) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `No free slots (${this.positions.size}/${MAX_POSITIONS})`,
+      });
       return false;
     }
 
     // 2. Проверка: достаточно ли средств для открытия позиции?
-    const requiredAmount = this.positionSize;
-    if (this.currentDeposit < requiredAmount) {
+    const positionSize = this.account.getPositionSize(MAX_POSITIONS);
+    const requiredAmount = positionSize;
+    if (this.account.getFreeBalance() < requiredAmount) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `Insufficient balance: ${this.account.getFreeBalance().toFixed(6)} SOL < ${requiredAmount.toFixed(6)} SOL`,
+      });
       return false;
     }
 
     // 3. Быстрая проверка безопасности (ТОЛЬКО критичное!)
+    const securityCheckStart = Date.now();
     const passed = await quickSecurityCheck(candidate);
+    const securityCheckDuration = Date.now() - securityCheckStart;
 
     if (!passed) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `Security check failed (${securityCheckDuration}ms)`,
+      });
       return false;
     }
 
@@ -68,8 +186,21 @@ export class PositionManager {
       // 5. Запускаем параллельный мониторинг (НЕ await!)
       void this.monitorPosition(position);
       
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `Position opened successfully (security check: ${securityCheckDuration}ms)`,
+      });
+      
       return true;
     } catch (error) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: candidate.mint,
+        message: `Error opening position: ${error instanceof Error ? error.message : String(error)}`,
+      });
       return false;
     }
   }
@@ -87,12 +218,25 @@ export class PositionManager {
       throw new Error(`Invalid entry price: ${entryPrice}`);
     }
 
-    // Рассчитываем инвестиции с учетом комиссий
-    const fees = config.priorityFee + config.signatureFee;
-    const invested = this.positionSize - fees;
+    // Получаем размер позиции из Account
+    const positionSize = this.account.getPositionSize(MAX_POSITIONS);
+    
+    // Рассчитываем комиссии
+    const entryFees = config.priorityFee + config.signatureFee;
+    const investedAmount = positionSize - entryFees;
 
-    if (invested <= 0) {
-      throw new Error(`Insufficient funds after fees: ${invested}`);
+    if (investedAmount <= 0) {
+      throw new Error(`Insufficient funds after fees: ${investedAmount}`);
+    }
+
+    // Защита от некорректных значений
+    if (investedAmount > 1.0 || positionSize > 1.0) {
+      throw new Error(`Invalid amounts: positionSize=${positionSize}, investedAmount=${investedAmount}`);
+    }
+
+    // Резервируем средства через Account
+    if (!this.account.reserve(positionSize)) {
+      throw new Error(`Failed to reserve ${positionSize} SOL (insufficient free balance)`);
     }
 
     // Рассчитываем slippage
@@ -100,35 +244,31 @@ export class PositionManager {
     const actualEntryPrice = entryPrice * (1 + slippage);
 
     // Создаем позицию
+    // Position stores: reservedAmount (positionSize) and investedAmount (after fees)
     const position: Position = {
       token: candidate.mint,
       entryPrice: actualEntryPrice,
-      investedSol: invested,
-      investedUsd: formatUsd(invested),
+      investedSol: investedAmount, // Amount actually invested (after entry fees)
+      investedUsd: formatUsd(investedAmount),
       entryTime: Date.now(),
       peakPrice: actualEntryPrice,
       currentPrice: actualEntryPrice,
       status: 'active',
       errorCount: 0,
+      // Store reservedAmount for proper accounting on close
+      reservedAmount: positionSize,
     };
 
     this.positions.set(candidate.mint, position);
-
-    // В симуляции вычитаем только invested (средства вложены в позицию)
-    // При закрытии добавим grossProfit (возврат + прибыль/убыток)
-    this.currentDeposit -= invested;
-    if (this.currentDeposit < 0) {
-      this.currentDeposit = 0;
-    }
 
     // Логируем покупку
     logger.log({
       timestamp: getCurrentTimestamp(),
       type: 'buy',
       token: candidate.mint,
-      investedSol: invested,
+      investedSol: investedAmount,
       entryPrice: actualEntryPrice,
-      message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${invested.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)}`,
+      message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)}`,
     });
 
 
@@ -199,28 +339,46 @@ export class PositionManager {
       // Симуляция продажи
       const exitFee = config.priorityFee + config.signatureFee;
       const multiplier = exitPrice / position.entryPrice;
-      const grossProfit = position.investedSol * multiplier;
-      const profit = grossProfit - exitFee;
-
-
-      // Обновляем депозит (симуляция)
-      // При открытии мы вычли invested, теперь добавляем grossProfit
-      // Результат: currentDeposit += (grossProfit - invested) = прибыль/убыток
-      this.currentDeposit += grossProfit;
-      if (this.currentDeposit > this.peakDeposit) {
-        this.peakDeposit = this.currentDeposit;
+      const investedAmount = position.investedSol; // Amount actually invested (after entry fees)
+      const reservedAmount = position.reservedAmount || investedAmount; // Amount that was locked
+      
+      // Защита от некорректных значений multiplier
+      let safeMultiplier = multiplier;
+      if (multiplier > 100 || multiplier < 0 || !isFinite(multiplier)) {
+        console.error(`⚠️ Invalid multiplier: ${multiplier}, using 1.0`);
+        safeMultiplier = 1.0;
       }
-      if (this.currentDeposit < 0) {
-        this.currentDeposit = 0; // Защита от отрицательного депозита
+      
+      // Защита от некорректных значений investedAmount
+      let safeInvested = investedAmount;
+      if (investedAmount > 1.0 || investedAmount < 0 || !isFinite(investedAmount)) {
+        console.error(`⚠️ Invalid investedAmount: ${investedAmount}, using fallback`);
+        safeInvested = 0.003;
       }
-
+      
+      // Calculate proceeds: investedAmount * multiplier - exitFees
+      let proceeds = safeInvested * safeMultiplier - exitFee;
+      
+      // Cap proceeds at reasonable maximum (10x invested)
+      if (proceeds > safeInvested * 10) {
+        proceeds = safeInvested * 10 - exitFee;
+      }
+      
+      // Ensure proceeds >= 0
+      if (proceeds < 0) {
+        proceeds = 0;
+      }
+      
+      // Release funds and update balance via Account
+      // This is the ONLY place where totalBalance changes
+      this.account.release(reservedAmount, proceeds);
+      
+      // Calculate profit for logging
+      const profit = proceeds - reservedAmount;
+      
       // Удаляем из активных
       this.positions.delete(position.token);
       position.status = 'closed';
-
-      // Обновляем размер позиции (compound) - но не меньше минимального
-      const minPositionSize = 0.001; // Минимальный размер позиции
-      this.positionSize = Math.max(this.currentDeposit / MAX_POSITIONS, minPositionSize);
 
       // Логируем
       logger.log({
@@ -281,17 +439,16 @@ export class PositionManager {
    * Получает статистику активных позиций
    */
   getStats(): PositionStats {
-    const positions = Array.from(this.positions.values())
-      .filter(p => p.status === 'active')
-      .map(p => ({
-        token: p.token.slice(0, 8) + '...',
-        multiplier: p.currentPrice ? (p.currentPrice / p.entryPrice).toFixed(2) + 'x' : '1.00x',
-        age: `${Math.floor((Date.now() - p.entryTime) / 1000)}s`,
-      }));
+    const activePositions = Array.from(this.positions.values()).filter(p => p.status === 'active');
+    const positions = activePositions.map(p => ({
+      token: p.token.slice(0, 8) + '...',
+      multiplier: p.currentPrice ? (p.currentPrice / p.entryPrice).toFixed(2) + 'x' : '1.00x',
+      age: `${Math.floor((Date.now() - p.entryTime) / 1000)}s`,
+    }));
 
     return {
-      activePositions: this.positions.size,
-      availableSlots: MAX_POSITIONS - this.positions.size,
+      activePositions: activePositions.length,
+      availableSlots: MAX_POSITIONS - activePositions.length,
       positions,
     };
   }
@@ -300,14 +457,14 @@ export class PositionManager {
    * Получает текущий депозит
    */
   getCurrentDeposit(): number {
-    return this.currentDeposit;
+    return this.account.getTotalBalance();
   }
 
   /**
    * Получает пиковый депозит
    */
   getPeakDeposit(): number {
-    return this.peakDeposit;
+    return this.account.getPeakBalance();
   }
 
   /**
