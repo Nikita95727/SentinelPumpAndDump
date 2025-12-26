@@ -79,6 +79,7 @@ export interface Config {
   rpcRequestDelay: number;
   filterCheckDelay: number;
   rateLimitRetryDelay: number;
+  notificationProcessDelay: number;
   heliusWsUrl: string;
   heliusHttpUrl: string;
   redisHost?: string;

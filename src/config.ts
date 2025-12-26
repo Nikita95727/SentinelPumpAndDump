@@ -21,11 +21,12 @@ export const config: Config = {
   slippageMin: 0.01,
   slippageMax: 0.03,
   // Rate limiting: Helius free tier ~100-200 req/sec
-  // Безопасная задержка: 50-100ms между запросами (10-20 req/sec)
-  // Это оставляет запас для других операций
-  rpcRequestDelay: parseInt(process.env.RPC_REQUEST_DELAY || '80', 10), // ms между RPC запросами
-  filterCheckDelay: parseInt(process.env.FILTER_CHECK_DELAY || '100', 10), // ms между проверками фильтров
-  rateLimitRetryDelay: parseInt(process.env.RATE_LIMIT_RETRY_DELAY || '1000', 10), // ms при 429 ошибке
+  // Увеличенные задержки для стабильной работы в пределах лимитов
+  // ~3-5 req/sec для безопасной работы с запасом
+  rpcRequestDelay: parseInt(process.env.RPC_REQUEST_DELAY || '250', 10), // ms между RPC запросами (было 80)
+  filterCheckDelay: parseInt(process.env.FILTER_CHECK_DELAY || '200', 10), // ms между проверками фильтров (было 100)
+  rateLimitRetryDelay: parseInt(process.env.RATE_LIMIT_RETRY_DELAY || '2000', 10), // ms при 429 ошибке (было 1000)
+  notificationProcessDelay: parseInt(process.env.NOTIFICATION_PROCESS_DELAY || '500', 10), // ms между обработкой уведомлений
   heliusWsUrl: process.env.HELIUS_WS_URL || '',
   heliusHttpUrl: process.env.HELIUS_HTTP_URL || process.env.HELIUS_WS_URL?.replace('wss://', 'https://').replace('ws://', 'http://') || '',
   redisHost: process.env.REDIS_HOST,

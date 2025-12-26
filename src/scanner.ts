@@ -155,8 +155,8 @@ export class TokenScanner {
   private async processLogNotification(notification: any): Promise<void> {
     try {
       // Задержка перед обработкой уведомления для соблюдения rate limit
-      // Это предотвращает обработку слишком большого количества токенов одновременно
-      await sleep(200); // 200ms между обработкой уведомлений = ~5 токенов/сек
+      // Увеличена для стабильной работы в пределах лимитов
+      await sleep(config.notificationProcessDelay);
       
       const signature = notification.result.value.signature;
       const logs = notification.result.value.logs || [];
@@ -172,7 +172,7 @@ export class TokenScanner {
       if (createTokenLogs.length > 0) {
         // Получаем детали транзакции для извлечения mint адреса
         // Добавляем дополнительную задержку перед запросом транзакции
-        await sleep(100);
+        await sleep(config.rpcRequestDelay);
         
         const tx = await this.connection.getTransaction(signature, {
           commitment: 'confirmed',
@@ -195,9 +195,9 @@ export class TokenScanner {
         }
       }
     } catch (error: any) {
-      // Обработка rate limiting
+      // Обработка rate limiting с увеличенной задержкой
       if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
-        await sleep(2000); // Увеличиваем задержку при rate limit
+        await sleep(config.rateLimitRetryDelay * 2); // Удваиваем задержку при rate limit
       }
       console.error('Error processing log notification:', error);
     }
