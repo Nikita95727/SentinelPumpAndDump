@@ -14,6 +14,7 @@ export class TradingSimulator {
   private batchCounter = 0;
   private openPositions: Map<string, Position> = new Map();
   private isPaused = false;
+  public scanner: any = null; // Ссылка на scanner для удаления из processingTokens (public для доступа из index.ts)
 
   constructor(connection: Connection) {
     this.connection = connection;
@@ -138,7 +139,7 @@ export class TradingSimulator {
       return false;
     }
 
-    // Проверяем, не заполнен ли батч
+    // Проверяем, не заполнен ли батч (ПЕРЕД применением фильтров, чтобы не тратить время)
     if (this.currentBatch.candidates.length >= config.batchSize) {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -147,10 +148,14 @@ export class TradingSimulator {
         batchId: this.currentBatch.id,
         message: `Batch #${this.currentBatch.id} is full (${this.currentBatch.candidates.length}/${config.batchSize}), rejecting: ${candidate.mint.substring(0, 8)}...`,
       });
+      // Убираем из отслеживания если батч заполнен
+      if (this.scanner && this.scanner.removeFromProcessing) {
+        this.scanner.removeFromProcessing(candidate.mint);
+      }
       return false;
     }
 
-    // Проверяем, не добавлен ли уже этот токен
+    // Проверяем, не добавлен ли уже этот токен в батч
     if (this.currentBatch.candidates.some(c => c.mint === candidate.mint)) {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -162,16 +167,81 @@ export class TradingSimulator {
       return false;
     }
 
+    // Проверяем, не открыта ли уже позиция по этому токену
+    if (this.openPositions.has(candidate.mint)) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        batchId: this.currentBatch.id,
+        message: `Position already open for token, rejecting duplicate: ${candidate.mint.substring(0, 8)}...`,
+      });
+      return false;
+    }
+
+    // Фильтр: исключаем SOL токен (So11111111111111111111111111111111111111112)
+    // Это не pump.fun токен, его нельзя торговать через pump.fun
+    const SOL_MINT = 'So11111111111111111111111111111111111111112';
+    if (candidate.mint === SOL_MINT) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'token_rejected',
+        token: candidate.mint,
+        batchId: this.currentBatch.id,
+        message: `Token rejected: SOL token (${candidate.mint.substring(0, 8)}...) is not a pump.fun token`,
+      });
+      // Убираем из отслеживания в scanner
+      if (this.scanner && this.scanner.removeFromProcessing) {
+        this.scanner.removeFromProcessing(candidate.mint);
+      }
+      return false;
+    }
+
+    const age = (Date.now() - candidate.createdAt) / 1000;
+    const isQueue1 = age >= config.queue1MinDelaySeconds && age <= config.queue1MaxDelaySeconds;
+    const isQueue2 = age >= config.queue2MinDelaySeconds && age <= config.queue2MaxDelaySeconds;
+    const isQueue3 = age >= config.minDelaySeconds && age <= config.maxDelaySeconds;
+    
+    const queueName = isQueue1 ? 'queue1 (0-5s)' : isQueue2 ? 'queue2 (5-15s)' : isQueue3 ? 'queue3 (10-30s)' : 'unknown';
+    
     logger.log({
       timestamp: getCurrentTimestamp(),
       type: 'info',
       token: candidate.mint,
       batchId: this.currentBatch.id,
-      message: `Candidate received for batch #${this.currentBatch.id}: ${candidate.mint.substring(0, 8)}..., age: ${((Date.now() - candidate.createdAt) / 1000).toFixed(1)}s, starting filters...`,
+      message: `Candidate received for batch #${this.currentBatch.id}: ${candidate.mint.substring(0, 8)}..., age: ${age.toFixed(1)}s, queue: ${queueName}, starting filters...`,
     });
 
-    // Применяем фильтры
-    const passed = await this.filters.filterCandidate(candidate);
+    // Применяем фильтры в зависимости от очереди
+    let passed = false;
+    if (isQueue1) {
+      // Очередь 1: минимальные проверки, но защита от скама/honeypot
+      passed = await this.filters.filterQueue1Candidate(candidate);
+      if (passed) {
+        // Помечаем как рискованный токен - должен продаваться на 2.5x гарантированно
+        candidate.isRisky = true;
+      }
+    } else if (isQueue2) {
+      // Очередь 2: средние проверки
+      passed = await this.filters.filterQueue2Candidate(candidate);
+      if (passed) {
+        // Помечаем как рискованный токен - должен продаваться на 2.5x гарантированно
+        candidate.isRisky = true;
+      }
+    } else if (isQueue3) {
+      // Очередь 3: полные проверки
+      passed = await this.filters.filterCandidate(candidate);
+    } else {
+      // Токен вне всех очередей - отклоняем
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'token_rejected',
+        token: candidate.mint,
+        batchId: this.currentBatch?.id,
+        message: `Token age ${age.toFixed(1)}s outside all queues, rejecting`,
+      });
+      return false;
+    }
     if (!passed) {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -180,6 +250,10 @@ export class TradingSimulator {
         batchId: this.currentBatch?.id,
         message: `Token rejected by filters: ${candidate.mint.substring(0, 8)}...`,
       });
+      // Токен не прошел фильтры - убираем из отслеживания в scanner
+      if (this.scanner && this.scanner.removeFromProcessing) {
+        this.scanner.removeFromProcessing(candidate.mint);
+      }
       return false;
     }
 
@@ -254,12 +328,14 @@ export class TradingSimulator {
 
     const openStartTime = Date.now();
     try {
+      const isRisky = candidate.isRisky || false;
+      
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: candidate.mint,
         batchId: this.currentBatch.id,
-        message: `Opening position: ${candidate.mint.substring(0, 8)}..., position size: ${positionSize.toFixed(6)} SOL`,
+        message: `Opening position: ${candidate.mint.substring(0, 8)}..., position size: ${positionSize.toFixed(6)} SOL, risky: ${isRisky}`,
       });
 
       // Получаем цену входа
@@ -296,10 +372,11 @@ export class TradingSimulator {
         type: 'info',
         token: candidate.mint,
         batchId: this.currentBatch.id,
-        message: `Position calculated: invested=${invested.toFixed(6)} SOL, slippage=${(slippage * 100).toFixed(2)}%, entry price=${actualEntryPrice.toFixed(8)}`,
+        message: `Position calculated: invested=${invested.toFixed(6)} SOL, slippage=${(slippage * 100).toFixed(2)}%, entry price=${actualEntryPrice.toFixed(8)}, risky: ${isRisky}`,
       });
 
       // Создаем позицию
+      // Для рискованных токенов (очереди 1-2) - ГАРАНТИРОВАННЫЙ выход на 2.5x
       const position: Position = {
         token: candidate.mint,
         batchId: this.currentBatch.id,
@@ -308,7 +385,7 @@ export class TradingSimulator {
         investedUsd: formatUsd(invested),
         entryTime: Date.now(),
         localHigh: actualEntryPrice,
-        takeProfitTarget: actualEntryPrice * config.takeProfitMultiplier,
+        takeProfitTarget: actualEntryPrice * config.takeProfitMultiplier, // 2.5x для всех
         stopLossTarget: actualEntryPrice * (1 - config.trailingStopPct / 100),
         exitTimer: Date.now() + config.exitTimerSeconds * 1000,
         slippage: slippage,
@@ -327,7 +404,7 @@ export class TradingSimulator {
         token: candidate.mint,
         investedSol: invested,
         entryPrice: actualEntryPrice,
-        message: `Position opened: ${candidate.mint.substring(0, 8)}..., total duration: ${openDuration}ms`,
+        message: `Position opened: ${candidate.mint.substring(0, 8)}..., risky: ${isRisky}, MUST sell at 2.5x, total duration: ${openDuration}ms`,
       });
     } catch (error: any) {
       const openDuration = Date.now() - openStartTime;

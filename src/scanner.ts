@@ -14,15 +14,28 @@ export class TokenScanner {
   private reconnectDelay = 5000;
   private isShuttingDown = false;
   private onNewTokenCallback: (candidate: TokenCandidate) => void;
-  private notificationQueue: any[] = [];
+  private notificationQueue: any[] = []; // Основная очередь (10-30 сек)
+  private queue1: TokenCandidate[] = []; // Очередь 1: 0-5 сек (самый ранний вход)
+  private queue2: TokenCandidate[] = []; // Очередь 2: 5-15 сек (ранний вход)
   private isProcessingQueue = false;
+  private isProcessingQueue1 = false;
+  private isProcessingQueue2 = false;
   private notificationSkipCounter = 0; // Пропускаем часть уведомлений
+  private processingTokens = new Set<string>(); // Токены, которые уже обрабатываются в очередях
 
   constructor(onNewToken: (candidate: TokenCandidate) => void) {
     this.onNewTokenCallback = onNewToken;
     this.connection = new Connection(config.heliusHttpUrl, {
       commitment: 'confirmed',
     });
+  }
+
+  /**
+   * Удаляет токен из отслеживания обработки
+   * Вызывается из симулятора после завершения обработки токена
+   */
+  removeFromProcessing(mint: string): void {
+    this.processingTokens.delete(mint);
   }
 
   async start(): Promise<void> {
@@ -179,26 +192,34 @@ export class TokenScanner {
       // Обработка уведомлений о логах
       if (message.method === 'logsNotification' && message.params) {
         const notification = message.params;
-        // Пропускаем каждое 3-е уведомление для снижения нагрузки
-        this.notificationSkipCounter++;
-        const skipped = this.notificationSkipCounter % 3 === 0;
         
-        if (skipped) {
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            message: `Notification skipped (every 3rd), queue size: ${this.notificationQueue.length}`,
-          });
-          return; // Пропускаем это уведомление
+        // СТРОГАЯ ФИЛЬТРАЦИЯ: проверяем наличие событий создания токена ДО добавления в очередь
+        // Откидываем все остальные уведомления сразу
+        const logs = notification.result?.value?.logs || [];
+        
+        // Более точная проверка на создание токена
+        // Ищем специфичные паттерны создания токена в pump.fun
+        const hasTokenCreation = logs.some((log: string) => {
+          const lowerLog = log.toLowerCase();
+          // Проверяем на специфичные паттерны создания токена
+          return (
+            lowerLog.includes('instruction: initialize') ||
+            lowerLog.includes('instruction:create') ||
+            (lowerLog.includes('initialize') && lowerLog.includes('token')) ||
+            (lowerLog.includes('create') && (lowerLog.includes('token') || lowerLog.includes('mint'))) ||
+            (lowerLog.includes('mint') && lowerLog.includes('authority'))
+          );
+        });
+        
+        // Если НЕ создание токена - откидываем сразу, не добавляя в очередь
+        if (!hasTokenCreation) {
+          return; // Просто откидываем, не логируем
         }
         
-        // Добавляем в очередь вместо немедленной обработки
+        // Добавляем в очередь ТОЛЬКО уведомления о создании токенов
         this.notificationQueue.push(notification);
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          message: `Notification added to queue, queue size: ${this.notificationQueue.length}`,
-        });
+        
+        // Запускаем обработку очереди (если еще не запущена)
         this.processQueue();
       }
     } catch (error) {
@@ -207,7 +228,7 @@ export class TokenScanner {
   }
 
   private async processQueue(): Promise<void> {
-    // Обрабатываем очередь последовательно, по одному уведомлению
+    // Обрабатываем очередь параллельно (до 3 одновременных обработчиков)
     if (this.isProcessingQueue || this.notificationQueue.length === 0) {
       return;
     }
@@ -216,40 +237,76 @@ export class TokenScanner {
     const queueStartTime = Date.now();
     const initialQueueSize = this.notificationQueue.length;
 
-    logger.log({
-      timestamp: getCurrentTimestamp(),
-      type: 'info',
-      message: `Starting queue processing, queue size: ${initialQueueSize}`,
-    });
+    // Логируем только если очередь большая или при старте
+    if (initialQueueSize > 100 || initialQueueSize % 1000 === 0) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `Processing queue, size: ${initialQueueSize}`,
+      });
+    }
 
+    // Параллельная обработка: до 3 уведомлений одновременно
+    const maxConcurrent = 3;
+    const processingPromises: Promise<void>[] = [];
     let processedCount = 0;
+
     while (this.notificationQueue.length > 0 && !this.isShuttingDown) {
-      const notification = this.notificationQueue.shift();
-      if (notification) {
-        const processStartTime = Date.now();
-        await this.processLogNotification(notification);
-        const processDuration = Date.now() - processStartTime;
-        processedCount++;
-        
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          message: `Notification processed in ${processDuration}ms, remaining in queue: ${this.notificationQueue.length}`,
-        });
-        
-        // Задержка между обработкой уведомлений из очереди
-        await sleep(config.notificationProcessDelay);
+      // Запускаем до maxConcurrent параллельных обработчиков
+      while (processingPromises.length < maxConcurrent && this.notificationQueue.length > 0) {
+        const notification = this.notificationQueue.shift();
+        if (notification) {
+          const promise = this.processLogNotification(notification)
+            .then(() => {
+              processedCount++;
+            })
+            .catch((error) => {
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'error',
+                message: `Error processing notification: ${error?.message || String(error)}`,
+              });
+            });
+          processingPromises.push(promise);
+        }
+      }
+
+      // Ждем завершения хотя бы одного обработчика перед запуском следующего
+      if (processingPromises.length >= maxConcurrent) {
+        await Promise.race(processingPromises);
+        // Удаляем завершенные промисы
+        for (let i = processingPromises.length - 1; i >= 0; i--) {
+          const promise = processingPromises[i];
+          // Проверяем, завершен ли промис (упрощенная проверка)
+          try {
+            await Promise.race([promise, Promise.resolve()]);
+            processingPromises.splice(i, 1);
+          } catch {
+            // Промис еще выполняется
+          }
+        }
+      }
+
+      // Небольшая задержка для предотвращения перегрузки (только если очередь большая)
+      if (this.notificationQueue.length > 100) {
+        await sleep(50); // Задержка только при большой очереди
       }
     }
+
+    // Ждем завершения всех оставшихся обработчиков
+    await Promise.all(processingPromises);
 
     const totalDuration = Date.now() - queueStartTime;
     this.isProcessingQueue = false;
 
-    logger.log({
-      timestamp: getCurrentTimestamp(),
-      type: 'info',
-      message: `Queue processing completed: ${processedCount} notifications in ${totalDuration}ms, avg ${processedCount > 0 ? (totalDuration / processedCount).toFixed(0) : 0}ms per notification`,
-    });
+    // Логируем только если обработано много или при завершении большой очереди
+    if (processedCount > 0 && (processedCount > 10 || totalDuration > 1000)) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `Queue processed: ${processedCount} notifications in ${totalDuration}ms, avg ${(totalDuration / processedCount).toFixed(0)}ms, remaining: ${this.notificationQueue.length}`,
+      });
+    }
   }
 
   private async processLogNotification(notification: any): Promise<void> {
@@ -258,118 +315,115 @@ export class TokenScanner {
       const signature = notification.result.value.signature;
       const logs = notification.result.value.logs || [];
 
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        message: `Processing notification: signature=${signature.substring(0, 8)}..., logs count=${logs.length}`,
+      // Уже проверили наличие событий создания токена до добавления в очередь
+      // Но проверяем еще раз для надежности (более строгая проверка)
+      const hasTokenCreation = logs.some((log: string) => {
+        const lowerLog = log.toLowerCase();
+        return (
+          lowerLog.includes('instruction: initialize') ||
+          lowerLog.includes('instruction:create') ||
+          (lowerLog.includes('initialize') && lowerLog.includes('token')) ||
+          (lowerLog.includes('create') && (lowerLog.includes('token') || lowerLog.includes('mint'))) ||
+          (lowerLog.includes('mint') && lowerLog.includes('authority'))
+        );
       });
 
-      // Задержка перед обработкой уведомления для соблюдения rate limit
-      await sleep(config.notificationProcessDelay);
+      if (!hasTokenCreation) {
+        // Не создание токена - пропускаем
+        return;
+      }
+
+      // Минимальная задержка перед RPC запросом для соблюдения rate limit
+      await sleep(config.rpcRequestDelay);
       
-      // Ищем события создания токена
-      // pump.fun использует специфичные логи для создания токена
-      const createTokenLogs = logs.filter((log: string) => 
-        log.includes('initialize') || 
-        log.includes('Create') ||
-        log.includes('mint')
-      );
+      const rpcStartTime = Date.now();
+      try {
+        const tx = await this.connection.getTransaction(signature, {
+          commitment: 'confirmed',
+          maxSupportedTransactionVersion: 0,
+        });
 
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        message: `Token creation logs found: ${createTokenLogs.length > 0}, signature=${signature.substring(0, 8)}...`,
-      });
+        if (!tx) {
+          // Транзакция не найдена - не логируем для скорости
+          return;
+        }
 
-      if (createTokenLogs.length > 0) {
-        // Получаем детали транзакции для извлечения mint адреса
-        // Добавляем дополнительную задержку перед запросом транзакции
-        await sleep(config.rpcRequestDelay);
+        // Ищем mint адрес в инструкциях
+        const mintAddress = this.extractMintFromTransaction(tx);
         
-        const rpcStartTime = Date.now();
-        try {
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            message: `Requesting transaction: ${signature.substring(0, 8)}...`,
-          });
+        if (mintAddress) {
+          // Используем время транзакции как время создания токена (более точно)
+          const txTime = tx.blockTime ? tx.blockTime * 1000 : Date.now();
+          const candidate: TokenCandidate = {
+            mint: mintAddress,
+            createdAt: txTime,
+            signature: signature,
+          };
 
-          const tx = await this.connection.getTransaction(signature, {
-            commitment: 'confirmed',
-            maxSupportedTransactionVersion: 0,
-          });
+          const totalDuration = Date.now() - processStartTime;
+          const age = (Date.now() - candidate.createdAt) / 1000;
 
-          const rpcDuration = Date.now() - rpcStartTime;
+          // Определяем в какую очередь отправить токен (три очереди)
+          const isQueue1 = age >= config.queue1MinDelaySeconds && age <= config.queue1MaxDelaySeconds;
+          const isQueue2 = age >= config.queue2MinDelaySeconds && age <= config.queue2MaxDelaySeconds;
+          const isQueue3 = age >= config.minDelaySeconds && age <= config.maxDelaySeconds;
 
-          if (!tx) {
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'warning',
-              message: `Transaction not found: ${signature.substring(0, 8)}..., RPC duration: ${rpcDuration}ms`,
-            });
-            return;
-          }
-
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            message: `Transaction received: ${signature.substring(0, 8)}..., RPC duration: ${rpcDuration}ms`,
-          });
-
-          // Ищем mint адрес в инструкциях
-          const mintAddress = this.extractMintFromTransaction(tx);
-          
-          if (mintAddress) {
-            const candidate: TokenCandidate = {
-              mint: mintAddress,
-              createdAt: Date.now(),
-              signature: signature,
-            };
-
-            const totalDuration = Date.now() - processStartTime;
-
-            // Логируем получение нового токена
+          if (isQueue1) {
+            // Очередь 1: 0-5 сек (самый ранний вход) - рискованные токены
+            candidate.isRisky = true; // Помечаем как рискованный
+            this.queue1.push(candidate);
             logger.log({
               timestamp: getCurrentTimestamp(),
               type: 'token_received',
               token: mintAddress,
-              message: `New token detected: ${mintAddress.substring(0, 8)}..., processing time: ${totalDuration}ms`,
+              message: `New token detected (queue 1, 0-5s, RISKY): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, processing time: ${totalDuration}ms`,
             });
-
-            this.onNewTokenCallback(candidate);
-          } else {
+            this.processQueue1();
+          } else if (isQueue2) {
+            // Очередь 2: 5-15 сек (ранний вход) - рискованные токены
+            candidate.isRisky = true; // Помечаем как рискованный
+            this.queue2.push(candidate);
             logger.log({
               timestamp: getCurrentTimestamp(),
-              type: 'warning',
-              message: `Mint address not found in transaction: ${signature.substring(0, 8)}...`,
+              type: 'token_received',
+              token: mintAddress,
+              message: `New token detected (queue 2, 5-15s, RISKY): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, processing time: ${totalDuration}ms`,
             });
-          }
-        } catch (error: any) {
-          const rpcDuration = Date.now() - rpcStartTime;
-          // Если получили 429 - просто пропускаем это уведомление, не обрабатываем
-          if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
+            this.processQueue2();
+          } else if (isQueue3) {
+            // Очередь 3: 10-30 сек (стандартный вход)
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'token_received',
+              token: mintAddress,
+              message: `New token detected (queue 3, 10-30s): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, processing time: ${totalDuration}ms`,
+            });
+            this.onNewTokenCallback(candidate);
+          } else {
+            // Токен вне диапазонов - логируем но не обрабатываем
             logger.log({
               timestamp: getCurrentTimestamp(),
               type: 'info',
-              message: `Rate limited, skipping transaction: ${signature.substring(0, 8)}..., RPC duration: ${rpcDuration}ms`,
+              token: mintAddress,
+              message: `Token age ${age.toFixed(1)}s outside all queues (0-5s, 5-15s, or 10-30s), skipping`,
             });
-            return;
           }
-          // Для других ошибок логируем
+        }
+        // Mint не найден - не логируем для скорости
+      } catch (error: any) {
+        // Если получили 429 - просто пропускаем это уведомление, не обрабатываем
+        if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
+          // Не логируем rate limit для скорости
+          return;
+        }
+        // Для других ошибок логируем только важные
+        if (!error?.message?.includes('not found')) {
           logger.log({
             timestamp: getCurrentTimestamp(),
             type: 'error',
-            message: `Error getting transaction ${signature.substring(0, 8)}...: ${error?.message || String(error)}, RPC duration: ${rpcDuration}ms`,
+            message: `Error getting transaction ${signature.substring(0, 8)}...: ${error?.message || String(error)}`,
           });
-          console.error(`Error getting transaction ${signature}:`, error);
         }
-      } else {
-        const totalDuration = Date.now() - processStartTime;
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          message: `No token creation logs in notification, processing time: ${totalDuration}ms`,
-        });
       }
     } catch (error: any) {
       const totalDuration = Date.now() - processStartTime;
@@ -451,6 +505,76 @@ export class TokenScanner {
       console.error('Error extracting mint from transaction:', error);
       return null;
     }
+  }
+
+  private async processQueue1(): Promise<void> {
+    // Обрабатываем очередь 1 (0-5 сек) параллельно другим
+    if (this.isProcessingQueue1 || this.queue1.length === 0) {
+      return;
+    }
+
+    this.isProcessingQueue1 = true;
+
+    while (this.queue1.length > 0 && !this.isShuttingDown) {
+      const candidate = this.queue1.shift();
+      if (!candidate) continue;
+
+      const age = (Date.now() - candidate.createdAt) / 1000;
+      
+      // Проверяем, что токен все еще в диапазоне 0-5 секунд
+      if (age < config.queue1MinDelaySeconds || age > config.queue1MaxDelaySeconds) {
+        // Токен вышел из диапазона - убираем из обработки
+        this.processingTokens.delete(candidate.mint);
+        continue;
+      }
+
+      // Передаем токен на проверку через callback
+      // Симулятор будет применять упрощенные фильтры для очереди 1
+      this.onNewTokenCallback(candidate);
+      
+      // Убираем из обработки после передачи (если не прошел фильтры, будет удален в симуляторе)
+      // Если прошел - останется в батче и будет удален при завершении обработки
+      
+      // Небольшая задержка между обработкой токенов
+      await sleep(config.filterCheckDelay);
+    }
+
+    this.isProcessingQueue1 = false;
+  }
+
+  private async processQueue2(): Promise<void> {
+    // Обрабатываем очередь 2 (5-15 сек) параллельно другим
+    if (this.isProcessingQueue2 || this.queue2.length === 0) {
+      return;
+    }
+
+    this.isProcessingQueue2 = true;
+
+    while (this.queue2.length > 0 && !this.isShuttingDown) {
+      const candidate = this.queue2.shift();
+      if (!candidate) continue;
+
+      const age = (Date.now() - candidate.createdAt) / 1000;
+      
+      // Проверяем, что токен все еще в диапазоне 5-15 секунд
+      if (age < config.queue2MinDelaySeconds || age > config.queue2MaxDelaySeconds) {
+        // Токен вышел из диапазона - убираем из обработки
+        this.processingTokens.delete(candidate.mint);
+        continue;
+      }
+
+      // Передаем токен на проверку через callback
+      // Симулятор будет применять средние фильтры для очереди 2
+      this.onNewTokenCallback(candidate);
+      
+      // Убираем из обработки после передачи (если не прошел фильтры, будет удален в симуляторе)
+      // Если прошел - останется в батче и будет удален при завершении обработки
+      
+      // Небольшая задержка между обработкой токенов
+      await sleep(config.filterCheckDelay);
+    }
+
+    this.isProcessingQueue2 = false;
   }
 
   async stop(): Promise<void> {

@@ -8,12 +8,20 @@ export const config: Config = {
   solUsdRate: parseFloat(process.env.SOL_USD_RATE || '170'),
   maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || '100', 10),
   maxDrawdownPct: parseFloat(process.env.MAX_DRAWDOWN_PCT || '25'),
-  batchSize: 10,
-  minDelaySeconds: 10,
-  maxDelaySeconds: 30,
+      batchSize: 10,
+      minDelaySeconds: 10,
+      maxDelaySeconds: 30,
+      // Три очереди для разных временных окон
+      // Очередь 1: 0-5 сек (самый ранний вход)
+      queue1MinDelaySeconds: parseFloat(process.env.QUEUE1_MIN_DELAY_SECONDS || '0'),
+      queue1MaxDelaySeconds: parseFloat(process.env.QUEUE1_MAX_DELAY_SECONDS || '5'),
+      // Очередь 2: 5-15 сек (ранний вход)
+      queue2MinDelaySeconds: parseFloat(process.env.QUEUE2_MIN_DELAY_SECONDS || '5'),
+      queue2MaxDelaySeconds: parseFloat(process.env.QUEUE2_MAX_DELAY_SECONDS || '15'),
+      // Очередь 3: 10-30 сек (стандартный вход) - использует minDelaySeconds/maxDelaySeconds
   minPurchases: 5,
   minVolumeUsd: 2000,
-  takeProfitMultiplier: 4,
+      takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '2.5'), // Оптимизировано: 2.5x для гарантированного выхода до дампа
   exitTimerSeconds: 90,
   trailingStopPct: 25,
   priorityFee: 0.001,

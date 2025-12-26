@@ -31,6 +31,11 @@ class PumpFunSniper {
       this.scanner = new TokenScanner(async (candidate) => {
         await this.handleNewToken(candidate);
       });
+      
+      // Передаем ссылку на scanner в simulator для удаления из processingTokens
+      if (this.simulator && this.scanner) {
+        (this.simulator as any).scanner = this.scanner;
+      }
 
       await this.scanner.start();
       console.log('Token scanner started');

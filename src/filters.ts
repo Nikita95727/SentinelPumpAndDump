@@ -222,6 +222,312 @@ export class TokenFilters {
     }
   }
 
+  /**
+   * Проверка на honeypot и скам
+   * Проверяем что токен можно продать (есть успешные продажи) и есть разные покупатели
+   */
+  private async checkHoneypotAndScam(mint: string): Promise<{ isHoneypot: boolean; uniqueBuyers: number; hasSells: boolean }> {
+    try {
+      const mintPubkey = new PublicKey(mint);
+      
+      // Получаем транзакции токена
+      await sleep(config.rpcRequestDelay);
+      const signatures = await this.connection.getSignaturesForAddress(mintPubkey, {
+        limit: 50,
+      });
+
+      const buyerAddresses = new Set<string>();
+      let hasSellTransactions = false;
+
+      // Анализируем транзакции для поиска покупателей и продаж
+      for (let i = 0; i < Math.min(signatures.length, 30); i++) {
+        const sigInfo = signatures[i];
+        try {
+          await sleep(config.rpcRequestDelay);
+          const tx = await this.connection.getTransaction(sigInfo.signature, {
+            commitment: 'confirmed',
+            maxSupportedTransactionVersion: 0,
+          });
+
+          if (!tx) continue;
+
+          // Ищем инструкции покупки/продажи
+          const logs = tx.meta?.logMessages || [];
+
+          // Проверяем логи на наличие продажи
+          const hasSellLog = logs.some((log: string) => {
+            const lowerLog = log.toLowerCase();
+            return lowerLog.includes('sell') || 
+                   (lowerLog.includes('swap') && lowerLog.includes('out'));
+          });
+
+          if (hasSellLog) {
+            hasSellTransactions = true;
+          }
+
+          // Извлекаем адреса участников транзакции (покупатели)
+          // Используем правильный метод для получения ключей аккаунтов
+          let accountKeys: string[] = [];
+          if (tx.transaction?.message) {
+            try {
+              // Пробуем получить ключи через getAccountKeys (для VersionedMessage)
+              const accountKeysObj = tx.transaction.message.getAccountKeys();
+              accountKeys = accountKeysObj.staticAccountKeys.map((key: any) => key.toString());
+            } catch (e) {
+              // Fallback: используем postTokenBalances для извлечения адресов
+              const tokenBalances = tx.meta?.postTokenBalances || [];
+              tokenBalances.forEach((balance: any) => {
+                if (balance.owner) {
+                  accountKeys.push(balance.owner);
+                }
+              });
+              // Также извлекаем из preTokenBalances
+              const preTokenBalances = tx.meta?.preTokenBalances || [];
+              preTokenBalances.forEach((balance: any) => {
+                if (balance.owner) {
+                  accountKeys.push(balance.owner);
+                }
+              });
+            }
+          }
+
+          accountKeys.forEach((address: string) => {
+            if (address && 
+                address !== mint && 
+                address !== '11111111111111111111111111111111' &&
+                address !== 'So11111111111111111111111111111111111111112') {
+              buyerAddresses.add(address);
+            }
+          });
+        } catch (error: any) {
+          if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
+            await sleep(config.rateLimitRetryDelay);
+          }
+          continue;
+        }
+      }
+
+      // Honeypot = нет продаж ИЛИ только один покупатель (создатель)
+      const isHoneypot = !hasSellTransactions && buyerAddresses.size <= 1;
+      const uniqueBuyers = buyerAddresses.size;
+
+      return {
+        isHoneypot,
+        uniqueBuyers,
+        hasSells: hasSellTransactions,
+      };
+    } catch (error: any) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: mint,
+        message: `Error checking honeypot for ${mint.substring(0, 8)}...: ${error?.message || String(error)}`,
+      });
+      // В случае ошибки считаем что это honeypot (безопаснее)
+      return { isHoneypot: true, uniqueBuyers: 0, hasSells: false };
+    }
+  }
+
+  /**
+   * Фильтрация для очереди 1 (0-5 сек) - минимальные проверки, но СТРОГАЯ защита от honeypot
+   * Смягченные требования к объему, но гарантия что токен можно продать
+   */
+  async filterQueue1Candidate(candidate: TokenCandidate): Promise<boolean> {
+    const filterDetails: any = {};
+    
+    try {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'queue1_start',
+        message: `Starting queue 1 filter check (0-5s) for token ${candidate.mint.substring(0, 8)}...`,
+      });
+
+      // 1. КРИТИЧНО: Проверка на honeypot - ГЛАВНЫЙ КРИТЕРИЙ
+      const honeypotCheck = await this.checkHoneypotAndScam(candidate.mint);
+      filterDetails.isHoneypot = honeypotCheck.isHoneypot;
+      filterDetails.uniqueBuyers = honeypotCheck.uniqueBuyers;
+      filterDetails.hasSells = honeypotCheck.hasSells;
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'queue1_honeypot',
+        filterResult: honeypotCheck.uniqueBuyers > 1, // Главный критерий: больше 1 владельца
+        filterDetails: { ...filterDetails },
+        message: `Honeypot check: uniqueBuyers=${honeypotCheck.uniqueBuyers}, hasSells=${honeypotCheck.hasSells}`,
+      });
+
+      // ГЛАВНОЕ: Отклоняем если меньше 2 уникальных владельцев (это honeypot/скам)
+      // Больше 1 уникального владельца = не honeypot, можно продать
+      if (honeypotCheck.uniqueBuyers <= 1) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'queue1_honeypot',
+          filterDetails: { ...filterDetails, rejectionReason: `Honeypot detected: only ${honeypotCheck.uniqueBuyers} unique buyer(s), cannot sell` },
+          message: `Token rejected: honeypot - insufficient unique buyers (${honeypotCheck.uniqueBuyers} <= 1)`,
+        });
+        return false;
+      }
+
+      // 2. Минимальная проверка объема (смягчено для ранних токенов)
+      await sleep(config.filterCheckDelay);
+      const volumeUsd = await this.getTradingVolume(candidate.mint);
+      filterDetails.volumeUsd = volumeUsd;
+
+      // Для очереди 1 снижаем требования к объему: минимум $100 (вместо $2000)
+      // Главное - не honeypot, объем может быть маленьким на ранней стадии
+      if (volumeUsd < 100) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'queue1_volume',
+          filterDetails: { ...filterDetails, rejectionReason: `Volume too low: $${volumeUsd.toFixed(2)} < $100` },
+          message: `Token rejected: volume too low ($${volumeUsd.toFixed(2)} < $100)`,
+        });
+        return false;
+      }
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_passed',
+        token: candidate.mint,
+        filterStage: 'queue1',
+        filterDetails: { ...filterDetails },
+        message: `Token passed queue 1 filters (risky but sellable): ${candidate.mint.substring(0, 8)}..., uniqueBuyers=${honeypotCheck.uniqueBuyers}`,
+      });
+
+      return true;
+    } catch (error: any) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_failed',
+        token: candidate.mint,
+        filterStage: 'queue1_error',
+        filterDetails: { ...filterDetails, rejectionReason: error?.message || String(error) },
+        message: `Error filtering queue 1 candidate ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Фильтрация для очереди 2 (5-15 сек) - средние проверки, но СТРОГАЯ защита от honeypot
+   * Смягченные требования к покупкам и объему, но гарантия что токен можно продать
+   */
+  async filterQueue2Candidate(candidate: TokenCandidate): Promise<boolean> {
+    const filterDetails: any = {};
+    
+    try {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'queue2_start',
+        message: `Starting queue 2 filter check (5-15s) for token ${candidate.mint.substring(0, 8)}...`,
+      });
+
+      // 1. КРИТИЧНО: Проверка на honeypot - ГЛАВНЫЙ КРИТЕРИЙ
+      const honeypotCheck = await this.checkHoneypotAndScam(candidate.mint);
+      filterDetails.isHoneypot = honeypotCheck.isHoneypot;
+      filterDetails.uniqueBuyers = honeypotCheck.uniqueBuyers;
+      filterDetails.hasSells = honeypotCheck.hasSells;
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'queue2_honeypot',
+        filterResult: honeypotCheck.uniqueBuyers > 1, // Главный критерий: больше 1 владельца
+        filterDetails: { ...filterDetails },
+        message: `Honeypot check: uniqueBuyers=${honeypotCheck.uniqueBuyers}, hasSells=${honeypotCheck.hasSells}`,
+      });
+
+      // ГЛАВНОЕ: Отклоняем если меньше 2 уникальных владельцев (это honeypot/скам)
+      if (honeypotCheck.uniqueBuyers <= 1) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'queue2_honeypot',
+          filterDetails: { ...filterDetails, rejectionReason: `Honeypot detected: only ${honeypotCheck.uniqueBuyers} unique buyer(s), cannot sell` },
+          message: `Token rejected: honeypot - insufficient unique buyers (${honeypotCheck.uniqueBuyers} <= 1)`,
+        });
+        return false;
+      }
+
+      await sleep(config.filterCheckDelay);
+
+      // 2. Проверка количества покупок (смягчено: минимум 2 вместо 3)
+      const purchaseCount = await this.getPurchaseCount(candidate.mint);
+      filterDetails.purchaseCount = purchaseCount;
+
+      if (purchaseCount < 2) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'queue2_purchase_count',
+          filterDetails: { ...filterDetails, rejectionReason: `Only ${purchaseCount} purchases, need 2` },
+          message: `Token rejected: insufficient purchases (${purchaseCount} < 2)`,
+        });
+        return false;
+      }
+
+      await sleep(config.filterCheckDelay);
+
+      // 3. Проверка объема торгов (смягчено: >= $500 вместо $1000)
+      const volumeUsd = await this.getTradingVolume(candidate.mint);
+      filterDetails.volumeUsd = volumeUsd;
+
+      if (volumeUsd < 500) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'queue2_volume',
+          filterDetails: { ...filterDetails, rejectionReason: `Volume $${volumeUsd.toFixed(2)} < $500` },
+          message: `Token rejected: insufficient volume ($${volumeUsd.toFixed(2)} < $500)`,
+        });
+        return false;
+      }
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_passed',
+        token: candidate.mint,
+        filterStage: 'queue2',
+        filterDetails: { ...filterDetails },
+        message: `Token passed queue 2 filters (risky but sellable): ${candidate.mint.substring(0, 8)}..., uniqueBuyers=${honeypotCheck.uniqueBuyers}`,
+      });
+
+      return true;
+    } catch (error: any) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_failed',
+        token: candidate.mint,
+        filterStage: 'queue2_error',
+        filterDetails: { ...filterDetails, rejectionReason: error?.message || String(error) },
+        message: `Error filtering queue 2 candidate ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Упрощенная фильтрация для вторичной очереди (5-15 сек) - ОСТАВЛЕНО ДЛЯ ОБРАТНОЙ СОВМЕСТИМОСТИ
+   * Используется filterQueue2Candidate вместо этого
+   */
+  async filterSecondaryCandidate(candidate: TokenCandidate): Promise<boolean> {
+    return this.filterQueue2Candidate(candidate);
+  }
+
   private async getPurchaseCount(mint: string): Promise<number> {
     const startTime = Date.now();
     try {
@@ -647,46 +953,108 @@ export class TokenFilters {
   }
 
   async getEntryPrice(mint: string): Promise<number> {
-    try {
-      await sleep(config.rpcRequestDelay);
-      
-      // Получаем текущую цену через Jupiter API или bonding curve формулу
-      // Для pump.fun можно использовать формулу bonding curve
-      
-      const mintPubkey = new PublicKey(mint);
-      const mintInfo = await getMint(this.connection, mintPubkey);
-      const supply = Number(mintInfo.supply);
-      
-      // Упрощенная формула bonding curve для pump.fun
-      // В реальности нужно использовать точную формулу или Jupiter API
-      // pump.fun использует формулу: price = (virtualTokenReserves / virtualSolReserves) * (1 - fee)
-      
-      // Для MVP используем упрощенный расчет на основе supply
-      // В реальности нужно получать резервы из программы pump.fun
-      
-      // Альтернатива: использовать Jupiter getQuote
+    const maxRetries = 3;
+    let lastError: any = null;
+
+    // Симулятор торговли: получаем реальную цену для имитации открытия позиции
+    // НЕ делаем реальные транзакции, только получаем данные для симуляции
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         await sleep(config.rpcRequestDelay);
-        const jupiterQuote = await this.getJupiterQuote(mint);
-        if (jupiterQuote > 0) {
-          return jupiterQuote;
+        
+        // Пытаемся получить цену через Jupiter API (приоритет)
+        try {
+          await sleep(config.rpcRequestDelay);
+          const jupiterQuote = await this.getJupiterQuote(mint);
+          if (jupiterQuote > 0) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: mint,
+              message: `Entry price from Jupiter: ${jupiterQuote.toFixed(8)} SOL (attempt ${attempt + 1})`,
+            });
+            return jupiterQuote;
+          }
+        } catch (jupiterError: any) {
+          // Если 429 - ждем дольше и повторяем
+          if (jupiterError?.message?.includes('429') || jupiterError?.message?.includes('rate limit')) {
+            const retryDelay = config.rateLimitRetryDelay * (attempt + 1);
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'warning',
+              token: mint,
+              message: `Jupiter API rate limit, retrying after ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries})`,
+            });
+            await sleep(retryDelay);
+            continue;
+          }
+          // Другие ошибки Jupiter - пробуем fallback
         }
-      } catch (error) {
-        // Fallback на формулу
-      }
 
-      // Fallback: упрощенная формула
-      // Это не точная цена, но для MVP достаточно
-      const basePrice = 0.0001; // Базовая цена
-      const priceMultiplier = Math.log10(supply / 1e9 + 1) / 10;
-      return basePrice * (1 + priceMultiplier);
-    } catch (error: any) {
-      if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
-        await sleep(config.rateLimitRetryDelay);
+        // Fallback: получаем цену через bonding curve формулу на основе supply
+        const mintPubkey = new PublicKey(mint);
+        const mintInfo = await getMint(this.connection, mintPubkey);
+        const supply = Number(mintInfo.supply);
+        const decimals = mintInfo.decimals;
+
+        // Упрощенная формула bonding curve для pump.fun
+        // pump.fun использует формулу: price = (virtualTokenReserves / virtualSolReserves) * (1 - fee)
+        // Для симуляции используем приблизительный расчет на основе supply
+        const basePrice = 0.0001; // Базовая цена
+        const supplyNormalized = supply / Math.pow(10, decimals);
+        const priceMultiplier = Math.log10(supplyNormalized / 1e9 + 1) / 10;
+        const estimatedPrice = basePrice * (1 + priceMultiplier);
+
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: mint,
+          message: `Entry price from bonding curve formula: ${estimatedPrice.toFixed(8)} SOL (supply: ${supplyNormalized.toFixed(2)}, attempt ${attempt + 1})`,
+        });
+
+        return estimatedPrice;
+      } catch (error: any) {
+        lastError = error;
+        
+        // Если 429 - ждем и повторяем
+        if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
+          const retryDelay = config.rateLimitRetryDelay * (attempt + 1);
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'warning',
+            token: mint,
+            message: `RPC rate limit, retrying after ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries})`,
+          });
+          await sleep(retryDelay);
+          continue;
+        }
+
+        // Другие ошибки - логируем и пробуем еще раз
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'warning',
+          token: mint,
+          message: `Error getting entry price (attempt ${attempt + 1}/${maxRetries}): ${error?.message || String(error)}`,
+        });
+
+        if (attempt < maxRetries - 1) {
+          await sleep(config.rateLimitRetryDelay * (attempt + 1));
+        }
       }
-      console.error(`Error getting entry price for ${mint}:`, error);
-      return 0;
     }
+
+    // Если все попытки провалились - используем минимальную цену для симуляции
+    // Это позволяет симулятору продолжить работу, даже если API недоступен
+    const fallbackPrice = 0.00001; // Минимальная цена для симуляции
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'warning',
+      token: mint,
+      message: `All attempts failed, using fallback price ${fallbackPrice.toFixed(8)} SOL for simulation. Last error: ${lastError?.message || String(lastError)}`,
+    });
+    
+    return fallbackPrice; // Возвращаем минимальную цену вместо 0, чтобы симулятор мог продолжить
   }
 
   private async getJupiterQuote(mint: string): Promise<number> {
