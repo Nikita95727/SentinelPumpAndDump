@@ -14,6 +14,9 @@ export class TokenScanner {
   private reconnectDelay = 5000;
   private isShuttingDown = false;
   private onNewTokenCallback: (candidate: TokenCandidate) => void;
+  private notificationQueue: any[] = [];
+  private isProcessingQueue = false;
+  private notificationSkipCounter = 0; // Пропускаем часть уведомлений
 
   constructor(onNewToken: (candidate: TokenCandidate) => void) {
     this.onNewTokenCallback = onNewToken;
@@ -23,6 +26,11 @@ export class TokenScanner {
   }
 
   async start(): Promise<void> {
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: 'Token scanner starting...',
+    });
     await this.connect();
   }
 
@@ -50,6 +58,11 @@ export class TokenScanner {
 
       this.ws.on('open', () => {
         console.log('WebSocket connected to Helius');
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `WebSocket connected to Helius (attempt ${this.reconnectAttempts + 1})`,
+        });
         this.reconnectAttempts = 0;
         this.subscribe();
       });
@@ -72,12 +85,28 @@ export class TokenScanner {
         });
       });
 
-      this.ws.on('close', () => {
+      this.ws.on('close', (code: number, reason: Buffer) => {
         console.log('WebSocket closed');
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'warning',
+          message: `WebSocket closed: code=${code}, reason=${reason.toString()}, reconnectAttempts=${this.reconnectAttempts}`,
+        });
         if (!this.isShuttingDown && this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++;
           console.log(`Reconnecting in ${this.reconnectDelay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            message: `WebSocket reconnecting in ${this.reconnectDelay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`,
+          });
           setTimeout(() => this.connect(), this.reconnectDelay);
+        } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            message: `WebSocket max reconnection attempts (${this.maxReconnectAttempts}) reached`,
+          });
         }
       });
 
@@ -139,28 +168,105 @@ export class TokenScanner {
       if (message.id === 1 && message.result) {
         this.subscriptionId = message.result;
         console.log(`Subscription confirmed, ID: ${this.subscriptionId}`);
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `WebSocket subscription confirmed, ID: ${this.subscriptionId}`,
+        });
         return;
       }
 
       // Обработка уведомлений о логах
       if (message.method === 'logsNotification' && message.params) {
         const notification = message.params;
-        await this.processLogNotification(notification);
+        // Пропускаем каждое 3-е уведомление для снижения нагрузки
+        this.notificationSkipCounter++;
+        const skipped = this.notificationSkipCounter % 3 === 0;
+        
+        if (skipped) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            message: `Notification skipped (every 3rd), queue size: ${this.notificationQueue.length}`,
+          });
+          return; // Пропускаем это уведомление
+        }
+        
+        // Добавляем в очередь вместо немедленной обработки
+        this.notificationQueue.push(notification);
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `Notification added to queue, queue size: ${this.notificationQueue.length}`,
+        });
+        this.processQueue();
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
     }
   }
 
+  private async processQueue(): Promise<void> {
+    // Обрабатываем очередь последовательно, по одному уведомлению
+    if (this.isProcessingQueue || this.notificationQueue.length === 0) {
+      return;
+    }
+
+    this.isProcessingQueue = true;
+    const queueStartTime = Date.now();
+    const initialQueueSize = this.notificationQueue.length;
+
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `Starting queue processing, queue size: ${initialQueueSize}`,
+    });
+
+    let processedCount = 0;
+    while (this.notificationQueue.length > 0 && !this.isShuttingDown) {
+      const notification = this.notificationQueue.shift();
+      if (notification) {
+        const processStartTime = Date.now();
+        await this.processLogNotification(notification);
+        const processDuration = Date.now() - processStartTime;
+        processedCount++;
+        
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `Notification processed in ${processDuration}ms, remaining in queue: ${this.notificationQueue.length}`,
+        });
+        
+        // Задержка между обработкой уведомлений из очереди
+        await sleep(config.notificationProcessDelay);
+      }
+    }
+
+    const totalDuration = Date.now() - queueStartTime;
+    this.isProcessingQueue = false;
+
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `Queue processing completed: ${processedCount} notifications in ${totalDuration}ms, avg ${processedCount > 0 ? (totalDuration / processedCount).toFixed(0) : 0}ms per notification`,
+    });
+  }
+
   private async processLogNotification(notification: any): Promise<void> {
+    const processStartTime = Date.now();
     try {
-      // Задержка перед обработкой уведомления для соблюдения rate limit
-      // Увеличена для стабильной работы в пределах лимитов
-      await sleep(config.notificationProcessDelay);
-      
       const signature = notification.result.value.signature;
       const logs = notification.result.value.logs || [];
 
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `Processing notification: signature=${signature.substring(0, 8)}..., logs count=${logs.length}`,
+      });
+
+      // Задержка перед обработкой уведомления для соблюдения rate limit
+      await sleep(config.notificationProcessDelay);
+      
       // Ищем события создания токена
       // pump.fun использует специфичные логи для создания токена
       const createTokenLogs = logs.filter((log: string) => 
@@ -169,36 +275,118 @@ export class TokenScanner {
         log.includes('mint')
       );
 
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `Token creation logs found: ${createTokenLogs.length > 0}, signature=${signature.substring(0, 8)}...`,
+      });
+
       if (createTokenLogs.length > 0) {
         // Получаем детали транзакции для извлечения mint адреса
         // Добавляем дополнительную задержку перед запросом транзакции
         await sleep(config.rpcRequestDelay);
         
-        const tx = await this.connection.getTransaction(signature, {
-          commitment: 'confirmed',
-          maxSupportedTransactionVersion: 0,
-        });
+        const rpcStartTime = Date.now();
+        try {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            message: `Requesting transaction: ${signature.substring(0, 8)}...`,
+          });
 
-        if (!tx) return;
+          const tx = await this.connection.getTransaction(signature, {
+            commitment: 'confirmed',
+            maxSupportedTransactionVersion: 0,
+          });
 
-        // Ищем mint адрес в инструкциях
-        const mintAddress = this.extractMintFromTransaction(tx);
-        
-        if (mintAddress) {
-          const candidate: TokenCandidate = {
-            mint: mintAddress,
-            createdAt: Date.now(),
-            signature: signature,
-          };
+          const rpcDuration = Date.now() - rpcStartTime;
 
-          this.onNewTokenCallback(candidate);
+          if (!tx) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'warning',
+              message: `Transaction not found: ${signature.substring(0, 8)}..., RPC duration: ${rpcDuration}ms`,
+            });
+            return;
+          }
+
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            message: `Transaction received: ${signature.substring(0, 8)}..., RPC duration: ${rpcDuration}ms`,
+          });
+
+          // Ищем mint адрес в инструкциях
+          const mintAddress = this.extractMintFromTransaction(tx);
+          
+          if (mintAddress) {
+            const candidate: TokenCandidate = {
+              mint: mintAddress,
+              createdAt: Date.now(),
+              signature: signature,
+            };
+
+            const totalDuration = Date.now() - processStartTime;
+
+            // Логируем получение нового токена
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'token_received',
+              token: mintAddress,
+              message: `New token detected: ${mintAddress.substring(0, 8)}..., processing time: ${totalDuration}ms`,
+            });
+
+            this.onNewTokenCallback(candidate);
+          } else {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'warning',
+              message: `Mint address not found in transaction: ${signature.substring(0, 8)}...`,
+            });
+          }
+        } catch (error: any) {
+          const rpcDuration = Date.now() - rpcStartTime;
+          // Если получили 429 - просто пропускаем это уведомление, не обрабатываем
+          if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              message: `Rate limited, skipping transaction: ${signature.substring(0, 8)}..., RPC duration: ${rpcDuration}ms`,
+            });
+            return;
+          }
+          // Для других ошибок логируем
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            message: `Error getting transaction ${signature.substring(0, 8)}...: ${error?.message || String(error)}, RPC duration: ${rpcDuration}ms`,
+          });
+          console.error(`Error getting transaction ${signature}:`, error);
         }
+      } else {
+        const totalDuration = Date.now() - processStartTime;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `No token creation logs in notification, processing time: ${totalDuration}ms`,
+        });
       }
     } catch (error: any) {
-      // Обработка rate limiting с увеличенной задержкой
+      const totalDuration = Date.now() - processStartTime;
+      // Если получили 429 на верхнем уровне - тоже просто пропускаем
       if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
-        await sleep(config.rateLimitRetryDelay * 2); // Удваиваем задержку при rate limit
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `Rate limited at top level, skipping notification, processing time: ${totalDuration}ms`,
+        });
+        return; // Просто пропускаем, не обрабатываем
       }
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        message: `Error processing log notification: ${error?.message || String(error)}, processing time: ${totalDuration}ms`,
+      });
       console.error('Error processing log notification:', error);
     }
   }

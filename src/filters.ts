@@ -13,10 +13,40 @@ export class TokenFilters {
   }
 
   async filterCandidate(candidate: TokenCandidate): Promise<boolean> {
+    const filterDetails: any = {};
+    
     try {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'start',
+        message: `Starting filter check for token ${candidate.mint.substring(0, 8)}...`,
+      });
+
       // 1. Проверка задержки (10-30 секунд)
       const age = (Date.now() - candidate.createdAt) / 1000;
+      filterDetails.age = age;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'age_check',
+        filterResult: age >= config.minDelaySeconds && age <= config.maxDelaySeconds,
+        filterDetails: { age },
+        message: `Age check: ${age.toFixed(1)}s (required: ${config.minDelaySeconds}-${config.maxDelaySeconds}s)`,
+      });
+
       if (age < config.minDelaySeconds || age > config.maxDelaySeconds) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'age_check',
+          filterDetails: { ...filterDetails, rejectionReason: `Age ${age.toFixed(1)}s outside range ${config.minDelaySeconds}-${config.maxDelaySeconds}s` },
+          message: `Token rejected: age ${age.toFixed(1)}s not in range`,
+        });
         return false;
       }
 
@@ -25,7 +55,27 @@ export class TokenFilters {
 
       // 2. Проверка количества покупок (минимум 5-10)
       const purchaseCount = await this.getPurchaseCount(candidate.mint);
+      filterDetails.purchaseCount = purchaseCount;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'purchase_count',
+        filterResult: purchaseCount >= config.minPurchases,
+        filterDetails: { ...filterDetails },
+        message: `Purchase count: ${purchaseCount} (required: >= ${config.minPurchases})`,
+      });
+
       if (purchaseCount < config.minPurchases) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'purchase_count',
+          filterDetails: { ...filterDetails, rejectionReason: `Only ${purchaseCount} purchases, need ${config.minPurchases}` },
+          message: `Token rejected: insufficient purchases (${purchaseCount} < ${config.minPurchases})`,
+        });
         return false;
       }
 
@@ -34,7 +84,27 @@ export class TokenFilters {
 
       // 3. Проверка объема торгов (>= 2000 USD)
       const volumeUsd = await this.getTradingVolume(candidate.mint);
+      filterDetails.volumeUsd = volumeUsd;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'volume_check',
+        filterResult: volumeUsd >= config.minVolumeUsd,
+        filterDetails: { ...filterDetails },
+        message: `Trading volume: $${volumeUsd.toFixed(2)} (required: >= $${config.minVolumeUsd})`,
+      });
+
       if (volumeUsd < config.minVolumeUsd) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'volume_check',
+          filterDetails: { ...filterDetails, rejectionReason: `Volume $${volumeUsd.toFixed(2)} < $${config.minVolumeUsd}` },
+          message: `Token rejected: insufficient volume ($${volumeUsd.toFixed(2)} < $${config.minVolumeUsd})`,
+        });
         return false;
       }
 
@@ -43,14 +113,54 @@ export class TokenFilters {
 
       // 4. Проверка LP burned и mint renounced
       const isLpBurned = await this.isLpBurned(candidate.mint);
+      filterDetails.isLpBurned = isLpBurned;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'lp_burned',
+        filterResult: isLpBurned,
+        filterDetails: { ...filterDetails },
+        message: `LP burned check: ${isLpBurned}`,
+      });
+
       if (!isLpBurned) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'lp_burned',
+          filterDetails: { ...filterDetails, rejectionReason: 'LP not burned' },
+          message: `Token rejected: LP not burned`,
+        });
         return false;
       }
 
       await sleep(config.filterCheckDelay);
 
       const isMintRenounced = await this.isMintRenounced(candidate.mint);
+      filterDetails.isMintRenounced = isMintRenounced;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'mint_renounced',
+        filterResult: isMintRenounced,
+        filterDetails: { ...filterDetails },
+        message: `Mint renounced check: ${isMintRenounced}`,
+      });
+
       if (!isMintRenounced) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'mint_renounced',
+          filterDetails: { ...filterDetails, rejectionReason: 'Mint not renounced' },
+          message: `Token rejected: mint not renounced`,
+        });
         return false;
       }
 
@@ -58,9 +168,38 @@ export class TokenFilters {
 
       // 5. Проверка на снайперов (топ-5 холдеров, никто не держит >20%)
       const hasSnipers = await this.hasSnipers(candidate.mint);
+      filterDetails.hasSnipers = hasSnipers;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'snipers_check',
+        filterResult: !hasSnipers,
+        filterDetails: { ...filterDetails },
+        message: `Snipers check: ${hasSnipers ? 'detected' : 'none'}`,
+      });
+
       if (hasSnipers) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'snipers_check',
+          filterDetails: { ...filterDetails, rejectionReason: 'Snipers detected (>20% holders)' },
+          message: `Token rejected: snipers detected`,
+        });
         return false;
       }
+
+      // Все проверки пройдены
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_passed',
+        token: candidate.mint,
+        filterDetails: { ...filterDetails },
+        message: `Token passed all filters: ${candidate.mint.substring(0, 8)}...`,
+      });
 
       return true;
     } catch (error: any) {
@@ -73,7 +212,10 @@ export class TokenFilters {
 
       logger.log({
         timestamp: getCurrentTimestamp(),
-        type: 'error',
+        type: 'filter_failed',
+        token: candidate.mint,
+        filterStage: 'error',
+        filterDetails: { ...filterDetails, rejectionReason: error?.message || String(error) },
         message: `Error filtering candidate ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`,
       });
       return false;
@@ -81,15 +223,32 @@ export class TokenFilters {
   }
 
   private async getPurchaseCount(mint: string): Promise<number> {
+    const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Getting purchase count for ${mint.substring(0, 8)}...`,
+      });
       
       // Получаем подписи для mint адреса
       // pump.fun использует определенные программы для торговли
       // Ищем транзакции покупки через getSignaturesForAddress
       
+      const sigStartTime = Date.now();
       const signatures = await this.connection.getSignaturesForAddress(mintPubkey, {
         limit: 100,
+      });
+      const sigDuration = Date.now() - sigStartTime;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Signatures received: ${signatures.length}, duration: ${sigDuration}ms`,
       });
 
       // Фильтруем только транзакции покупки (не создания токена)
@@ -154,20 +313,52 @@ export class TokenFilters {
         if (purchaseCount >= config.minPurchases * 2) break;
       }
 
+      const totalDuration = Date.now() - startTime;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Purchase count: ${purchaseCount}, total duration: ${totalDuration}ms`,
+      });
+
       return purchaseCount;
-    } catch (error) {
+    } catch (error: any) {
+      const totalDuration = Date.now() - startTime;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: mint,
+        message: `Error getting purchase count for ${mint.substring(0, 8)}...: ${error?.message || String(error)}, duration: ${totalDuration}ms`,
+      });
       console.error(`Error getting purchase count for ${mint}:`, error);
       return 0;
     }
   }
 
   private async getTradingVolume(mint: string): Promise<number> {
+    const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
       
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Getting trading volume for ${mint.substring(0, 8)}...`,
+      });
+      
       // Получаем все транзакции
+      const sigStartTime = Date.now();
       const signatures = await this.connection.getSignaturesForAddress(mintPubkey, {
         limit: 100,
+      });
+      const sigDuration = Date.now() - sigStartTime;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Signatures for volume: ${signatures.length}, duration: ${sigDuration}ms`,
       });
 
       let totalVolumeSol = 0;
@@ -206,59 +397,162 @@ export class TokenFilters {
         }
       }
 
-      return formatUsd(totalVolumeSol);
-    } catch (error) {
+      const volumeUsd = formatUsd(totalVolumeSol);
+      const totalDuration = Date.now() - startTime;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Trading volume: $${volumeUsd.toFixed(2)} (${totalVolumeSol.toFixed(6)} SOL), total duration: ${totalDuration}ms`,
+      });
+
+      return volumeUsd;
+    } catch (error: any) {
+      const totalDuration = Date.now() - startTime;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: mint,
+        message: `Error getting trading volume for ${mint.substring(0, 8)}...: ${error?.message || String(error)}, duration: ${totalDuration}ms`,
+      });
       console.error(`Error getting trading volume for ${mint}:`, error);
       return 0;
     }
   }
 
   private async isLpBurned(mint: string): Promise<boolean> {
+    const startTime = Date.now();
     try {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Checking LP burned for ${mint.substring(0, 8)}...`,
+      });
+
       // В pump.fun LP токены обычно сжигаются после создания
       // Проверяем, что LP аккаунт не существует или имеет нулевой баланс
       
       const mintPubkey = new PublicKey(mint);
       
       // Получаем информацию о mint
+      const rpcStartTime = Date.now();
       const mintInfo = await getMint(this.connection, mintPubkey);
+      const rpcDuration = Date.now() - rpcStartTime;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Mint info received for LP check, RPC duration: ${rpcDuration}ms`,
+      });
       
       // Проверяем связанные аккаунты
       // В pump.fun после создания токена LP обычно сжигается
       // Это упрощенная проверка, в реальности нужно проверять конкретные аккаунты pump.fun
       
       // Для MVP считаем, что если токен существует и mint authority null, то LP burned
-      return true; // Упрощенная проверка для MVP
-    } catch (error) {
+      const result = true; // Упрощенная проверка для MVP
+      const totalDuration = Date.now() - startTime;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `LP burned check result: ${result}, total duration: ${totalDuration}ms`,
+      });
+
+      return result;
+    } catch (error: any) {
+      const totalDuration = Date.now() - startTime;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: mint,
+        message: `Error checking LP burned for ${mint.substring(0, 8)}...: ${error?.message || String(error)}, duration: ${totalDuration}ms`,
+      });
       console.error(`Error checking LP burned for ${mint}:`, error);
       return false;
     }
   }
 
   private async isMintRenounced(mint: string): Promise<boolean> {
+    const startTime = Date.now();
     try {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Checking mint renounced for ${mint.substring(0, 8)}...`,
+      });
+
       await sleep(config.rpcRequestDelay);
       const mintPubkey = new PublicKey(mint);
+      
+      const rpcStartTime = Date.now();
       const mintInfo = await getMint(this.connection, mintPubkey);
+      const rpcDuration = Date.now() - rpcStartTime;
       
       // Если mintAuthority === null, то mint renounced
-      return mintInfo.mintAuthority === null;
+      const result = mintInfo.mintAuthority === null;
+      const totalDuration = Date.now() - startTime;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Mint renounced check: ${result}, mintAuthority=${mintInfo.mintAuthority ? 'exists' : 'null'}, RPC duration: ${rpcDuration}ms, total: ${totalDuration}ms`,
+      });
+
+      return result;
     } catch (error: any) {
+      const totalDuration = Date.now() - startTime;
       if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: mint,
+          message: `Rate limited during mint renounced check, skipping, duration: ${totalDuration}ms`,
+        });
         await sleep(config.rateLimitRetryDelay);
+        return false;
       }
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: mint,
+        message: `Error checking mint renounced for ${mint.substring(0, 8)}...: ${error?.message || String(error)}, duration: ${totalDuration}ms`,
+      });
       console.error(`Error checking mint renounced for ${mint}:`, error);
       return false;
     }
   }
 
   private async hasSnipers(mint: string): Promise<boolean> {
+    const startTime = Date.now();
     try {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Checking for snipers in ${mint.substring(0, 8)}...`,
+      });
+
       await sleep(config.rpcRequestDelay);
       const mintPubkey = new PublicKey(mint);
       
       // Получаем топ-5 холдеров через getTokenLargestAccounts
+      const accountsStartTime = Date.now();
       const largestAccounts = await this.connection.getTokenLargestAccounts(mintPubkey);
+      const accountsDuration = Date.now() - accountsStartTime;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Largest accounts received: ${largestAccounts.value.length}, RPC duration: ${accountsDuration}ms`,
+      });
       
       if (largestAccounts.value.length === 0) {
         return false;
@@ -267,8 +561,17 @@ export class TokenFilters {
       await sleep(config.rpcRequestDelay);
 
       // Получаем общий supply токена
+      const mintStartTime = Date.now();
       const mintInfo = await getMint(this.connection, mintPubkey);
+      const mintDuration = Date.now() - mintStartTime;
       const totalSupply = Number(mintInfo.supply);
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Mint supply: ${totalSupply}, RPC duration: ${mintDuration}ms`,
+      });
 
       if (totalSupply === 0) {
         return false;
@@ -281,9 +584,19 @@ export class TokenFilters {
           if (idx > 0) {
             await sleep(config.rpcRequestDelay);
           }
+          
+          const accountStartTime = Date.now();
           const tokenAccount = await getAccount(this.connection, account.address);
+          const accountDuration = Date.now() - accountStartTime;
           const balance = Number(tokenAccount.amount);
           const percentage = (balance / totalSupply) * 100;
+          
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: mint,
+            message: `Account #${idx + 1} check: balance=${balance}, percentage=${percentage.toFixed(2)}%, RPC duration: ${accountDuration}ms`,
+          });
 
           // Исключаем LP аккаунт (обычно это первый или второй по размеру)
           // Для MVP проверяем только процент
@@ -300,11 +613,33 @@ export class TokenFilters {
         }
       }
 
+      const totalDuration = Date.now() - startTime;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Snipers check completed: no snipers detected, total duration: ${totalDuration}ms`,
+      });
+
       return false;
     } catch (error: any) {
+      const totalDuration = Date.now() - startTime;
       if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: mint,
+          message: `Rate limited during snipers check, assuming snipers present (safe), duration: ${totalDuration}ms`,
+        });
         await sleep(config.rateLimitRetryDelay);
+        return true; // В случае rate limit считаем, что снайперы есть (безопаснее)
       }
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: mint,
+        message: `Error checking snipers for ${mint.substring(0, 8)}...: ${error?.message || String(error)}, assuming snipers present (safe), duration: ${totalDuration}ms`,
+      });
       console.error(`Error checking snipers for ${mint}:`, error);
       // В случае ошибки считаем, что снайперы есть (безопаснее)
       return true;

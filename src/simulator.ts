@@ -39,7 +39,7 @@ export class TradingSimulator {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'warning',
-        message: 'Cannot start new batch: previous batch not completed',
+        message: `Cannot start new batch: previous batch #${this.currentBatch.id} not completed, ${this.currentBatch.positions.size} positions still open`,
       });
       return;
     }
@@ -48,18 +48,24 @@ export class TradingSimulator {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'error',
-        message: `Deposit too low: ${this.currentDeposit} SOL. Stopping.`,
+        message: `Deposit too low: ${this.currentDeposit.toFixed(6)} SOL. Stopping.`,
       });
       return;
     }
 
     // Проверка drawdown
     const drawdown = ((this.peakDeposit - this.currentDeposit) / this.peakDeposit) * 100;
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `Drawdown check: current=${this.currentDeposit.toFixed(6)} SOL, peak=${this.peakDeposit.toFixed(6)} SOL, drawdown=${drawdown.toFixed(2)}%`,
+    });
+
     if (drawdown > config.maxDrawdownPct) {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'warning',
-        message: `Drawdown ${drawdown.toFixed(2)}% exceeds limit. Pausing for 5 minutes.`,
+        message: `Drawdown ${drawdown.toFixed(2)}% exceeds limit ${config.maxDrawdownPct}%. Pausing for 5 minutes.`,
       });
       this.isPaused = true;
       setTimeout(() => {
@@ -87,17 +93,36 @@ export class TradingSimulator {
       type: 'batch_start',
       batchId: this.batchCounter,
       depositBefore: this.currentDeposit,
+      message: `Starting new batch #${this.batchCounter}, deposit: ${this.currentDeposit.toFixed(6)} SOL, open positions: ${this.openPositions.size}`,
     });
   }
 
   async addCandidate(candidate: TokenCandidate): Promise<boolean> {
     if (this.isPaused) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `Bot is paused, rejecting candidate: ${candidate.mint.substring(0, 8)}...`,
+      });
       return false;
     }
 
     if (!this.currentBatch) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `No current batch, starting new one for candidate: ${candidate.mint.substring(0, 8)}...`,
+      });
       await this.startNewBatch();
       if (!this.currentBatch) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'warning',
+          token: candidate.mint,
+          message: `Failed to start new batch, rejecting candidate: ${candidate.mint.substring(0, 8)}...`,
+        });
         return false;
       }
     }
@@ -107,32 +132,76 @@ export class TradingSimulator {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'warning',
-        message: `Max open positions (${config.maxOpenPositions}) reached`,
+        token: candidate.mint,
+        message: `Max open positions (${config.maxOpenPositions}) reached, current: ${this.openPositions.size}, rejecting: ${candidate.mint.substring(0, 8)}...`,
       });
       return false;
     }
 
     // Проверяем, не заполнен ли батч
     if (this.currentBatch.candidates.length >= config.batchSize) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        batchId: this.currentBatch.id,
+        message: `Batch #${this.currentBatch.id} is full (${this.currentBatch.candidates.length}/${config.batchSize}), rejecting: ${candidate.mint.substring(0, 8)}...`,
+      });
       return false;
     }
 
     // Проверяем, не добавлен ли уже этот токен
     if (this.currentBatch.candidates.some(c => c.mint === candidate.mint)) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        batchId: this.currentBatch.id,
+        message: `Token already in batch #${this.currentBatch.id}, rejecting duplicate: ${candidate.mint.substring(0, 8)}...`,
+      });
       return false;
     }
+
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      token: candidate.mint,
+      batchId: this.currentBatch.id,
+      message: `Candidate received for batch #${this.currentBatch.id}: ${candidate.mint.substring(0, 8)}..., age: ${((Date.now() - candidate.createdAt) / 1000).toFixed(1)}s, starting filters...`,
+    });
 
     // Применяем фильтры
     const passed = await this.filters.filterCandidate(candidate);
     if (!passed) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'token_rejected',
+        token: candidate.mint,
+        batchId: this.currentBatch?.id,
+        message: `Token rejected by filters: ${candidate.mint.substring(0, 8)}...`,
+      });
       return false;
     }
 
     // Добавляем кандидата в батч
     this.currentBatch.candidates.push(candidate);
+    
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'token_added',
+      token: candidate.mint,
+      batchId: this.currentBatch.id,
+      message: `Token added to batch #${this.currentBatch.id}: ${candidate.mint.substring(0, 8)}... (${this.currentBatch.candidates.length}/${config.batchSize})`,
+    });
 
     // Если батч заполнен, открываем позиции
     if (this.currentBatch.candidates.length === config.batchSize) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        batchId: this.currentBatch.id,
+        message: `Batch #${this.currentBatch.id} is full (${config.batchSize} candidates), opening positions...`,
+      });
       await this.openBatchPositions();
     }
 
@@ -142,42 +211,93 @@ export class TradingSimulator {
   private async openBatchPositions(): Promise<void> {
     if (!this.currentBatch) return;
 
+    const openStartTime = Date.now();
     const positionSize = this.currentDeposit / config.batchSize;
+
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      batchId: this.currentBatch.id,
+      message: `Opening positions for batch #${this.currentBatch.id}: ${this.currentBatch.candidates.length} candidates, position size: ${positionSize.toFixed(6)} SOL each`,
+    });
+
+    let openedCount = 0;
+    let failedCount = 0;
 
     for (const candidate of this.currentBatch.candidates) {
       try {
         await this.openPosition(candidate, positionSize);
-      } catch (error) {
+        openedCount++;
+      } catch (error: any) {
+        failedCount++;
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'error',
-          message: `Failed to open position for ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`,
+          token: candidate.mint,
+          batchId: this.currentBatch.id,
+          message: `Failed to open position for ${candidate.mint.substring(0, 8)}...: ${error?.message || String(error)}`,
         });
       }
     }
+
+    const openDuration = Date.now() - openStartTime;
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      batchId: this.currentBatch.id,
+      message: `Batch positions opened: ${openedCount} successful, ${failedCount} failed, duration: ${openDuration}ms`,
+    });
   }
 
   private async openPosition(candidate: TokenCandidate, positionSize: number): Promise<void> {
     if (!this.currentBatch) return;
 
+    const openStartTime = Date.now();
     try {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        batchId: this.currentBatch.id,
+        message: `Opening position: ${candidate.mint.substring(0, 8)}..., position size: ${positionSize.toFixed(6)} SOL`,
+      });
+
       // Получаем цену входа
+      const priceStartTime = Date.now();
       const entryPrice = await this.filters.getEntryPrice(candidate.mint);
+      const priceDuration = Date.now() - priceStartTime;
+      
       if (entryPrice <= 0) {
-        throw new Error('Invalid entry price');
+        throw new Error(`Invalid entry price: ${entryPrice}`);
       }
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        batchId: this.currentBatch.id,
+        message: `Entry price received: ${entryPrice.toFixed(8)}, fetch duration: ${priceDuration}ms`,
+      });
 
       // Рассчитываем инвестиции с учетом комиссий
       const fees = config.priorityFee + config.signatureFee;
       const invested = positionSize - fees;
 
       if (invested <= 0) {
-        throw new Error('Insufficient funds after fees');
+        throw new Error(`Insufficient funds after fees: ${invested}, positionSize: ${positionSize}, fees: ${fees}`);
       }
 
       // Рассчитываем slippage
       const slippage = calculateSlippage();
       const actualEntryPrice = entryPrice * (1 + slippage);
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        batchId: this.currentBatch.id,
+        message: `Position calculated: invested=${invested.toFixed(6)} SOL, slippage=${(slippage * 100).toFixed(2)}%, entry price=${actualEntryPrice.toFixed(8)}`,
+      });
 
       // Создаем позицию
       const position: Position = {
@@ -197,6 +317,8 @@ export class TradingSimulator {
       this.currentBatch.positions.set(candidate.mint, position);
       this.openPositions.set(candidate.mint, position);
 
+      const openDuration = Date.now() - openStartTime;
+
       // Логируем покупку
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -205,27 +327,74 @@ export class TradingSimulator {
         token: candidate.mint,
         investedSol: invested,
         entryPrice: actualEntryPrice,
+        message: `Position opened: ${candidate.mint.substring(0, 8)}..., total duration: ${openDuration}ms`,
       });
-    } catch (error) {
+    } catch (error: any) {
+      const openDuration = Date.now() - openStartTime;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: candidate.mint,
+        batchId: this.currentBatch.id,
+        message: `Error opening position for ${candidate.mint.substring(0, 8)}...: ${error?.message || String(error)}, duration: ${openDuration}ms`,
+      });
       console.error(`Error opening position for ${candidate.mint}:`, error);
       throw error;
     }
   }
 
   async checkAndClosePositions(): Promise<void> {
+    const checkStartTime = Date.now();
     const now = Date.now();
     const positionsToClose: string[] = [];
+    const openPositionsCount = this.openPositions.size;
+
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `Checking ${openPositionsCount} open positions`,
+    });
+
+    let checkedCount = 0;
+    let priceErrors = 0;
 
     for (const [token, position] of this.openPositions.entries()) {
       try {
+        checkedCount++;
+        const positionCheckStart = Date.now();
+        
         // Получаем текущую цену
         const currentPrice = await this.filters.getEntryPrice(token);
-        if (currentPrice <= 0) continue;
+        const priceFetchDuration = Date.now() - positionCheckStart;
+        
+        if (currentPrice <= 0) {
+          priceErrors++;
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'warning',
+            token: token,
+            batchId: position.batchId,
+            message: `Invalid price for position: ${token.substring(0, 8)}..., price: ${currentPrice}, fetch duration: ${priceFetchDuration}ms`,
+          });
+          continue;
+        }
+
+        const multiplier = currentPrice / position.entryPrice;
+        const profitPct = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
 
         // Обновляем локальный максимум
         if (currentPrice > position.localHigh) {
+          const oldHigh = position.localHigh;
           position.localHigh = currentPrice;
           position.stopLossTarget = position.localHigh * (1 - config.trailingStopPct / 100);
+          
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: token,
+            batchId: position.batchId,
+            message: `New local high: ${token.substring(0, 8)}..., ${oldHigh.toFixed(8)} → ${currentPrice.toFixed(8)} (${multiplier.toFixed(2)}x, +${profitPct.toFixed(2)}%)`,
+          });
         }
 
         let shouldClose = false;
@@ -235,26 +404,70 @@ export class TradingSimulator {
         if (currentPrice >= position.takeProfitTarget) {
           shouldClose = true;
           closeReason = 'take_profit';
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: token,
+            batchId: position.batchId,
+            message: `Take profit triggered: ${token.substring(0, 8)}..., price: ${currentPrice.toFixed(8)}, target: ${position.takeProfitTarget.toFixed(8)}, multiplier: ${multiplier.toFixed(2)}x`,
+          });
         }
         // Проверка таймера (90 секунд)
         else if (now >= position.exitTimer) {
           shouldClose = true;
           closeReason = 'timer';
+          const timeHeld = (now - position.entryTime) / 1000;
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: token,
+            batchId: position.batchId,
+            message: `Timer exit triggered: ${token.substring(0, 8)}..., held for ${timeHeld.toFixed(1)}s, multiplier: ${multiplier.toFixed(2)}x`,
+          });
         }
         // Проверка трейлинг-стопа (25% от локального хая)
         else if (currentPrice <= position.stopLossTarget) {
           shouldClose = true;
           closeReason = 'trailing_stop';
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: token,
+            batchId: position.batchId,
+            message: `Trailing stop triggered: ${token.substring(0, 8)}..., price: ${currentPrice.toFixed(8)}, stop: ${position.stopLossTarget.toFixed(8)}, multiplier: ${multiplier.toFixed(2)}x`,
+          });
+        } else {
+          // Логируем текущее состояние позиции
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: token,
+            batchId: position.batchId,
+            message: `Position status: ${token.substring(0, 8)}..., price: ${currentPrice.toFixed(8)}, multiplier: ${multiplier.toFixed(2)}x, profit: ${profitPct.toFixed(2)}%, time left: ${Math.max(0, (position.exitTimer - now) / 1000).toFixed(1)}s`,
+          });
         }
 
         if (shouldClose) {
           positionsToClose.push(token);
           await this.closePosition(token, currentPrice, closeReason);
         }
-      } catch (error) {
+      } catch (error: any) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: token,
+          message: `Error checking position ${token.substring(0, 8)}...: ${error?.message || String(error)}`,
+        });
         console.error(`Error checking position ${token}:`, error);
       }
     }
+
+    const checkDuration = Date.now() - checkStartTime;
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `Position check completed: ${checkedCount} checked, ${positionsToClose.length} to close, ${priceErrors} price errors, duration: ${checkDuration}ms`,
+    });
 
     // Проверяем, завершен ли батч
     if (this.currentBatch && this.currentBatch.positions.size > 0) {
@@ -263,16 +476,39 @@ export class TradingSimulator {
       );
 
       if (allClosed) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          batchId: this.currentBatch.id,
+          message: `All positions in batch #${this.currentBatch.id} closed, completing batch`,
+        });
         await this.completeBatch();
       }
     }
   }
 
   private async closePosition(token: string, exitPrice: number, reason: string): Promise<void> {
+    const closeStartTime = Date.now();
     const position = this.openPositions.get(token);
-    if (!position) return;
+    if (!position) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'warning',
+        token: token,
+        message: `Attempted to close non-existent position: ${token.substring(0, 8)}...`,
+      });
+      return;
+    }
 
     try {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: token,
+        batchId: position.batchId,
+        message: `Closing position: ${token.substring(0, 8)}..., reason: ${reason}, exit price: ${exitPrice.toFixed(8)}`,
+      });
+
       // Рассчитываем slippage при выходе
       const exitSlippage = calculateSlippage();
       const actualExitPrice = exitPrice * (1 - exitSlippage);
@@ -290,11 +526,19 @@ export class TradingSimulator {
 
       const multiplier = actualExitPrice / position.entryPrice;
       const profitPct = ((actualExitPrice - position.entryPrice) / position.entryPrice) * 100;
+      const timeHeld = (Date.now() - position.entryTime) / 1000;
+
+      const depositBefore = this.currentDeposit;
 
       // Обновляем депозит
       this.currentDeposit += profit;
       if (this.currentDeposit > this.peakDeposit) {
         this.peakDeposit = this.currentDeposit;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `New peak deposit: ${this.peakDeposit.toFixed(6)} SOL`,
+        });
       }
 
       // Обновляем статистику
@@ -311,6 +555,8 @@ export class TradingSimulator {
       // Удаляем позицию
       this.openPositions.delete(token);
 
+      const closeDuration = Date.now() - closeStartTime;
+
       // Логируем продажу
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -322,14 +568,18 @@ export class TradingSimulator {
         profitSol: profit,
         profitPct: profitPct,
         reason: reason,
+        message: `Position closed: ${token.substring(0, 8)}..., held for ${timeHeld.toFixed(1)}s, deposit: ${depositBefore.toFixed(6)} → ${this.currentDeposit.toFixed(6)} SOL, duration: ${closeDuration}ms`,
       });
-    } catch (error) {
-      console.error(`Error closing position ${token}:`, error);
+    } catch (error: any) {
+      const closeDuration = Date.now() - closeStartTime;
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'error',
-        message: `Error closing position ${token}: ${error instanceof Error ? error.message : String(error)}`,
+        token: token,
+        batchId: position.batchId,
+        message: `Error closing position ${token.substring(0, 8)}...: ${error?.message || String(error)}, duration: ${closeDuration}ms`,
       });
+      console.error(`Error closing position ${token}:`, error);
     }
   }
 
@@ -337,9 +587,19 @@ export class TradingSimulator {
     if (!this.currentBatch) return;
 
     const batch = this.currentBatch;
+    const batchStartTime = batch.startTime;
+    const batchDuration = (Date.now() - batchStartTime) / 1000;
     const depositAfter = this.currentDeposit;
     const depositBefore = batch.depositBefore;
     const netProfitPct = ((depositAfter - depositBefore) / depositBefore) * 100;
+    const netProfitSol = depositAfter - depositBefore;
+
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      batchId: batch.id,
+      message: `Completing batch #${batch.id}: duration=${batchDuration.toFixed(1)}s, positions=${batch.positions.size}, candidates=${batch.candidates.length}`,
+    });
 
     // Логируем завершение батча
     logger.log({
@@ -349,6 +609,7 @@ export class TradingSimulator {
       netProfitPct: netProfitPct,
       depositBefore: depositBefore,
       depositAfter: depositAfter,
+      message: `Batch #${batch.id} completed: ${netProfitPct >= 0 ? '+' : ''}${netProfitPct.toFixed(2)}% (${netProfitSol >= 0 ? '+' : ''}${netProfitSol.toFixed(6)} SOL), duration: ${batchDuration.toFixed(1)}s`,
     });
 
     // Обновляем статистику
@@ -374,12 +635,23 @@ export class TradingSimulator {
       if (drawdown > stats.maxDrawdownPct) {
         stats.maxDrawdownPct = drawdown;
       }
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `Updated stats: totalBatches=${stats.totalBatches}, winBatches=${stats.winBatches}, winRate=${((stats.winBatches / stats.totalBatches) * 100).toFixed(1)}%, avgProfit=${stats.avgBatchProfitPct.toFixed(2)}%`,
+      });
     }
 
     // Очищаем текущий батч
     this.currentBatch = null;
 
     // Начинаем новый батч
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `Starting new batch after completion`,
+    });
     await this.startNewBatch();
   }
 

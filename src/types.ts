@@ -28,7 +28,7 @@ export interface Batch {
 
 export interface TradeLog {
   timestamp: string;
-  type: 'buy' | 'sell' | 'batch_complete' | 'batch_start' | 'error' | 'warning' | 'info';
+  type: 'buy' | 'sell' | 'batch_complete' | 'batch_start' | 'error' | 'warning' | 'info' | 'token_received' | 'filter_check' | 'filter_passed' | 'filter_failed' | 'token_added' | 'token_rejected';
   batchId?: number;
   token?: string;
   investedSol?: number;
@@ -42,6 +42,17 @@ export interface TradeLog {
   depositBefore?: number;
   depositAfter?: number;
   message?: string;
+  filterStage?: string;
+  filterResult?: boolean;
+  filterDetails?: {
+    age?: number;
+    purchaseCount?: number;
+    volumeUsd?: number;
+    isLpBurned?: boolean;
+    isMintRenounced?: boolean;
+    hasSnipers?: boolean;
+    rejectionReason?: string;
+  };
 }
 
 export interface DailyStats {

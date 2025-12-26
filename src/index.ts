@@ -38,9 +38,25 @@ class PumpFunSniper {
       // Запускаем периодическую проверку позиций
       this.positionCheckInterval = setInterval(async () => {
         if (this.simulator && !this.isShuttingDown) {
+          const checkStartTime = Date.now();
           await this.simulator.checkAndClosePositions();
+          const checkDuration = Date.now() - checkStartTime;
+          
+          if (checkDuration > 1000) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'warning',
+              message: `Position check took ${checkDuration}ms (slow, >1000ms)`,
+            });
+          }
         }
       }, 5000); // Проверяем каждые 5 секунд
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `Position check interval started: every 5 seconds`,
+      });
 
       // Запускаем мониторинг статистики
       this.startStatsMonitoring();
@@ -84,9 +100,16 @@ class PumpFunSniper {
   }
 
   private startStatsMonitoring(): void {
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `Stats monitoring started: every 10 minutes`,
+    });
+
     setInterval(async () => {
       if (!this.simulator || this.isShuttingDown) return;
 
+      const statsStartTime = Date.now();
       const currentDeposit = this.simulator.getCurrentDeposit();
       const peakDeposit = this.simulator.getPeakDeposit();
       const openPositions = this.simulator.getOpenPositionsCount();
@@ -96,12 +119,13 @@ class PumpFunSniper {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: `Stats: Deposit=${currentDeposit.toFixed(6)} SOL, Peak=${peakDeposit.toFixed(6)} SOL, Drawdown=${drawdown.toFixed(2)}%, Open Positions=${openPositions}`,
+        message: `Periodic stats: Deposit=${currentDeposit.toFixed(6)} SOL, Peak=${peakDeposit.toFixed(6)} SOL, Drawdown=${drawdown.toFixed(2)}%, Open Positions=${openPositions}, Profit=${((currentDeposit - config.initialDeposit) / config.initialDeposit * 100).toFixed(2)}%`,
       });
 
       // Обновляем статистику в logger
       const stats = logger.getDailyStats();
       if (stats) {
+        const oldDeposit = stats.finalDeposit;
         stats.finalDeposit = currentDeposit;
         if (currentDeposit > stats.peakDeposit) {
           stats.peakDeposit = currentDeposit;
@@ -110,6 +134,13 @@ class PumpFunSniper {
         if (maxDrawdown > stats.maxDrawdownPct) {
           stats.maxDrawdownPct = maxDrawdown;
         }
+
+        const statsDuration = Date.now() - statsStartTime;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `Stats updated: deposit change ${oldDeposit.toFixed(6)} → ${currentDeposit.toFixed(6)} SOL, maxDrawdown=${stats.maxDrawdownPct.toFixed(2)}%, duration: ${statsDuration}ms`,
+        });
       }
     }, 10 * 60 * 1000); // Каждые 10 минут
   }
