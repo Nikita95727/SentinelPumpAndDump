@@ -15,37 +15,66 @@ class Cache {
   }
 
   private async initializeRedis(): Promise<void> {
-    if (config.redisHost) {
+    // Если Redis не настроен в .env - используем только in-memory кеш
+    if (!config.redisHost) {
+      this.useRedis = false;
+      return;
+    }
+
+    // Пытаемся подключиться только один раз, без повторных попыток
+    try {
+      this.redis = new Redis({
+        host: config.redisHost,
+        port: config.redisPort || 6379,
+        password: config.redisPassword,
+        // Отключаем автоматические переподключения
+        retryStrategy: () => null, // Не переподключаемся автоматически
+        maxRetriesPerRequest: 1, // Только одна попытка
+        enableOfflineQueue: false, // Не ставим в очередь если офлайн
+        lazyConnect: true, // Не подключаемся сразу
+        connectTimeout: 2000, // Таймаут 2 секунды
+      });
+
+      // Обработчик ошибок - только один раз логируем
+      let errorLogged = false;
+      this.redis.on('error', (err) => {
+        if (!errorLogged) {
+          console.warn('Redis not available, using memory cache only');
+          errorLogged = true;
+        }
+        this.useRedis = false;
+      });
+
+      this.redis.on('connect', () => {
+        this.useRedis = true;
+        console.log('Redis cache connected');
+      });
+
+      // Пытаемся подключиться один раз с таймаутом
       try {
-        this.redis = new Redis({
-          host: config.redisHost,
-          port: config.redisPort || 6379,
-          password: config.redisPassword,
-          retryStrategy: (times) => {
-            // Экспоненциальная задержка с максимумом 3 секунды
-            const delay = Math.min(times * 50, 3000);
-            return delay;
-          },
-          maxRetriesPerRequest: 3,
-        });
-
-        this.redis.on('error', (err) => {
-          console.warn('Redis connection error, falling back to memory cache:', err.message);
-          this.useRedis = false;
-        });
-
-        this.redis.on('connect', () => {
-          this.useRedis = true;
-          console.log('Redis cache connected');
-        });
-
-        // Проверяем соединение
+        await Promise.race([
+          this.redis.connect(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Redis connection timeout')), 2000))
+        ]);
         await this.redis.ping();
         this.useRedis = true;
+        console.log('Redis cache initialized successfully');
       } catch (error) {
-        console.warn('Redis not available, using memory cache:', error);
+        // Если не удалось подключиться - используем memory cache, закрываем соединение
         this.useRedis = false;
+        if (this.redis) {
+          try {
+            await this.redis.quit();
+          } catch {
+            // Ignore
+          }
+          this.redis = null;
+        }
       }
+    } catch (error) {
+      // Если Redis вообще не установлен или недоступен - используем memory cache
+      this.useRedis = false;
+      this.redis = null;
     }
   }
 

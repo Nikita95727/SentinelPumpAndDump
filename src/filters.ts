@@ -990,27 +990,27 @@ export class TokenFilters {
         return false;
       }
 
-      // BATCH ЗАПРОСЫ: Получаем все аккаунты за один раз через getMultipleAccounts
+      // BATCH ЗАПРОСЫ: Получаем все аккаунты за один раз через getMultipleAccountsInfo
       const accountsToCheck = largestAccounts.value.slice(0, Math.min(5, largestAccounts.value.length));
-      const accountAddresses = accountsToCheck.map(acc => acc.address);
+      const accountAddresses = accountsToCheck.map((acc: any) => acc.address);
       
-      // Используем batch запрос getMultipleAccounts вместо множества getAccount
+      // Используем batch запрос getMultipleAccountsInfo вместо множества getAccount
       await sleep(config.rpcRequestDelay);
       const connection = this.rpcPool.getConnection(); // Используем пул соединений
       const accountStartTime = Date.now();
-      const accountInfos = await connection.getMultipleAccounts(accountAddresses);
+      const accountInfos = await connection.getMultipleAccountsInfo(accountAddresses);
       const accountDuration = Date.now() - accountStartTime;
       
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `Batch accounts fetched: ${accountInfos.value.length}, RPC duration: ${accountDuration}ms`,
+        message: `Batch accounts fetched: ${accountInfos.length}, RPC duration: ${accountDuration}ms`,
       });
       
       // Проверяем, не держит ли кто-то >20%
       for (let idx = 0; idx < accountsToCheck.length; idx++) {
-        const accountInfo = accountInfos.value[idx];
+        const accountInfo = accountInfos[idx];
         if (!accountInfo) continue;
         
         try {

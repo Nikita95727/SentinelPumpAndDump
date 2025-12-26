@@ -218,20 +218,10 @@ export class TokenScanner {
           return; // Просто откидываем, не логируем
         }
         
-      // Добавляем в очередь ТОЛЬКО уведомления о создании токенов
-      // Для приоритетной обработки (queue1, queue2) обрабатываем сразу без задержки
-      // Для обычной очереди добавляем с задержкой
-      this.notificationQueue.push(notification);
-      
-      // ПРИОРИТЕТНАЯ ОБРАБОТКА: Сначала проверяем приоритетные очереди
-      // Если они не пусты - обрабатываем их, иначе обрабатываем queue3
-      if (this.queue1.length > 0 || this.queue2.length > 0) {
-        // Приоритетные очереди имеют приоритет - не запускаем queue3
-        // Обработка queue1/queue2 запускается автоматически из processLogNotification
-      } else {
-        // Запускаем обработку queue3 только если приоритетные очереди пусты
-        this.processQueue();
-      }
+      // ЭКСПЕРИМЕНТ: Обрабатываем ТОЛЬКО queue1
+      // Обрабатываем уведомление сразу (queue1 обрабатывается в processLogNotification)
+      // Не добавляем в notificationQueue и не обрабатываем queue2/queue3
+      this.processLogNotification(notification, true); // isPriority = true для queue1
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
@@ -408,10 +398,8 @@ export class TokenScanner {
           const totalDuration = Date.now() - processStartTime;
           const age = (Date.now() - candidate.createdAt) / 1000;
 
-          // Определяем в какую очередь отправить токен (три очереди)
+          // ЭКСПЕРИМЕНТ: Обрабатываем ТОЛЬКО queue1 (0-5 сек)
           const isQueue1 = age >= config.queue1MinDelaySeconds && age <= config.queue1MaxDelaySeconds;
-          const isQueue2 = age >= config.queue2MinDelaySeconds && age <= config.queue2MaxDelaySeconds;
-          const isQueue3 = age >= config.minDelaySeconds && age <= config.maxDelaySeconds;
 
           if (isQueue1) {
             // Очередь 1: 0-5 сек (самый ранний вход) - рискованные токены
@@ -421,39 +409,14 @@ export class TokenScanner {
               timestamp: getCurrentTimestamp(),
               type: 'token_received',
               token: mintAddress,
-              message: `New token detected (queue 1, 0-5s, RISKY): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, processing time: ${totalDuration}ms`,
+              message: `[EXPERIMENT] New token detected (queue 1, 0-5s, RISKY): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, processing time: ${totalDuration}ms`,
             });
             // Приоритетная обработка - запускаем немедленно
             this.processQueue1();
-          } else if (isQueue2) {
-            // Очередь 2: 5-15 сек (ранний вход) - рискованные токены
-            candidate.isRisky = true; // Помечаем как рискованный
-            this.queue2.push(candidate);
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'token_received',
-              token: mintAddress,
-              message: `New token detected (queue 2, 5-15s, RISKY): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, processing time: ${totalDuration}ms`,
-            });
-            // Приоритетная обработка - запускаем немедленно
-            this.processQueue2();
-          } else if (isQueue3) {
-            // Очередь 3: 10-30 сек (стандартный вход)
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'token_received',
-              token: mintAddress,
-              message: `New token detected (queue 3, 10-30s): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, processing time: ${totalDuration}ms`,
-            });
-            this.onNewTokenCallback(candidate);
           } else {
-            // Токен вне диапазонов - логируем но не обрабатываем
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'info',
-              token: mintAddress,
-              message: `Token age ${age.toFixed(1)}s outside all queues (0-5s, 5-15s, or 10-30s), skipping`,
-            });
+            // Токен вне queue1 - пропускаем (эксперимент: обрабатываем только queue1)
+            // Не логируем для скорости
+            return;
           }
         }
         // Mint не найден - не логируем для скорости
