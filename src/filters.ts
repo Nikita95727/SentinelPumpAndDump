@@ -1,12 +1,15 @@
 import { Connection, PublicKey } from '@solana/web3.js';
-import { getMint, getAccount } from '@solana/spl-token';
+import { getMint, getAccount, unpackAccount } from '@solana/spl-token';
 import { config } from './config';
 import { TokenCandidate } from './types';
 import { logger } from './logger';
 import { getCurrentTimestamp, formatSol, formatUsd, sleep } from './utils';
+import { getRpcPool } from './rpc-pool';
+import { cache } from './cache';
 
 export class TokenFilters {
   private connection: Connection;
+  private rpcPool = getRpcPool();
 
   constructor(connection: Connection) {
     this.connection = connection;
@@ -233,7 +236,8 @@ export class TokenFilters {
       // Получаем транзакции токена
       // Для приоритетных очередей - минимальная задержка
       await sleep(isPriority ? 50 : config.rpcRequestDelay);
-      const signatures = await this.connection.getSignaturesForAddress(mintPubkey, {
+      const connection = this.rpcPool.getConnection(); // Используем пул соединений
+      const signatures = await connection.getSignaturesForAddress(mintPubkey, {
         limit: 50,
       });
 
@@ -252,7 +256,8 @@ export class TokenFilters {
           try {
             // Для приоритетных очередей - минимальная задержка
             await sleep(isPriority ? 30 : config.rpcRequestDelay);
-            return await this.connection.getTransaction(sigInfo.signature, {
+            const connection = this.rpcPool.getConnection(); // Используем пул соединений
+            return await connection.getTransaction(sigInfo.signature, {
               commitment: 'confirmed',
               maxSupportedTransactionVersion: 0,
             });
@@ -563,7 +568,8 @@ export class TokenFilters {
       // Ищем транзакции покупки через getSignaturesForAddress
       
       const sigStartTime = Date.now();
-      const signatures = await this.connection.getSignaturesForAddress(mintPubkey, {
+      const connection = this.rpcPool.getConnection(); // Используем пул соединений
+      const signatures = await connection.getSignaturesForAddress(mintPubkey, {
         limit: 100,
       });
       const sigDuration = Date.now() - sigStartTime;
@@ -595,7 +601,8 @@ export class TokenFilters {
               // Для приоритетных очередей - минимальная задержка
               await sleep(isPriority ? 30 : config.rpcRequestDelay);
             }
-            return await this.connection.getTransaction(sigInfo.signature, {
+            const connection = this.rpcPool.getConnection(); // Используем пул соединений
+            return await connection.getTransaction(sigInfo.signature, {
               commitment: 'confirmed',
               maxSupportedTransactionVersion: 0,
             });
@@ -678,7 +685,8 @@ export class TokenFilters {
       
       // Получаем все транзакции
       const sigStartTime = Date.now();
-      const signatures = await this.connection.getSignaturesForAddress(mintPubkey, {
+      const connection = this.rpcPool.getConnection(); // Используем пул соединений
+      const signatures = await connection.getSignaturesForAddress(mintPubkey, {
         limit: 100,
       });
       const sigDuration = Date.now() - sigStartTime;
@@ -701,7 +709,8 @@ export class TokenFilters {
             await sleep(isPriority ? 30 : config.rpcRequestDelay);
           }
 
-          const tx = await this.connection.getTransaction(sigInfo.signature, {
+          const connection = this.rpcPool.getConnection(); // Используем пул соединений
+          const tx = await connection.getTransaction(sigInfo.signature, {
             commitment: 'confirmed',
             maxSupportedTransactionVersion: 0,
           });
@@ -766,16 +775,37 @@ export class TokenFilters {
       
       const mintPubkey = new PublicKey(mint);
       
-      // Получаем информацию о mint
-      const rpcStartTime = Date.now();
-      const mintInfo = await getMint(this.connection, mintPubkey);
-      const rpcDuration = Date.now() - rpcStartTime;
+      // Кеширование: mint info не меняется часто
+      const cacheKey = `mint:${mint}`;
+      const cached = await cache.get<{ supply: string; mintAuthority: string | null; decimals: number }>(cacheKey);
+      
+      let mintInfo;
+      if (cached) {
+        mintInfo = {
+          supply: BigInt(cached.supply),
+          mintAuthority: cached.mintAuthority ? new PublicKey(cached.mintAuthority) : null,
+          decimals: cached.decimals,
+        } as any;
+      } else {
+        // Получаем информацию о mint
+        const rpcStartTime = Date.now();
+        const connection = this.rpcPool.getConnection(); // Используем пул соединений
+        mintInfo = await getMint(connection, mintPubkey);
+        const rpcDuration = Date.now() - rpcStartTime;
+        
+        // Кешируем результат на 10 секунд
+        await cache.set(cacheKey, {
+          supply: mintInfo.supply.toString(),
+          mintAuthority: mintInfo.mintAuthority?.toString() || null,
+          decimals: mintInfo.decimals,
+        }, 10);
+      }
       
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `Mint info received for LP check, RPC duration: ${rpcDuration}ms`,
+        message: `Mint info received for LP check`,
       });
       
       // Проверяем связанные аккаунты
@@ -817,12 +847,27 @@ export class TokenFilters {
         message: `Checking mint renounced for ${mint.substring(0, 8)}...`,
       });
 
-      await sleep(config.rpcRequestDelay);
       const mintPubkey = new PublicKey(mint);
       
-      const rpcStartTime = Date.now();
-      const mintInfo = await getMint(this.connection, mintPubkey);
-      const rpcDuration = Date.now() - rpcStartTime;
+      // Кеширование: mint authority не меняется
+      const cacheKey = `mint:${mint}`;
+      const cached = await cache.get<{ mintAuthority: string | null }>(cacheKey);
+      
+      let mintInfo;
+      if (cached) {
+        mintInfo = { mintAuthority: cached.mintAuthority ? new PublicKey(cached.mintAuthority) : null } as any;
+      } else {
+        await sleep(config.rpcRequestDelay);
+        const connection = this.rpcPool.getConnection(); // Используем пул соединений
+        const rpcStartTime = Date.now();
+        mintInfo = await getMint(connection, mintPubkey);
+        const rpcDuration = Date.now() - rpcStartTime;
+        
+        // Кешируем результат на 10 секунд
+        await cache.set(cacheKey, {
+          mintAuthority: mintInfo.mintAuthority?.toString() || null,
+        }, 10);
+      }
       
       // Если mintAuthority === null, то mint renounced
       const result = mintInfo.mintAuthority === null;
@@ -832,7 +877,7 @@ export class TokenFilters {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `Mint renounced check: ${result}, mintAuthority=${mintInfo.mintAuthority ? 'exists' : 'null'}, RPC duration: ${rpcDuration}ms, total: ${totalDuration}ms`,
+        message: `Mint renounced check: ${result}, mintAuthority=${mintInfo.mintAuthority ? 'exists' : 'null'}, total: ${totalDuration}ms`,
       });
 
       return result;
@@ -872,52 +917,105 @@ export class TokenFilters {
       await sleep(config.rpcRequestDelay);
       const mintPubkey = new PublicKey(mint);
       
-      // Получаем топ-5 холдеров через getTokenLargestAccounts
-      const accountsStartTime = Date.now();
-      const largestAccounts = await this.connection.getTokenLargestAccounts(mintPubkey);
-      const accountsDuration = Date.now() - accountsStartTime;
+      // Кеширование: largest accounts меняются редко
+      const cacheKey = `largest:${mint}`;
+      const cached = await cache.get<Array<{ address: string; amount: string }>>(cacheKey);
+      
+      let largestAccounts;
+      if (cached) {
+        largestAccounts = {
+          value: cached.map(acc => ({
+            address: new PublicKey(acc.address),
+            amount: BigInt(acc.amount),
+          })),
+        } as any;
+      } else {
+        // Получаем топ-5 холдеров через getTokenLargestAccounts
+        const accountsStartTime = Date.now();
+        const connection = this.rpcPool.getConnection(); // Используем пул соединений
+        largestAccounts = await connection.getTokenLargestAccounts(mintPubkey);
+        const accountsDuration = Date.now() - accountsStartTime;
+        
+        // Кешируем результат на 5 секунд
+        await cache.set(cacheKey, largestAccounts.value.map(acc => ({
+          address: acc.address.toString(),
+          amount: acc.amount.toString(),
+        })), 5);
+      }
       
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `Largest accounts received: ${largestAccounts.value.length}, RPC duration: ${accountsDuration}ms`,
+        message: `Largest accounts received: ${largestAccounts.value.length}`,
       });
       
       if (largestAccounts.value.length === 0) {
         return false;
       }
 
-      await sleep(config.rpcRequestDelay);
-
-      // Получаем общий supply токена
-      const mintStartTime = Date.now();
-      const mintInfo = await getMint(this.connection, mintPubkey);
-      const mintDuration = Date.now() - mintStartTime;
-      const totalSupply = Number(mintInfo.supply);
+      // Кеширование для supply
+      const mintCacheKey = `mint:${mint}`;
+      const mintCached = await cache.get<{ supply: string }>(mintCacheKey);
+      
+      let mintInfo;
+      let totalSupply;
+      if (mintCached) {
+        totalSupply = Number(BigInt(mintCached.supply));
+      } else {
+        await sleep(config.rpcRequestDelay);
+        // Получаем общий supply токена
+        const mintStartTime = Date.now();
+        const mintConnection = this.rpcPool.getConnection(); // Используем пул соединений
+        mintInfo = await getMint(mintConnection, mintPubkey);
+        const mintDuration = Date.now() - mintStartTime;
+        totalSupply = Number(mintInfo.supply);
+        
+        // Кешируем результат на 10 секунд
+        await cache.set(mintCacheKey, {
+          supply: mintInfo.supply.toString(),
+          mintAuthority: mintInfo.mintAuthority?.toString() || null,
+          decimals: mintInfo.decimals,
+        }, 10);
+      }
       
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `Mint supply: ${totalSupply}, RPC duration: ${mintDuration}ms`,
+        message: `Mint supply: ${totalSupply}`,
       });
 
       if (totalSupply === 0) {
         return false;
       }
 
+      // BATCH ЗАПРОСЫ: Получаем все аккаунты за один раз через getMultipleAccounts
+      const accountsToCheck = largestAccounts.value.slice(0, Math.min(5, largestAccounts.value.length));
+      const accountAddresses = accountsToCheck.map(acc => acc.address);
+      
+      // Используем batch запрос getMultipleAccounts вместо множества getAccount
+      await sleep(config.rpcRequestDelay);
+      const connection = this.rpcPool.getConnection(); // Используем пул соединений
+      const accountStartTime = Date.now();
+      const accountInfos = await connection.getMultipleAccounts(accountAddresses);
+      const accountDuration = Date.now() - accountStartTime;
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `Batch accounts fetched: ${accountInfos.value.length}, RPC duration: ${accountDuration}ms`,
+      });
+      
       // Проверяем, не держит ли кто-то >20%
-      for (let idx = 0; idx < Math.min(5, largestAccounts.value.length); idx++) {
-        const account = largestAccounts.value[idx];
+      for (let idx = 0; idx < accountsToCheck.length; idx++) {
+        const accountInfo = accountInfos.value[idx];
+        if (!accountInfo) continue;
+        
         try {
-          if (idx > 0) {
-            await sleep(config.rpcRequestDelay);
-          }
-          
-          const accountStartTime = Date.now();
-          const tokenAccount = await getAccount(this.connection, account.address);
-          const accountDuration = Date.now() - accountStartTime;
+          // Парсим данные аккаунта из batch результата
+          const tokenAccount = unpackAccount(accountAddresses[idx], accountInfo);
           const balance = Number(tokenAccount.amount);
           const percentage = (balance / totalSupply) * 100;
           
@@ -925,7 +1023,7 @@ export class TokenFilters {
             timestamp: getCurrentTimestamp(),
             type: 'info',
             token: mint,
-            message: `Account #${idx + 1} check: balance=${balance}, percentage=${percentage.toFixed(2)}%, RPC duration: ${accountDuration}ms`,
+            message: `Account #${idx + 1} check: balance=${balance}, percentage=${percentage.toFixed(2)}%`,
           });
 
           // Исключаем LP аккаунт (обычно это первый или второй по размеру)
@@ -1018,7 +1116,8 @@ export class TokenFilters {
 
         // Fallback: получаем цену через bonding curve формулу на основе supply
         const mintPubkey = new PublicKey(mint);
-        const mintInfo = await getMint(this.connection, mintPubkey);
+        const connection = this.rpcPool.getConnection(); // Используем пул соединений
+      const mintInfo = await getMint(connection, mintPubkey);
         const supply = Number(mintInfo.supply);
         const decimals = mintInfo.decimals;
 

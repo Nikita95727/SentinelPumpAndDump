@@ -4,10 +4,12 @@ import { config, PUMP_FUN_PROGRAM_ID } from './config';
 import { TokenCandidate } from './types';
 import { logger } from './logger';
 import { getCurrentTimestamp, sleep } from './utils';
+import { getRpcPool } from './rpc-pool';
 
 export class TokenScanner {
   private ws: WebSocket | null = null;
   private connection: Connection;
+  private rpcPool = getRpcPool();
   private subscriptionId: number | null = null;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
@@ -221,9 +223,15 @@ export class TokenScanner {
       // Для обычной очереди добавляем с задержкой
       this.notificationQueue.push(notification);
       
-      // Запускаем обработку очереди (если еще не запущена)
-      // Для приоритетных очередей обработка запускается из processLogNotification
-      this.processQueue();
+      // ПРИОРИТЕТНАЯ ОБРАБОТКА: Сначала проверяем приоритетные очереди
+      // Если они не пусты - обрабатываем их, иначе обрабатываем queue3
+      if (this.queue1.length > 0 || this.queue2.length > 0) {
+        // Приоритетные очереди имеют приоритет - не запускаем queue3
+        // Обработка queue1/queue2 запускается автоматически из processLogNotification
+      } else {
+        // Запускаем обработку queue3 только если приоритетные очереди пусты
+        this.processQueue();
+      }
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
@@ -231,8 +239,15 @@ export class TokenScanner {
   }
 
   private async processQueue(): Promise<void> {
-    // Обрабатываем очередь параллельно (до 3 одновременных обработчиков)
+    // ПРИОРИТЕТНАЯ ОБРАБОТКА: Сначала обрабатываем queue1 и queue2, только потом queue3
+    // Если есть токены в приоритетных очередях - прерываем обработку queue3
     if (this.isProcessingQueue || this.notificationQueue.length === 0) {
+      return;
+    }
+
+    // Проверяем приоритетные очереди - если они не пусты, отдаем им приоритет
+    if (this.queue1.length > 0 || this.queue2.length > 0) {
+      // Приоритетные очереди имеют приоритет - не обрабатываем queue3 пока они не пусты
       return;
     }
 
@@ -245,7 +260,7 @@ export class TokenScanner {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: `Processing queue, size: ${initialQueueSize}`,
+        message: `Processing queue3, size: ${initialQueueSize}`,
       });
     }
 
@@ -256,6 +271,17 @@ export class TokenScanner {
     let promiseIndex = 0;
 
     while (this.notificationQueue.length > 0 && !this.isShuttingDown) {
+      // ПРИОРИТЕТНАЯ ПРОВЕРКА: Прерываем обработку queue3 если появились приоритетные токены
+      if (this.queue1.length > 0 || this.queue2.length > 0) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `Interrupting queue3 processing: priority queues have ${this.queue1.length} (queue1) + ${this.queue2.length} (queue2) tokens`,
+        });
+        // Прерываем обработку queue3 для обработки приоритетных очередей
+        break;
+      }
+
       // Запускаем до maxConcurrent параллельных обработчиков
       while (processingPromises.length < maxConcurrent && this.notificationQueue.length > 0) {
         const notification = this.notificationQueue.shift();
@@ -309,7 +335,7 @@ export class TokenScanner {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: `Queue processed: ${processedCount} notifications in ${totalDuration}ms, avg ${(totalDuration / processedCount).toFixed(0)}ms, remaining: ${this.notificationQueue.length}`,
+        message: `Queue3 processed: ${processedCount} notifications in ${totalDuration}ms, avg ${(totalDuration / processedCount).toFixed(0)}ms, remaining: ${this.notificationQueue.length}`,
       });
     }
   }
@@ -350,7 +376,8 @@ export class TokenScanner {
       
       const rpcStartTime = Date.now();
       try {
-        const tx = await this.connection.getTransaction(signature, {
+        const connection = this.rpcPool.getConnection(); // Используем пул соединений
+        const tx = await connection.getTransaction(signature, {
           commitment: 'confirmed',
           maxSupportedTransactionVersion: 0,
         });
