@@ -216,11 +216,14 @@ export class TokenScanner {
           return; // Просто откидываем, не логируем
         }
         
-        // Добавляем в очередь ТОЛЬКО уведомления о создании токенов
-        this.notificationQueue.push(notification);
-        
-        // Запускаем обработку очереди (если еще не запущена)
-        this.processQueue();
+      // Добавляем в очередь ТОЛЬКО уведомления о создании токенов
+      // Для приоритетной обработки (queue1, queue2) обрабатываем сразу без задержки
+      // Для обычной очереди добавляем с задержкой
+      this.notificationQueue.push(notification);
+      
+      // Запускаем обработку очереди (если еще не запущена)
+      // Для приоритетных очередей обработка запускается из processLogNotification
+      this.processQueue();
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
@@ -246,19 +249,27 @@ export class TokenScanner {
       });
     }
 
-    // Параллельная обработка: до 3 уведомлений одновременно
-    const maxConcurrent = 3;
-    const processingPromises: Promise<void>[] = [];
+    // Параллельная обработка: до 7 уведомлений одновременно (увеличено для скорости)
+    const maxConcurrent = 7;
+    const processingPromises: Array<{ promise: Promise<void>; index: number }> = [];
     let processedCount = 0;
+    let promiseIndex = 0;
 
     while (this.notificationQueue.length > 0 && !this.isShuttingDown) {
       // Запускаем до maxConcurrent параллельных обработчиков
       while (processingPromises.length < maxConcurrent && this.notificationQueue.length > 0) {
         const notification = this.notificationQueue.shift();
         if (notification) {
-          const promise = this.processLogNotification(notification)
+          const currentIndex = promiseIndex++;
+          // Обычная очередь - не приоритетная
+          const promise = this.processLogNotification(notification, false)
             .then(() => {
               processedCount++;
+              // Удаляем завершенный промис из массива
+              const idx = processingPromises.findIndex(p => p.index === currentIndex);
+              if (idx >= 0) {
+                processingPromises.splice(idx, 1);
+              }
             })
             .catch((error) => {
               logger.log({
@@ -266,25 +277,19 @@ export class TokenScanner {
                 type: 'error',
                 message: `Error processing notification: ${error?.message || String(error)}`,
               });
+              // Удаляем завершенный промис из массива
+              const idx = processingPromises.findIndex(p => p.index === currentIndex);
+              if (idx >= 0) {
+                processingPromises.splice(idx, 1);
+              }
             });
-          processingPromises.push(promise);
+          processingPromises.push({ promise, index: currentIndex });
         }
       }
 
       // Ждем завершения хотя бы одного обработчика перед запуском следующего
-      if (processingPromises.length >= maxConcurrent) {
-        await Promise.race(processingPromises);
-        // Удаляем завершенные промисы
-        for (let i = processingPromises.length - 1; i >= 0; i--) {
-          const promise = processingPromises[i];
-          // Проверяем, завершен ли промис (упрощенная проверка)
-          try {
-            await Promise.race([promise, Promise.resolve()]);
-            processingPromises.splice(i, 1);
-          } catch {
-            // Промис еще выполняется
-          }
-        }
+      if (processingPromises.length >= maxConcurrent && processingPromises.length > 0) {
+        await Promise.race(processingPromises.map(p => p.promise));
       }
 
       // Небольшая задержка для предотвращения перегрузки (только если очередь большая)
@@ -294,7 +299,7 @@ export class TokenScanner {
     }
 
     // Ждем завершения всех оставшихся обработчиков
-    await Promise.all(processingPromises);
+    await Promise.all(processingPromises.map(p => p.promise));
 
     const totalDuration = Date.now() - queueStartTime;
     this.isProcessingQueue = false;
@@ -309,8 +314,9 @@ export class TokenScanner {
     }
   }
 
-  private async processLogNotification(notification: any): Promise<void> {
+  private async processLogNotification(notification: any, isPriority: boolean = false): Promise<void> {
     const processStartTime = Date.now();
+    const notificationTime = Date.now(); // Время получения уведомления для точного расчета возраста
     try {
       const signature = notification.result.value.signature;
       const logs = notification.result.value.logs || [];
@@ -333,8 +339,14 @@ export class TokenScanner {
         return;
       }
 
-      // Минимальная задержка перед RPC запросом для соблюдения rate limit
-      await sleep(config.rpcRequestDelay);
+      // Для приоритетных очередей (queue1, queue2) - минимальная задержка или без задержки
+      // Для обычной очереди - стандартная задержка
+      if (!isPriority) {
+        await sleep(config.rpcRequestDelay);
+      } else {
+        // Для приоритетных - минимальная задержка (50ms вместо 250ms)
+        await sleep(50);
+      }
       
       const rpcStartTime = Date.now();
       try {
@@ -353,10 +365,16 @@ export class TokenScanner {
         
         if (mintAddress) {
           // Используем время транзакции как время создания токена (более точно)
-          const txTime = tx.blockTime ? tx.blockTime * 1000 : Date.now();
+          // Но для приоритетных очередей используем время уведомления минус задержка обработки
+          const txTime = tx.blockTime ? tx.blockTime * 1000 : notificationTime;
+          // Для более точного расчета возраста используем время уведомления минус небольшая задержка
+          const estimatedCreationTime = isPriority 
+            ? notificationTime - 1000 // Для приоритетных: уведомление приходит почти сразу после создания
+            : txTime;
+          
           const candidate: TokenCandidate = {
             mint: mintAddress,
-            createdAt: txTime,
+            createdAt: estimatedCreationTime,
             signature: signature,
           };
 
@@ -378,6 +396,7 @@ export class TokenScanner {
               token: mintAddress,
               message: `New token detected (queue 1, 0-5s, RISKY): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, processing time: ${totalDuration}ms`,
             });
+            // Приоритетная обработка - запускаем немедленно
             this.processQueue1();
           } else if (isQueue2) {
             // Очередь 2: 5-15 сек (ранний вход) - рискованные токены
@@ -389,6 +408,7 @@ export class TokenScanner {
               token: mintAddress,
               message: `New token detected (queue 2, 5-15s, RISKY): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, processing time: ${totalDuration}ms`,
             });
+            // Приоритетная обработка - запускаем немедленно
             this.processQueue2();
           } else if (isQueue3) {
             // Очередь 3: 10-30 сек (стандартный вход)
@@ -515,29 +535,65 @@ export class TokenScanner {
 
     this.isProcessingQueue1 = true;
 
-    while (this.queue1.length > 0 && !this.isShuttingDown) {
-      const candidate = this.queue1.shift();
-      if (!candidate) continue;
+    // Параллельная обработка до 8 токенов одновременно (увеличено для скорости для приоритетной очереди)
+    const maxConcurrent = 8;
+    const processingPromises: Array<{ promise: Promise<void>; index: number }> = [];
+    let promiseIndex = 0;
 
-      const age = (Date.now() - candidate.createdAt) / 1000;
-      
-      // Проверяем, что токен все еще в диапазоне 0-5 секунд
-      if (age < config.queue1MinDelaySeconds || age > config.queue1MaxDelaySeconds) {
-        // Токен вышел из диапазона - убираем из обработки
-        this.processingTokens.delete(candidate.mint);
-        continue;
+    while (this.queue1.length > 0 && !this.isShuttingDown) {
+      // Запускаем до maxConcurrent параллельных обработчиков
+      while (processingPromises.length < maxConcurrent && this.queue1.length > 0) {
+        const candidate = this.queue1.shift();
+        if (!candidate) continue;
+
+        const age = (Date.now() - candidate.createdAt) / 1000;
+        
+        // Проверяем, что токен все еще в диапазоне 0-5 секунд
+        if (age < config.queue1MinDelaySeconds || age > config.queue1MaxDelaySeconds) {
+          // Токен вышел из диапазона - убираем из обработки
+          this.processingTokens.delete(candidate.mint);
+          continue;
+        }
+
+        // Обрабатываем токен параллельно
+        const currentIndex = promiseIndex++;
+        const promise = (async () => {
+          try {
+            await this.onNewTokenCallback(candidate);
+          } catch (error) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'error',
+              token: candidate.mint,
+              message: `Error processing queue1 token: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          } finally {
+            // Убираем из обработки после завершения
+            this.processingTokens.delete(candidate.mint);
+            // Удаляем завершенный промис из массива
+            const idx = processingPromises.findIndex(p => p.index === currentIndex);
+            if (idx >= 0) {
+              processingPromises.splice(idx, 1);
+            }
+          }
+        })();
+        
+        processingPromises.push({ promise, index: currentIndex });
       }
 
-      // Передаем токен на проверку через callback
-      // Симулятор будет применять упрощенные фильтры для очереди 1
-      this.onNewTokenCallback(candidate);
-      
-      // Убираем из обработки после передачи (если не прошел фильтры, будет удален в симуляторе)
-      // Если прошел - останется в батче и будет удален при завершении обработки
-      
-      // Небольшая задержка между обработкой токенов
-      await sleep(config.filterCheckDelay);
+      // Ждем завершения хотя бы одного обработчика
+      if (processingPromises.length >= maxConcurrent && processingPromises.length > 0) {
+        await Promise.race(processingPromises.map(p => p.promise));
+      }
+
+      // Небольшая задержка только если очередь очень большая
+      if (this.queue1.length > 50) {
+        await sleep(10);
+      }
     }
+
+    // Ждем завершения всех оставшихся обработчиков
+    await Promise.all(processingPromises.map(p => p.promise));
 
     this.isProcessingQueue1 = false;
   }
@@ -550,29 +606,65 @@ export class TokenScanner {
 
     this.isProcessingQueue2 = true;
 
-    while (this.queue2.length > 0 && !this.isShuttingDown) {
-      const candidate = this.queue2.shift();
-      if (!candidate) continue;
+    // Параллельная обработка до 8 токенов одновременно (увеличено для скорости для приоритетной очереди)
+    const maxConcurrent = 8;
+    const processingPromises: Array<{ promise: Promise<void>; index: number }> = [];
+    let promiseIndex = 0;
 
-      const age = (Date.now() - candidate.createdAt) / 1000;
-      
-      // Проверяем, что токен все еще в диапазоне 5-15 секунд
-      if (age < config.queue2MinDelaySeconds || age > config.queue2MaxDelaySeconds) {
-        // Токен вышел из диапазона - убираем из обработки
-        this.processingTokens.delete(candidate.mint);
-        continue;
+    while (this.queue2.length > 0 && !this.isShuttingDown) {
+      // Запускаем до maxConcurrent параллельных обработчиков
+      while (processingPromises.length < maxConcurrent && this.queue2.length > 0) {
+        const candidate = this.queue2.shift();
+        if (!candidate) continue;
+
+        const age = (Date.now() - candidate.createdAt) / 1000;
+        
+        // Проверяем, что токен все еще в диапазоне 5-15 секунд
+        if (age < config.queue2MinDelaySeconds || age > config.queue2MaxDelaySeconds) {
+          // Токен вышел из диапазона - убираем из обработки
+          this.processingTokens.delete(candidate.mint);
+          continue;
+        }
+
+        // Обрабатываем токен параллельно
+        const currentIndex = promiseIndex++;
+        const promise = (async () => {
+          try {
+            await this.onNewTokenCallback(candidate);
+          } catch (error) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'error',
+              token: candidate.mint,
+              message: `Error processing queue2 token: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          } finally {
+            // Убираем из обработки после завершения
+            this.processingTokens.delete(candidate.mint);
+            // Удаляем завершенный промис из массива
+            const idx = processingPromises.findIndex(p => p.index === currentIndex);
+            if (idx >= 0) {
+              processingPromises.splice(idx, 1);
+            }
+          }
+        })();
+        
+        processingPromises.push({ promise, index: currentIndex });
       }
 
-      // Передаем токен на проверку через callback
-      // Симулятор будет применять средние фильтры для очереди 2
-      this.onNewTokenCallback(candidate);
-      
-      // Убираем из обработки после передачи (если не прошел фильтры, будет удален в симуляторе)
-      // Если прошел - останется в батче и будет удален при завершении обработки
-      
-      // Небольшая задержка между обработкой токенов
-      await sleep(config.filterCheckDelay);
+      // Ждем завершения хотя бы одного обработчика
+      if (processingPromises.length >= maxConcurrent && processingPromises.length > 0) {
+        await Promise.race(processingPromises.map(p => p.promise));
+      }
+
+      // Небольшая задержка только если очередь очень большая
+      if (this.queue2.length > 50) {
+        await sleep(10);
+      }
     }
+
+    // Ждем завершения всех оставшихся обработчиков
+    await Promise.all(processingPromises.map(p => p.promise));
 
     this.isProcessingQueue2 = false;
   }

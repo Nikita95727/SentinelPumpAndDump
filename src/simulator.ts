@@ -23,6 +23,40 @@ export class TradingSimulator {
     this.peakDeposit = config.initialDeposit;
   }
 
+  async restoreDeposit(): Promise<void> {
+    try {
+      const savedStats = await logger.loadStatsFromFile();
+      if (savedStats && savedStats.finalDeposit > 0) {
+        const oldDeposit = this.currentDeposit;
+        this.currentDeposit = savedStats.finalDeposit;
+        this.peakDeposit = savedStats.peakDeposit || savedStats.finalDeposit;
+        
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `Restored deposit from saved stats: ${oldDeposit.toFixed(6)} → ${this.currentDeposit.toFixed(6)} SOL, Peak: ${this.peakDeposit.toFixed(6)} SOL`,
+        });
+        
+        console.log(`✅ Restored deposit: ${this.currentDeposit.toFixed(6)} SOL (was ${oldDeposit.toFixed(6)} SOL)`);
+        console.log(`✅ Restored peak: ${this.peakDeposit.toFixed(6)} SOL`);
+      } else {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `No saved stats found, using initial deposit: ${this.currentDeposit.toFixed(6)} SOL`,
+        });
+        console.log(`ℹ️  No saved stats found, using initial deposit: ${this.currentDeposit.toFixed(6)} SOL`);
+      }
+    } catch (error) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        message: `Failed to restore deposit: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      console.error('Failed to restore deposit, using initial deposit:', error);
+    }
+  }
+
   getCurrentDeposit(): number {
     return this.currentDeposit;
   }
@@ -298,21 +332,47 @@ export class TradingSimulator {
     let openedCount = 0;
     let failedCount = 0;
 
+    // Параллельное открытие позиций (до 5 одновременно для скорости)
+    const maxConcurrent = 5;
+    const openPromises: Promise<void>[] = [];
+
     for (const candidate of this.currentBatch.candidates) {
-      try {
-        await this.openPosition(candidate, positionSize);
-        openedCount++;
-      } catch (error: any) {
-        failedCount++;
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'error',
-          token: candidate.mint,
-          batchId: this.currentBatch.id,
-          message: `Failed to open position for ${candidate.mint.substring(0, 8)}...: ${error?.message || String(error)}`,
-        });
+      // Запускаем до maxConcurrent параллельных открытий
+      while (openPromises.length >= maxConcurrent) {
+        await Promise.race(openPromises);
+        // Удаляем завершенные промисы
+        for (let i = openPromises.length - 1; i >= 0; i--) {
+          const promise = openPromises[i];
+          try {
+            await Promise.race([promise, Promise.resolve()]);
+            openPromises.splice(i, 1);
+          } catch {
+            // Промис еще выполняется
+          }
+        }
       }
+
+      const promise = (async () => {
+        try {
+          await this.openPosition(candidate, positionSize);
+          openedCount++;
+        } catch (error: any) {
+          failedCount++;
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: candidate.mint,
+            batchId: this.currentBatch?.id,
+            message: `Failed to open position for ${candidate.mint.substring(0, 8)}...: ${error?.message || String(error)}`,
+          });
+        }
+      })();
+
+      openPromises.push(promise);
     }
+
+    // Ждем завершения всех оставшихся открытий
+    await Promise.all(openPromises);
 
     const openDuration = Date.now() - openStartTime;
     logger.log({

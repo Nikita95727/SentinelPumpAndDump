@@ -24,6 +24,10 @@ class PumpFunSniper {
 
       // Инициализируем симулятор
       this.simulator = new TradingSimulator(this.connection);
+      
+      // Восстанавливаем баланс из сохраненной статистики
+      await this.simulator.restoreDeposit();
+      
       await this.simulator.startNewBatch();
       console.log('Trading simulator initialized');
 

@@ -226,12 +226,13 @@ export class TokenFilters {
    * Проверка на honeypot и скам
    * Проверяем что токен можно продать (есть успешные продажи) и есть разные покупатели
    */
-  private async checkHoneypotAndScam(mint: string): Promise<{ isHoneypot: boolean; uniqueBuyers: number; hasSells: boolean }> {
+  private async checkHoneypotAndScam(mint: string, isPriority: boolean = false): Promise<{ isHoneypot: boolean; uniqueBuyers: number; hasSells: boolean }> {
     try {
       const mintPubkey = new PublicKey(mint);
       
       // Получаем транзакции токена
-      await sleep(config.rpcRequestDelay);
+      // Для приоритетных очередей - минимальная задержка
+      await sleep(isPriority ? 50 : config.rpcRequestDelay);
       const signatures = await this.connection.getSignaturesForAddress(mintPubkey, {
         limit: 50,
       });
@@ -239,16 +240,34 @@ export class TokenFilters {
       const buyerAddresses = new Set<string>();
       let hasSellTransactions = false;
 
-      // Анализируем транзакции для поиска покупателей и продаж
-      for (let i = 0; i < Math.min(signatures.length, 30); i++) {
-        const sigInfo = signatures[i];
-        try {
-          await sleep(config.rpcRequestDelay);
-          const tx = await this.connection.getTransaction(sigInfo.signature, {
-            commitment: 'confirmed',
-            maxSupportedTransactionVersion: 0,
-          });
+      // Батчинг getTransaction запросов для скорости (до 5 одновременно)
+      const signaturesToCheck = signatures.slice(0, Math.min(signatures.length, 30));
+      const batchSize = 5;
+      
+      for (let i = 0; i < signaturesToCheck.length; i += batchSize) {
+        const batch = signaturesToCheck.slice(i, i + batchSize);
+        
+        // Параллельно получаем транзакции батча
+        const txPromises = batch.map(async (sigInfo) => {
+          try {
+            // Для приоритетных очередей - минимальная задержка
+            await sleep(isPriority ? 30 : config.rpcRequestDelay);
+            return await this.connection.getTransaction(sigInfo.signature, {
+              commitment: 'confirmed',
+              maxSupportedTransactionVersion: 0,
+            });
+          } catch (error: any) {
+            if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
+              await sleep(config.rateLimitRetryDelay);
+            }
+            return null;
+          }
+        });
 
+        const transactions = await Promise.all(txPromises);
+
+        // Обрабатываем полученные транзакции
+        for (const tx of transactions) {
           if (!tx) continue;
 
           // Ищем инструкции покупки/продажи
@@ -299,11 +318,6 @@ export class TokenFilters {
               buyerAddresses.add(address);
             }
           });
-        } catch (error: any) {
-          if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
-            await sleep(config.rateLimitRetryDelay);
-          }
-          continue;
         }
       }
 
@@ -375,7 +389,8 @@ export class TokenFilters {
       }
 
       // 2. Минимальная проверка объема (смягчено для ранних токенов)
-      await sleep(config.filterCheckDelay);
+      // Для приоритетной очереди - минимальная задержка (50ms вместо 200ms)
+      await sleep(50);
       const volumeUsd = await this.getTradingVolume(candidate.mint);
       filterDetails.volumeUsd = volumeUsd;
 
@@ -433,7 +448,8 @@ export class TokenFilters {
       });
 
       // 1. КРИТИЧНО: Проверка на honeypot - ГЛАВНЫЙ КРИТЕРИЙ
-      const honeypotCheck = await this.checkHoneypotAndScam(candidate.mint);
+      // Для приоритетной очереди - быстрая проверка
+      const honeypotCheck = await this.checkHoneypotAndScam(candidate.mint, true);
       filterDetails.isHoneypot = honeypotCheck.isHoneypot;
       filterDetails.uniqueBuyers = honeypotCheck.uniqueBuyers;
       filterDetails.hasSells = honeypotCheck.hasSells;
@@ -461,10 +477,11 @@ export class TokenFilters {
         return false;
       }
 
-      await sleep(config.filterCheckDelay);
+      // Для приоритетной очереди - минимальная задержка
+      await sleep(50);
 
       // 2. Проверка количества покупок (смягчено: минимум 2 вместо 3)
-      const purchaseCount = await this.getPurchaseCount(candidate.mint);
+      const purchaseCount = await this.getPurchaseCount(candidate.mint, true);
       filterDetails.purchaseCount = purchaseCount;
 
       if (purchaseCount < 2) {
@@ -479,10 +496,11 @@ export class TokenFilters {
         return false;
       }
 
-      await sleep(config.filterCheckDelay);
+      // Для приоритетной очереди - минимальная задержка
+      await sleep(50);
 
       // 3. Проверка объема торгов (смягчено: >= $500 вместо $1000)
-      const volumeUsd = await this.getTradingVolume(candidate.mint);
+      const volumeUsd = await this.getTradingVolume(candidate.mint, true);
       filterDetails.volumeUsd = volumeUsd;
 
       if (volumeUsd < 500) {
@@ -528,7 +546,7 @@ export class TokenFilters {
     return this.filterQueue2Candidate(candidate);
   }
 
-  private async getPurchaseCount(mint: string): Promise<number> {
+  private async getPurchaseCount(mint: string, isPriority: boolean = false): Promise<number> {
     const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
@@ -563,19 +581,46 @@ export class TokenFilters {
       let purchaseCount = 0;
       const skipFirst = true; // Пропускаем первую транзакцию (создание токена)
 
-      for (let i = skipFirst ? 1 : 0; i < signatures.length && i < 50; i++) {
-        const sigInfo = signatures[i];
-        try {
-          // Задержка между запросами для соблюдения rate limit
-          if (i > 0) {
-            await sleep(config.rpcRequestDelay);
+      // Батчинг getTransaction запросов для скорости (до 3 одновременно)
+      const batchSize = 3;
+      const signaturesToCheck = signatures.slice(skipFirst ? 1 : 0, Math.min(signatures.length, 50));
+      
+      for (let i = 0; i < signaturesToCheck.length; i += batchSize) {
+        const batch = signaturesToCheck.slice(i, i + batchSize);
+        
+        // Параллельно получаем транзакции батча
+        const txPromises = batch.map(async (sigInfo) => {
+          try {
+            if (i > 0) {
+              // Для приоритетных очередей - минимальная задержка
+              await sleep(isPriority ? 30 : config.rpcRequestDelay);
+            }
+            return await this.connection.getTransaction(sigInfo.signature, {
+              commitment: 'confirmed',
+              maxSupportedTransactionVersion: 0,
+            });
+          } catch (error: any) {
+            if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
+              await sleep(config.rateLimitRetryDelay);
+              // Повторяем попытку один раз
+              try {
+                await sleep(config.rateLimitRetryDelay);
+                return await this.connection.getTransaction(sigInfo.signature, {
+                  commitment: 'confirmed',
+                  maxSupportedTransactionVersion: 0,
+                });
+              } catch (retryError) {
+                return null;
+              }
+            }
+            return null;
           }
+        });
 
-          const tx = await this.connection.getTransaction(sigInfo.signature, {
-            commitment: 'confirmed',
-            maxSupportedTransactionVersion: 0,
-          });
+        const transactions = await Promise.all(txPromises);
 
+        // Обрабатываем полученные транзакции
+        for (const tx of transactions) {
           if (!tx || !tx.meta) continue;
 
           // Проверяем, что транзакция успешна
@@ -589,33 +634,11 @@ export class TokenFilters {
           if (hasTokenBalanceChanges) {
             purchaseCount++;
           }
-        } catch (error: any) {
-          // Обработка rate limiting
-          if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
-            await sleep(config.rateLimitRetryDelay);
-            // Повторяем попытку один раз
-            try {
-              await sleep(config.rateLimitRetryDelay);
-              const tx = await this.connection.getTransaction(sigInfo.signature, {
-                commitment: 'confirmed',
-                maxSupportedTransactionVersion: 0,
-              });
-              if (tx && tx.meta && !tx.meta.err) {
-                const hasTokenBalanceChanges = 
-                  (tx.meta.postTokenBalances && tx.meta.postTokenBalances.length > 0) ||
-                  (tx.meta.preTokenBalances && tx.meta.preTokenBalances.length > 0);
-                if (hasTokenBalanceChanges) {
-                  purchaseCount++;
-                }
-              }
-            } catch (retryError) {
-              // Пропускаем при повторной ошибке
-            }
-          }
-          continue;
+
+          // Ограничиваем количество проверок для производительности
+          if (purchaseCount >= config.minPurchases * 2) break;
         }
 
-        // Ограничиваем количество проверок для производительности
         if (purchaseCount >= config.minPurchases * 2) break;
       }
 
@@ -641,7 +664,7 @@ export class TokenFilters {
     }
   }
 
-  private async getTradingVolume(mint: string): Promise<number> {
+  private async getTradingVolume(mint: string, isPriority: boolean = false): Promise<number> {
     const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
@@ -674,7 +697,8 @@ export class TokenFilters {
         try {
           // Задержка между запросами для соблюдения rate limit
           if (idx > 0) {
-            await sleep(config.rpcRequestDelay);
+            // Для приоритетных очередей - минимальная задержка
+            await sleep(isPriority ? 30 : config.rpcRequestDelay);
           }
 
           const tx = await this.connection.getTransaction(sigInfo.signature, {

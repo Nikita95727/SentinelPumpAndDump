@@ -162,6 +162,25 @@ class Logger {
   getDailyStats(): DailyStats | null {
     return this.dailyStats;
   }
+
+  async loadStatsFromFile(): Promise<DailyStats | null> {
+    try {
+      const statsFilePath = path.join(config.logDir, `stats-daily-${this.currentDate}.json`);
+      const statsContent = await fs.readFile(statsFilePath, 'utf-8');
+      const stats = JSON.parse(statsContent) as DailyStats;
+      
+      // Валидация данных
+      if (stats && typeof stats.finalDeposit === 'number' && stats.finalDeposit > 0) {
+        return stats;
+      }
+    } catch (error) {
+      // Файл не существует или поврежден - это нормально для первого запуска
+      if ((error as any).code !== 'ENOENT') {
+        console.warn('Failed to load stats from file:', error);
+      }
+    }
+    return null;
+  }
 }
 
 export const logger = new Logger();
