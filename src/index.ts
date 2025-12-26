@@ -2,6 +2,7 @@ import { getConnection } from './utils';
 import { TokenScanner } from './scanner';
 import { PositionManager } from './position-manager';
 import { logger } from './logger';
+import { tradeLogger } from './trade-logger';
 import { getCurrentTimestamp, sleep, calculateDrawdown } from './utils';
 import { config } from './config';
 import { TokenCandidate } from './types';
@@ -23,9 +24,9 @@ class PumpFunSniper {
       this.connection = await getConnection();
       console.log('✅ Connected to Solana RPC');
 
-      // Восстанавливаем баланс из сохраненной статистики
-      const savedStats = await logger.loadStatsFromFile();
-      const initialDeposit = savedStats?.finalDeposit || config.initialDeposit;
+      // Для paper trading всегда используем initialDeposit из config
+      // Не восстанавливаем из файла (для реальной торговли баланс будет из кошелька)
+      const initialDeposit = config.initialDeposit;
 
       // Инициализируем PositionManager
       this.positionManager = new PositionManager(this.connection, initialDeposit);
@@ -141,8 +142,9 @@ class PumpFunSniper {
         console.log(`Max Drawdown: ${calculateDrawdown(finalDeposit, peakDeposit).toFixed(2)}%`);
       }
 
-      // Закрываем logger
+      // Закрываем loggers
       await logger.close();
+      await tradeLogger.close();
       console.log('✅ Graceful shutdown complete');
 
       process.exit(0);

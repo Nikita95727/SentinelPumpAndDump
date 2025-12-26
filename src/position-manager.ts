@@ -2,6 +2,7 @@ import { Connection } from '@solana/web3.js';
 import { Position, PositionStats, TokenCandidate } from './types';
 import { config } from './config';
 import { logger } from './logger';
+import { tradeLogger } from './trade-logger';
 import { getCurrentTimestamp, sleep, calculateSlippage, formatUsd } from './utils';
 import { quickSecurityCheck } from './quick-filters';
 import { priceFetcher } from './price-fetcher';
@@ -113,6 +114,7 @@ export class PositionManager {
   private connection: Connection;
   private filters: TokenFilters;
   private account: Account; // Single source of truth for balance
+  private tradeIdCounter: number = 0;
 
   constructor(connection: Connection, initialDeposit: number) {
     this.connection = connection;
@@ -121,6 +123,14 @@ export class PositionManager {
 
     // Централизованное обновление цен каждые 2 секунды
     setInterval(() => this.updateAllPrices(), CHECK_INTERVAL);
+  }
+
+  /**
+   * Generate unique trade ID
+   */
+  private generateTradeId(): string {
+    this.tradeIdCounter++;
+    return `trade-${Date.now()}-${this.tradeIdCounter}`;
   }
 
   /**
@@ -261,7 +271,19 @@ export class PositionManager {
 
     this.positions.set(candidate.mint, position);
 
-    // Логируем покупку
+    // Generate trade ID and store in position
+    const tradeId = this.generateTradeId();
+    (position as any).tradeId = tradeId;
+
+    // Non-blocking trade logging
+    tradeLogger.logTradeOpen({
+      tradeId,
+      token: candidate.mint,
+      investedSol: investedAmount,
+      entryPrice: actualEntryPrice,
+    });
+
+    // Legacy logger (for console output)
     logger.log({
       timestamp: getCurrentTimestamp(),
       type: 'buy',
@@ -270,7 +292,6 @@ export class PositionManager {
       entryPrice: actualEntryPrice,
       message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)}`,
     });
-
 
     return position;
   }
@@ -380,7 +401,18 @@ export class PositionManager {
       this.positions.delete(position.token);
       position.status = 'closed';
 
-      // Логируем
+      // Non-blocking trade logging
+      const tradeId = (position as any).tradeId || `unknown-${position.token}`;
+      tradeLogger.logTradeClose({
+        tradeId,
+        token: position.token,
+        exitPrice,
+        multiplier,
+        profitSol: profit,
+        reason,
+      });
+
+      // Legacy logger (for console output)
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'sell',
