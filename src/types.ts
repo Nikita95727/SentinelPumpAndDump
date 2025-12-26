@@ -7,16 +7,30 @@ export interface TokenCandidate {
 
 export interface Position {
   token: string;
-  batchId: number;
+  batchId?: number; // Опционально для обратной совместимости
   entryPrice: number;
   investedSol: number;
-  investedUsd: number;
+  investedUsd?: number; // Опционально
   entryTime: number;
-  localHigh: number; // локальный максимум для трейлинг-стопа
-  takeProfitTarget: number; // entryPrice * 4
-  stopLossTarget: number; // для трейлинг-стопа
-  exitTimer: number; // timestamp когда нужно закрыть (90 сек)
-  slippage: number; // использованный slippage
+  localHigh?: number; // локальный максимум для трейлинг-стопа (опционально)
+  peakPrice: number; // пиковая цена для трейлинг-стопа
+  currentPrice?: number; // кэш текущей цены
+  takeProfitTarget?: number; // entryPrice * multiplier (опционально)
+  stopLossTarget?: number; // для трейлинг-стопа (опционально)
+  exitTimer?: number; // timestamp когда нужно закрыть (90 сек) (опционально)
+  slippage?: number; // использованный slippage (опционально)
+  status: 'active' | 'closing' | 'closed';
+  errorCount?: number;
+}
+
+export interface PositionStats {
+  activePositions: number;
+  availableSlots: number;
+  positions: Array<{
+    token: string;
+    multiplier: string;
+    age: string;
+  }>;
 }
 
 export interface Batch {

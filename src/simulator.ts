@@ -444,11 +444,13 @@ export class TradingSimulator {
         investedSol: invested,
         investedUsd: formatUsd(invested),
         entryTime: Date.now(),
+        peakPrice: actualEntryPrice,
         localHigh: actualEntryPrice,
         takeProfitTarget: actualEntryPrice * config.takeProfitMultiplier, // 2.5x для всех
         stopLossTarget: actualEntryPrice * (1 - config.trailingStopPct / 100),
         exitTimer: Date.now() + config.exitTimerSeconds * 1000,
         slippage: slippage,
+        status: 'active',
       };
 
       this.currentBatch.positions.set(candidate.mint, position);
@@ -520,10 +522,11 @@ export class TradingSimulator {
         const profitPct = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
 
         // Обновляем локальный максимум
-        if (currentPrice > position.localHigh) {
-          const oldHigh = position.localHigh;
+        const localHigh = position.localHigh || position.entryPrice;
+        if (currentPrice > localHigh) {
+          const oldHigh = localHigh;
           position.localHigh = currentPrice;
-          position.stopLossTarget = position.localHigh * (1 - config.trailingStopPct / 100);
+          position.stopLossTarget = currentPrice * (1 - config.trailingStopPct / 100);
           
           logger.log({
             timestamp: getCurrentTimestamp(),
@@ -538,7 +541,8 @@ export class TradingSimulator {
         let closeReason = '';
 
         // Проверка тейк-профита (4x)
-        if (currentPrice >= position.takeProfitTarget) {
+        const takeProfitTarget = position.takeProfitTarget || (position.entryPrice * config.takeProfitMultiplier);
+        if (currentPrice >= takeProfitTarget) {
           shouldClose = true;
           closeReason = 'take_profit';
           logger.log({
@@ -546,42 +550,49 @@ export class TradingSimulator {
             type: 'info',
             token: token,
             batchId: position.batchId,
-            message: `Take profit triggered: ${token.substring(0, 8)}..., price: ${currentPrice.toFixed(8)}, target: ${position.takeProfitTarget.toFixed(8)}, multiplier: ${multiplier.toFixed(2)}x`,
+            message: `Take profit triggered: ${token.substring(0, 8)}..., price: ${currentPrice.toFixed(8)}, target: ${takeProfitTarget.toFixed(8)}, multiplier: ${multiplier.toFixed(2)}x`,
           });
         }
         // Проверка таймера (90 секунд)
-        else if (now >= position.exitTimer) {
-          shouldClose = true;
-          closeReason = 'timer';
-          const timeHeld = (now - position.entryTime) / 1000;
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            token: token,
-            batchId: position.batchId,
-            message: `Timer exit triggered: ${token.substring(0, 8)}..., held for ${timeHeld.toFixed(1)}s, multiplier: ${multiplier.toFixed(2)}x`,
-          });
-        }
-        // Проверка трейлинг-стопа (25% от локального хая)
-        else if (currentPrice <= position.stopLossTarget) {
-          shouldClose = true;
-          closeReason = 'trailing_stop';
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            token: token,
-            batchId: position.batchId,
-            message: `Trailing stop triggered: ${token.substring(0, 8)}..., price: ${currentPrice.toFixed(8)}, stop: ${position.stopLossTarget.toFixed(8)}, multiplier: ${multiplier.toFixed(2)}x`,
-          });
-        } else {
-          // Логируем текущее состояние позиции
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            token: token,
-            batchId: position.batchId,
-            message: `Position status: ${token.substring(0, 8)}..., price: ${currentPrice.toFixed(8)}, multiplier: ${multiplier.toFixed(2)}x, profit: ${profitPct.toFixed(2)}%, time left: ${Math.max(0, (position.exitTimer - now) / 1000).toFixed(1)}s`,
-          });
+        else {
+          const exitTimer = position.exitTimer || (position.entryTime + config.exitTimerSeconds * 1000);
+          if (now >= exitTimer) {
+            shouldClose = true;
+            closeReason = 'timer';
+            const timeHeld = (now - position.entryTime) / 1000;
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: token,
+              batchId: position.batchId,
+              message: `Timer exit triggered: ${token.substring(0, 8)}..., held for ${timeHeld.toFixed(1)}s, multiplier: ${multiplier.toFixed(2)}x`,
+            });
+          }
+          // Проверка трейлинг-стопа (25% от локального хая)
+          else {
+            const stopLossTarget = position.stopLossTarget || (position.entryPrice * (1 - config.trailingStopPct / 100));
+            if (currentPrice <= stopLossTarget) {
+              shouldClose = true;
+              closeReason = 'trailing_stop';
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'info',
+                token: token,
+                batchId: position.batchId,
+                message: `Trailing stop triggered: ${token.substring(0, 8)}..., price: ${currentPrice.toFixed(8)}, stop: ${stopLossTarget.toFixed(8)}, multiplier: ${multiplier.toFixed(2)}x`,
+              });
+            } else {
+              // Логируем текущее состояние позиции
+              const timeLeft = Math.max(0, (exitTimer - now) / 1000);
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'info',
+                token: token,
+                batchId: position.batchId,
+                message: `Position status: ${token.substring(0, 8)}..., price: ${currentPrice.toFixed(8)}, multiplier: ${multiplier.toFixed(2)}x, profit: ${profitPct.toFixed(2)}%, time left: ${timeLeft.toFixed(1)}s`,
+              });
+            }
+          }
         }
 
         if (shouldClose) {
