@@ -9,10 +9,9 @@ import { priceFetcher } from './price-fetcher';
 import { TokenFilters } from './filters';
 
 const MAX_POSITIONS = 10;
-const TAKE_PROFIT_MULT = 4.0;
 const MAX_HOLD_TIME = 90_000; // 90 секунд
 const TRAILING_STOP_PCT = 0.25;
-const CHECK_INTERVAL = 2000; // Проверка каждые 2 секунды
+const CHECK_INTERVAL = 1000; // Проверка каждую секунду (быстрее реагирование на take profit)
 
 /**
  * Single source of truth for account balance
@@ -314,8 +313,8 @@ export class PositionManager {
           position.peakPrice = currentPrice;
         }
 
-        // Условие 1: Take Profit (4x)
-        if (multiplier >= TAKE_PROFIT_MULT) {
+        // Условие 1: Take Profit (из конфига, должно быть 2.5x)
+        if (multiplier >= config.takeProfitMultiplier) {
           await this.closePosition(position, 'take_profit', currentPrice);
           return;
         }
