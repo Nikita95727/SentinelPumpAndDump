@@ -1,0 +1,37 @@
+{
+  "name": "sentinel-pump-and-dump",
+  "version": "1.0.0",
+  "description": "Paper trading simulator for pump.fun memecoin sniping",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop ecosystem.config.js",
+    "pm2:restart": "pm2 restart ecosystem.config.js",
+    "pm2:logs": "pm2 logs ecosystem.config.js"
+  },
+  "keywords": [
+    "solana",
+    "pump.fun",
+    "sniper",
+    "paper-trading"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@solana/spl-token": "^0.4.8",
+    "@solana/web3.js": "^1.95.4",
+    "dotenv": "^16.4.5",
+    "ioredis": "^5.4.1",
+    "ws": "^1.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/ws": "^8.5.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.3"
+  }
+}
+

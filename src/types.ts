@@ -1,0 +1,89 @@
+export interface TokenCandidate {
+  mint: string;
+  createdAt: number; // timestamp в миллисекундах
+  signature: string; // signature создания токена
+}
+
+export interface Position {
+  token: string;
+  batchId: number;
+  entryPrice: number;
+  investedSol: number;
+  investedUsd: number;
+  entryTime: number;
+  localHigh: number; // локальный максимум для трейлинг-стопа
+  takeProfitTarget: number; // entryPrice * 4
+  stopLossTarget: number; // для трейлинг-стопа
+  exitTimer: number; // timestamp когда нужно закрыть (90 сек)
+  slippage: number; // использованный slippage
+}
+
+export interface Batch {
+  id: number;
+  candidates: TokenCandidate[];
+  positions: Map<string, Position>;
+  startTime: number;
+  depositBefore: number;
+}
+
+export interface TradeLog {
+  timestamp: string;
+  type: 'buy' | 'sell' | 'batch_complete' | 'batch_start' | 'error' | 'warning' | 'info';
+  batchId?: number;
+  token?: string;
+  investedSol?: number;
+  entryPrice?: number;
+  exitPrice?: number;
+  multiplier?: number;
+  profitSol?: number;
+  profitPct?: number;
+  reason?: string;
+  netProfitPct?: number;
+  depositBefore?: number;
+  depositAfter?: number;
+  message?: string;
+}
+
+export interface DailyStats {
+  date: string;
+  initialDeposit: number;
+  finalDeposit: number;
+  peakDeposit: number;
+  totalBatches: number;
+  winBatches: number;
+  avgBatchProfitPct: number;
+  totalTrades: number;
+  hitsAbove3x: number;
+  maxDrawdownPct: number;
+  totalProfitSol: number;
+  totalProfitUsd: number;
+}
+
+export interface Config {
+  initialDeposit: number;
+  solUsdRate: number;
+  maxOpenPositions: number;
+  maxDrawdownPct: number;
+  batchSize: number;
+  minDelaySeconds: number;
+  maxDelaySeconds: number;
+  minPurchases: number;
+  minVolumeUsd: number;
+  takeProfitMultiplier: number;
+  exitTimerSeconds: number;
+  trailingStopPct: number;
+  priorityFee: number;
+  signatureFee: number;
+  slippageMin: number;
+  slippageMax: number;
+  rpcRequestDelay: number;
+  filterCheckDelay: number;
+  rateLimitRetryDelay: number;
+  heliusWsUrl: string;
+  heliusHttpUrl: string;
+  redisHost?: string;
+  redisPort?: number;
+  redisPassword?: string;
+  logDir: string;
+}
+
