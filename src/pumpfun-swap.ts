@@ -6,6 +6,12 @@ import {
   sendAndConfirmTransaction,
   ComputeBudgetProgram,
 } from '@solana/web3.js';
+import {
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+} from '@solana/spl-token';
 import { PumpFunSDK } from 'pumpdotfun-sdk';
 import { AnchorProvider } from '@coral-xyz/anchor';
 import NodeWallet from '@coral-xyz/anchor/dist/cjs/nodewallet';
@@ -98,6 +104,19 @@ export class PumpFunSwap {
         message: `🔄 Pump.fun BUY (SDK) attempt ${attempt}: ${amountSol} SOL → ${tokenMint}`,
       });
 
+      // ✅ FIX: Создаем ATA правильно через SPL Token helper
+      const ata = await getAssociatedTokenAddress(
+        mintPubkey,
+        wallet.publicKey,
+        false,
+        TOKEN_PROGRAM_ID,
+        ASSOCIATED_TOKEN_PROGRAM_ID
+      );
+
+      // Проверяем существует ли ATA
+      const ataAccountInfo = await this.connection.getAccountInfo(ata);
+      const needsAta = ataAccountInfo === null;
+
       // Получаем инструкции через SDK
       const buyInstructions = await this.sdk.getBuyInstructionsBySolAmount(
         wallet.publicKey,
@@ -115,6 +134,20 @@ export class PumpFunSwap {
       transaction.add(
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
       );
+
+      // ✅ FIX: Добавляем ПРАВИЛЬНУЮ ATA creation ТОЛЬКО если нужно
+      if (needsAta) {
+        const ataIx = createAssociatedTokenAccountInstruction(
+          wallet.publicKey, // payer
+          ata,              // ata address
+          wallet.publicKey, // owner
+          mintPubkey,       // mint
+          TOKEN_PROGRAM_ID,
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        );
+        transaction.add(ataIx);
+      }
+
       transaction.add(...buyInstructions.instructions);
 
       // Отправляем с skipPreflight
