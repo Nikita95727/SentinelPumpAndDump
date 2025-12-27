@@ -128,5 +128,6 @@ export interface Config {
   profitLockEnabled: boolean;
   profitLockThresholdPct: number;
   profitLockPercent: number;
+  walletMnemonic: string;
 }
 

@@ -84,3 +84,4 @@ pm2 stop pump-fun-sniper
 - Проверьте, что WebSocket подключен (должно быть сообщение "WebSocket connected")
 - Проверьте логи в консоли на наличие ошибок
 
+
