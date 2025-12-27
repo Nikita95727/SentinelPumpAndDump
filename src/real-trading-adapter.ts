@@ -195,7 +195,7 @@ export class RealTradingAdapter {
     const balanceAfter = await this.getBalance().catch(() => balanceBefore); // Fallback on error
 
     if (result.success) {
-      const solReceived = result.outAmount ? result.outAmount / 1e9 : 0;
+      const solReceived = result.solReceived || 0;
 
       // Очистить кэш
       this.tokenBalanceCache.delete(mint);
@@ -296,26 +296,11 @@ export class RealTradingAdapter {
   /**
    * Предварительно создать ATA для токена
    * Вызывается ЗАРАНЕЕ чтобы не замедлять buy транзакцию
+   * ⚡ NOTE: Pump.fun сам создает ATA при покупке, поэтому этот метод просто возвращает true
    */
   async prepareTokenAccount(mint: string): Promise<boolean> {
-    const keypair = this.walletManager.getKeypair();
-    
-    if (!keypair) {
-      return false;
-    }
-
-    try {
-      await this.pumpFunSwap.ensureTokenAccount(keypair, mint);
-      return true;
-    } catch (error) {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'error',
-        token: mint,
-        message: `❌ Failed to prepare token account: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      return false;
-    }
+    // Pump.fun автоматически создает ATA при покупке, ничего делать не нужно
+    return true;
   }
 }
 
