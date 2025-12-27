@@ -41,6 +41,17 @@ export const config: Config = {
   redisPort: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT, 10) : undefined,
   redisPassword: process.env.REDIS_PASSWORD || undefined,
   logDir: process.env.LOG_DIR || './logs',
+  // Safety mechanisms
+  maxSolPerTrade: parseFloat(process.env.MAX_SOL_PER_TRADE || '0.15'), // Hard cap per trade (stealth)
+  maxReservePercent: parseFloat(process.env.MAX_RESERVE_PERCENT || '1.0'), // Max % of reserves per trade (if data available)
+  nightModeEnabled: process.env.NIGHT_MODE_ENABLED !== 'false',
+  nightModeStartHour: parseInt(process.env.NIGHT_MODE_START_HOUR || '0', 10), // UTC hour (0-23)
+  nightModeEndHour: parseInt(process.env.NIGHT_MODE_END_HOUR || '8', 10), // UTC hour (0-23)
+  nightModePositionMultiplier: parseFloat(process.env.NIGHT_MODE_POSITION_MULTIPLIER || '0.5'), // Reduce position size during night
+  sessionMaxDrawdownPct: parseFloat(process.env.SESSION_MAX_DRAWDOWN_PCT || '5.0'), // Hard stop if drawdown exceeds this
+  profitLockEnabled: process.env.PROFIT_LOCK_ENABLED !== 'false',
+  profitLockThresholdPct: parseFloat(process.env.PROFIT_LOCK_THRESHOLD_PCT || '20.0'), // Lock profit if balance increases by this %
+  profitLockPercent: parseFloat(process.env.PROFIT_LOCK_PERCENT || '50.0'), // Lock this % of profit above threshold
 };
 
 if (!config.heliusWsUrl) {

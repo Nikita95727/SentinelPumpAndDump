@@ -117,5 +117,16 @@ export interface Config {
   redisPort?: number;
   redisPassword?: string;
   logDir: string;
+  // Safety mechanisms
+  maxSolPerTrade: number;
+  maxReservePercent: number;
+  nightModeEnabled: boolean;
+  nightModeStartHour: number;
+  nightModeEndHour: number;
+  nightModePositionMultiplier: number;
+  sessionMaxDrawdownPct: number;
+  profitLockEnabled: boolean;
+  profitLockThresholdPct: number;
+  profitLockPercent: number;
 }
 

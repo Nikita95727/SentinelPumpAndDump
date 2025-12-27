@@ -8,6 +8,7 @@ import { quickSecurityCheck } from './quick-filters';
 import { priceFetcher } from './price-fetcher';
 import { TokenFilters } from './filters';
 import { earlyActivityTracker } from './early-activity-tracker';
+import { SafetyManager } from './safety-manager';
 
 const MAX_POSITIONS = 10;
 const MAX_HOLD_TIME = 90_000; // 90 секунд
@@ -99,9 +100,10 @@ class Account {
 
   /**
    * Get position size based on current free balance
+   * Safety caps are applied externally by SafetyManager
    */
-  getPositionSize(maxPositions: number, minPositionSize: number = 0.001): number {
-    const free = this.getFreeBalance();
+  getPositionSize(maxPositions: number, minPositionSize: number = 0.001, workingBalance?: number): number {
+    const free = workingBalance !== undefined ? workingBalance - this.lockedBalance : this.getFreeBalance();
     if (free <= 0) {
       return minPositionSize;
     }
@@ -114,15 +116,22 @@ export class PositionManager {
   private connection: Connection;
   private filters: TokenFilters;
   private account: Account; // Single source of truth for balance
+  private safetyManager: SafetyManager;
   private tradeIdCounter: number = 0;
 
   constructor(connection: Connection, initialDeposit: number) {
     this.connection = connection;
     this.filters = new TokenFilters(connection);
     this.account = new Account(initialDeposit);
+    this.safetyManager = new SafetyManager(initialDeposit);
 
     // Централизованное обновление цен каждые 2 секунды
     setInterval(() => this.updateAllPrices(), CHECK_INTERVAL);
+    
+    // Update safety manager with current balance periodically
+    setInterval(() => {
+      this.safetyManager.updateSessionBalance(this.account.getTotalBalance());
+    }, 5000); // Every 5 seconds
   }
 
   /**
@@ -161,9 +170,18 @@ export class PositionManager {
       return false;
     }
 
-    // 2. Проверка: достаточно ли средств для открытия позиции?
-    const positionSize = this.account.getPositionSize(MAX_POSITIONS);
+    // 2. Safety check: trading halted due to drawdown?
+    if (this.safetyManager.isHalted()) {
+      // Trading is halted - do not open new positions
+      return false;
+    }
+
+    // 3. Проверка: достаточно ли средств для открытия позиции?
+    const workingBalance = this.safetyManager.getWorkingBalance(this.account.getTotalBalance());
+    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.001, workingBalance);
+    const positionSize = this.safetyManager.applySafetyCaps(basePositionSize);
     const requiredAmount = positionSize;
+    
     if (this.account.getFreeBalance() < requiredAmount) {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -174,7 +192,7 @@ export class PositionManager {
       return false;
     }
 
-    // 3. Early activity check - skip tokens with no early life
+    // 4. Early activity check - skip tokens with no early life
     // This gate reduces dead/flat trades without cutting winners
     const hasEarlyActivity = earlyActivityTracker.hasEarlyActivity(candidate.mint);
     if (!hasEarlyActivity) {
@@ -183,7 +201,7 @@ export class PositionManager {
       return false;
     }
 
-    // 4. Быстрая проверка безопасности (ТОЛЬКО критичное!)
+    // 5. Быстрая проверка безопасности (ТОЛЬКО критичное!)
     const securityCheckStart = Date.now();
     const passed = await quickSecurityCheck(candidate);
     const securityCheckDuration = Date.now() - securityCheckStart;
@@ -237,8 +255,11 @@ export class PositionManager {
       throw new Error(`Invalid entry price: ${entryPrice}`);
     }
 
-    // Получаем размер позиции из Account
-    const positionSize = this.account.getPositionSize(MAX_POSITIONS);
+    // Получаем размер позиции из Account с учетом working balance
+    const workingBalance = this.safetyManager.getWorkingBalance(this.account.getTotalBalance());
+    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.001, workingBalance);
+    // Apply safety caps (stealth cap, night mode, reserve cap if available)
+    const positionSize = this.safetyManager.applySafetyCaps(basePositionSize);
     
     // Рассчитываем комиссии
     const entryFees = config.priorityFee + config.signatureFee;
