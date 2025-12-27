@@ -458,11 +458,19 @@ export class TokenScanner {
 
           const age = (Date.now() - candidate.createdAt) / 1000;
 
+          // ⚡ КРИТИЧНО: Фильтр по возрасту на входе - токены младше 5 секунд не обрабатываем
+          // К моменту проверки и входа токену будет ~7 секунд (гарантированная инициализация)
+          const MIN_TOKEN_AGE_FOR_PROCESSING = 5;
+          if (age < MIN_TOKEN_AGE_FOR_PROCESSING) {
+            // Токен слишком молодой - пропускаем (не засоряем очередь)
+            return;
+          }
+
           // ISSUE #4: Simplified routing - only queue1 is used, process directly
           const isQueue1 = age >= config.queue1MinDelaySeconds && age <= config.queue1MaxDelaySeconds;
 
           if (isQueue1) {
-            // Очередь 1: 0-5 сек (самый ранний вход) - рискованные токены
+            // Очередь 1: 5-15 сек (ранний вход после инициализации) - рискованные токены
             candidate.isRisky = true; // Помечаем как рискованный
             this.queue1.push(candidate);
             // ISSUE #5: Reduced logging in hot-path - only log errors, not every token
