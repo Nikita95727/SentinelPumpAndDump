@@ -25,6 +25,10 @@ export class TokenScanner {
   private isProcessingQueue2 = false;
   private notificationSkipCounter = 0; // Пропускаем часть уведомлений
   private processingTokens = new Set<string>(); // Токены, которые уже обрабатываются в очередях
+  // ISSUE #2: Lightweight TTL deduplication for getTransaction calls
+  private processedSignatures = new Map<string, number>(); // signature -> timestamp
+  private processedMints = new Map<string, number>(); // mint -> timestamp
+  private readonly DEDUP_TTL_MS = 60000; // 60 seconds TTL
 
   constructor(onNewToken: (candidate: TokenCandidate) => void) {
     this.onNewTokenCallback = onNewToken;
@@ -347,10 +351,7 @@ export class TokenScanner {
         await Promise.race(processingPromises.map(p => p.promise));
       }
 
-      // Небольшая задержка для предотвращения перегрузки (только если очередь большая)
-      if (this.notificationQueue.length > 100) {
-        await sleep(50); // Задержка только при большой очереди
-      }
+      // ISSUE #1: Removed artificial delay - RPC pool manages rate limiting
     }
 
     // Ждем завершения всех оставшихся обработчиков
@@ -377,6 +378,13 @@ export class TokenScanner {
       const signature = notification.result.value.signature;
       const logs = notification.result.value.logs || [];
 
+      // ISSUE #2: Check if signature was already processed recently (deduplication)
+      const now = Date.now();
+      const lastProcessed = this.processedSignatures.get(signature);
+      if (lastProcessed && (now - lastProcessed) < this.DEDUP_TTL_MS) {
+        return; // Skip - already processed recently
+      }
+
       // Уже проверили наличие событий создания токена до добавления в очередь
       // Но проверяем еще раз для надежности (более строгая проверка)
       const hasTokenCreation = logs.some((log: string) => {
@@ -395,14 +403,9 @@ export class TokenScanner {
         return;
       }
 
-      // Для приоритетных очередей (queue1, queue2) - минимальная задержка или без задержки
-      // Для обычной очереди - стандартная задержка
-      if (!isPriority) {
-        await sleep(config.rpcRequestDelay);
-      } else {
-        // Для приоритетных - минимальная задержка (50ms вместо 250ms)
-        await sleep(50);
-      }
+      // ISSUE #1: REMOVED artificial delays from hot-path
+      // RPC pool already manages rate limiting, no need for additional sleeps
+      // For priority queues, we want immediate processing
       
       const rpcStartTime = Date.now();
       try {
@@ -421,6 +424,21 @@ export class TokenScanner {
         const mintAddress = this.extractMintFromTransaction(tx);
         
         if (mintAddress) {
+          // ISSUE #2: Check if mint was already processed recently (deduplication)
+          const lastMintProcessed = this.processedMints.get(mintAddress);
+          if (lastMintProcessed && (now - lastMintProcessed) < this.DEDUP_TTL_MS) {
+            return; // Skip - mint already processed recently
+          }
+
+          // Mark as processed
+          this.processedSignatures.set(signature, now);
+          this.processedMints.set(mintAddress, now);
+
+          // Cleanup old entries periodically (every 1000 entries to avoid memory leak)
+          if (this.processedSignatures.size > 1000) {
+            this.cleanupDedupCache();
+          }
+
           // Start early activity observation for this token
           earlyActivityTracker.startObservation(mintAddress);
           
@@ -438,28 +456,20 @@ export class TokenScanner {
             signature: signature,
           };
 
-          const totalDuration = Date.now() - processStartTime;
-          const notificationToProcessingDelay = processStartTime - notificationTime;
           const age = (Date.now() - candidate.createdAt) / 1000;
 
-          // ЭКСПЕРИМЕНТ: Обрабатываем ТОЛЬКО queue1 (0-5 сек)
+          // ISSUE #4: Simplified routing - only queue1 is used, process directly
           const isQueue1 = age >= config.queue1MinDelaySeconds && age <= config.queue1MaxDelaySeconds;
 
           if (isQueue1) {
             // Очередь 1: 0-5 сек (самый ранний вход) - рискованные токены
             candidate.isRisky = true; // Помечаем как рискованный
             this.queue1.push(candidate);
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'token_received',
-              token: mintAddress,
-              message: `[EXPERIMENT] New token detected (queue 1, 0-5s, RISKY): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, notification→processing delay: ${notificationToProcessingDelay}ms, processing time: ${totalDuration}ms, created at: ${new Date(estimatedCreationTime).toISOString()}`,
-            });
+            // ISSUE #5: Reduced logging in hot-path - only log errors, not every token
             // Приоритетная обработка - запускаем немедленно
             this.processQueue1();
           } else {
             // Токен вне queue1 - пропускаем (эксперимент: обрабатываем только queue1)
-            // Не логируем для скорости
             return;
           }
         }
@@ -499,33 +509,34 @@ export class TokenScanner {
     }
   }
 
+  /**
+   * ISSUE #3: Make mint extraction deterministic
+   * Prefer postTokenBalances when available, fallback to instruction accounts only if needed
+   */
   private extractMintFromTransaction(tx: any): string | null {
     try {
-      // Способ 1: Ищем mint в postTokenBalances
+      // ISSUE #3: Prefer postTokenBalances (most reliable for new tokens)
       const tokenBalances = tx.meta?.postTokenBalances || [];
-      const mintSet = new Set<string>();
-      
       for (const balance of tokenBalances) {
         if (balance.mint) {
-          mintSet.add(balance.mint);
+          return balance.mint; // Return first mint from postTokenBalances (deterministic)
         }
       }
 
-      // Способ 2: Ищем в preTokenBalances (для новых токенов может быть пусто)
+      // Fallback: preTokenBalances
       const preTokenBalances = tx.meta?.preTokenBalances || [];
       for (const balance of preTokenBalances) {
         if (balance.mint) {
-          mintSet.add(balance.mint);
+          return balance.mint; // Return first mint from preTokenBalances
         }
       }
 
-      // Способ 3: Ищем новые аккаунты, которые могут быть mint
+      // Fallback: Analyze pump.fun instructions (only if post/preTokenBalances failed)
       const accountKeys = tx.transaction?.message?.accountKeys || [];
       const accountKeysArray = accountKeys.map((acc: any) => 
         typeof acc === 'string' ? acc : acc.pubkey
       );
 
-      // Способ 4: Анализируем инструкции pump.fun
       const instructions = tx.transaction?.message?.instructions || [];
       for (const instruction of instructions) {
         const programId = typeof instruction.programId === 'string' 
@@ -533,7 +544,6 @@ export class TokenScanner {
           : instruction.programId?.toString();
         
         if (programId === PUMP_FUN_PROGRAM_ID) {
-          // В pump.fun инструкция создания токена обычно содержит mint в accounts
           const accounts = instruction.accounts || [];
           for (const accountIndex of accounts) {
             if (typeof accountIndex === 'number' && accountKeysArray[accountIndex]) {
@@ -542,22 +552,37 @@ export class TokenScanner {
               if (potentialMint && 
                   potentialMint !== '11111111111111111111111111111111' &&
                   potentialMint !== 'So11111111111111111111111111111111111111112') {
-                mintSet.add(potentialMint);
+                return potentialMint; // Return first valid mint from instructions
               }
             }
           }
         }
       }
 
-      // Возвращаем первый найденный mint (обычно в pump.fun создается один токен за транзакцию)
-      if (mintSet.size > 0) {
-        return Array.from(mintSet)[0];
-      }
-
       return null;
     } catch (error) {
-      console.error('Error extracting mint from transaction:', error);
+      // ISSUE #5: Only log errors, not in hot-path
       return null;
+    }
+  }
+
+  /**
+   * ISSUE #2: Cleanup old deduplication cache entries
+   */
+  private cleanupDedupCache(): void {
+    const now = Date.now();
+    const cutoff = now - this.DEDUP_TTL_MS;
+    
+    for (const [key, timestamp] of this.processedSignatures.entries()) {
+      if (timestamp < cutoff) {
+        this.processedSignatures.delete(key);
+      }
+    }
+    
+    for (const [key, timestamp] of this.processedMints.entries()) {
+      if (timestamp < cutoff) {
+        this.processedMints.delete(key);
+      }
     }
   }
 
@@ -620,10 +645,7 @@ export class TokenScanner {
         await Promise.race(processingPromises.map(p => p.promise));
       }
 
-      // Небольшая задержка только если очередь очень большая
-      if (this.queue1.length > 50) {
-        await sleep(10);
-      }
+      // ISSUE #1: Removed artificial delay - no sleep needed
     }
 
     // Ждем завершения всех оставшихся обработчиков
@@ -691,10 +713,7 @@ export class TokenScanner {
         await Promise.race(processingPromises.map(p => p.promise));
       }
 
-      // Небольшая задержка только если очередь очень большая
-      if (this.queue2.length > 50) {
-        await sleep(10);
-      }
+      // ISSUE #1: Removed artificial delay - no sleep needed
     }
 
     // Ждем завершения всех оставшихся обработчиков
