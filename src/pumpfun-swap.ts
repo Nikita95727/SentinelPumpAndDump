@@ -307,7 +307,7 @@ export class PumpFunSwap {
       programId: PUMP_FUN_PROGRAM,
       keys: [
         { pubkey: userPublicKey, isSigner: true, isWritable: true },
-        { pubkey: mint, isSigner: false, isWritable: false },
+        { pubkey: mint, isSigner: false, isWritable: true }, // FIXED: mint is writable (supply changes)
         { pubkey: bondingCurve, isSigner: false, isWritable: true },
         { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
         { pubkey: userTokenAccount, isSigner: false, isWritable: true },
@@ -345,7 +345,7 @@ export class PumpFunSwap {
       programId: PUMP_FUN_PROGRAM,
       keys: [
         { pubkey: userPublicKey, isSigner: true, isWritable: true },
-        { pubkey: mint, isSigner: false, isWritable: false },
+        { pubkey: mint, isSigner: false, isWritable: true }, // FIXED: mint is writable (supply changes)
         { pubkey: bondingCurve, isSigner: false, isWritable: true },
         { pubkey: associatedBondingCurve, isSigner: false, isWritable: true },
         { pubkey: userTokenAccount, isSigner: false, isWritable: true },
