@@ -930,10 +930,29 @@ export class PositionManager {
       
       // Защита от некорректных значений exitPrice (может быть огромным из-за bonding curve ошибок)
       let safeExitPrice = exitPrice;
-      if (exitPrice > position.entryPrice * 1000 || exitPrice <= 0 || !isFinite(exitPrice)) {
-        // Цена некорректна - используем текущую кэшированную цену или entryPrice
-        safeExitPrice = position.currentPrice && position.currentPrice > 0 ? position.currentPrice : position.entryPrice;
+      
+      // Проверяем валидность exitPrice
+      if (exitPrice <= 0 || !isFinite(exitPrice)) {
+        // Цена некорректна - используем peakPrice или currentPrice
+        safeExitPrice = position.peakPrice && position.peakPrice > 0 
+          ? position.peakPrice 
+          : (position.currentPrice && position.currentPrice > 0 ? position.currentPrice : position.entryPrice);
         console.error(`⚠️ Invalid exitPrice: ${exitPrice}, using safeExitPrice: ${safeExitPrice}`);
+      } else if (exitPrice > position.entryPrice * 1000) {
+        // Подозрительно большая цена - используем peakPrice если он разумный, иначе currentPrice
+        // Если peakPrice тоже подозрительно большой, используем currentPrice
+        const peakMultiplier = position.peakPrice / position.entryPrice;
+        if (peakMultiplier > 0 && peakMultiplier <= 1000 && position.peakPrice > 0) {
+          safeExitPrice = position.peakPrice;
+          console.error(`⚠️ Suspicious exitPrice: ${exitPrice} (${(exitPrice/position.entryPrice).toFixed(2)}x), using peakPrice: ${safeExitPrice} (${peakMultiplier.toFixed(2)}x)`);
+        } else if (position.currentPrice && position.currentPrice > 0 && position.currentPrice <= position.entryPrice * 1000) {
+          safeExitPrice = position.currentPrice;
+          console.error(`⚠️ Suspicious exitPrice: ${exitPrice}, using currentPrice: ${safeExitPrice}`);
+        } else {
+          // Все цены подозрительные - используем разумный cap (100x)
+          safeExitPrice = position.entryPrice * 100;
+          console.error(`⚠️ All prices suspicious, capping at 100x: ${safeExitPrice}`);
+        }
       }
       
       // Пересчитываем multiplier с безопасной ценой
@@ -950,15 +969,21 @@ export class PositionManager {
       // grossReturn = investedAmount * multiplier
       let grossReturn = safeInvested * safeMultiplier;
       
-      // Cap grossReturn at reasonable maximum (100x invested) - увеличено с 10x для самородков
-      // Но только если multiplier не подозрительно большой
+      // Защита от нереально больших grossReturn
+      // Максимальный разумный multiplier для pump.fun токенов: 1000x (очень редкий случай)
+      // Но если multiplier > 1000, это скорее всего ошибка bonding curve
       if (safeMultiplier > 1000) {
-        // Подозрительно большой multiplier - cap at 100x
-        grossReturn = safeInvested * 100;
-        console.error(`⚠️ Suspicious multiplier: ${safeMultiplier.toFixed(2)}x, capping grossReturn at 100x invested`);
-      } else if (grossReturn > safeInvested * 100) {
-        // Нормальный multiplier, но grossReturn слишком большой - cap at 100x
-        grossReturn = safeInvested * 100;
+        // Подозрительно большой multiplier - используем peakPrice если он разумный
+        const peakMultiplier = position.peakPrice / position.entryPrice;
+        if (peakMultiplier > 0 && peakMultiplier <= 1000 && position.peakPrice > 0) {
+          // Используем peakPrice для расчета
+          grossReturn = safeInvested * peakMultiplier;
+          console.error(`⚠️ Multiplier ${safeMultiplier.toFixed(2)}x too high, using peakMultiplier ${peakMultiplier.toFixed(2)}x`);
+        } else {
+          // Cap at 1000x (максимальный разумный multiplier)
+          grossReturn = safeInvested * 1000;
+          console.error(`⚠️ Multiplier ${safeMultiplier.toFixed(2)}x too high, capping at 1000x`);
+        }
       }
       
       // Deduct exit fees from gross return
