@@ -367,7 +367,13 @@ export class PositionManager {
       const [securityResult, positionResult] = await Promise.allSettled([
         quickSecurityCheck(candidate, isQueue1), // skipFreezeCheck только для queue1
         this.openPosition(candidate, isPriority).catch((error) => {
-          // Если price fetch провалился, это не критично - security check все равно нужен
+          // Log the error but return null to continue processing
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: candidate.mint,
+            message: `openPosition failed: ${error instanceof Error ? error.message : String(error)}`,
+          });
           return null;
         }),
       ]);
