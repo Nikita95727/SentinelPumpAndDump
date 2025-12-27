@@ -124,22 +124,11 @@ class Account {
       return minPositionSize;
     }
 
-    // Reserve funds for fees: entry fees + exit fees + exit slippage for all potential positions
-    // Для каждой позиции нужно резервировать: entry fees + exit fees + exit slippage
-    const exitFees = entryFees; // Exit fees = entry fees (same amount)
-    
-    // Рассчитываем консервативный резерв для exit slippage на основе минимального размера позиции
-    // Минимальный investedAmount после вычета entry fees
-    const minInvestedAmount = Math.max(0, minPositionSize - entryFees);
-    // Expected proceeds при take profit для минимальной позиции
-    const minExpectedProceeds = minInvestedAmount * config.takeProfitMultiplier;
-    // Консервативный exit slippage (максимальный slippage)
-    const minExitSlippage = minExpectedProceeds * config.slippageMax;
-    
-    // Резерв для каждой позиции: entry fees + exit fees + exit slippage
-    const reservePerPosition = entryFees + exitFees + minExitSlippage;
-    const reserveForFees = reservePerPosition * availableSlots;
-    const availableForPositions = Math.max(0, free - reserveForFees);
+    // Reserve funds for entry fees only in getPositionSize
+    // Exit fees and slippage будут резервироваться при открытии каждой позиции отдельно
+    // Это позволяет более гибко распределять баланс
+    const reserveForEntryFees = entryFees * availableSlots;
+    const availableForPositions = Math.max(0, free - reserveForEntryFees);
 
     if (availableForPositions <= 0) {
       return minPositionSize;
