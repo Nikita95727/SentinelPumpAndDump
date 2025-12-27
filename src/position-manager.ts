@@ -100,7 +100,8 @@ class Account {
 
   /**
    * Get position size based on current free balance
-   * Safety caps are applied externally by SafetyManager
+   * Distributes balance evenly across available positions (not divided by fixed number)
+   * Reserves funds for entry/exit fees
    * 
    * Minimum position size ensures fees never eat profit:
    * - Entry fees: 0.001005 SOL
@@ -109,12 +110,30 @@ class Account {
    * - Minimum invested: ~0.00134 SOL
    * - Minimum positionSize: ~0.002345 SOL (with 50% safety margin: 0.0035 SOL)
    */
-  getPositionSize(maxPositions: number, minPositionSize: number = 0.0035, workingBalance?: number): number {
+  getPositionSize(maxPositions: number, minPositionSize: number = 0.0035, workingBalance?: number, currentOpenPositions: number = 0, entryFees: number = 0.001005): number {
     const free = workingBalance !== undefined ? workingBalance - this.lockedBalance : this.getFreeBalance();
     if (free <= 0) {
       return minPositionSize;
     }
-    const calculatedSize = free / maxPositions;
+
+    // Calculate how many positions we can still open
+    const availableSlots = maxPositions - currentOpenPositions;
+    if (availableSlots <= 0) {
+      return minPositionSize;
+    }
+
+    // Reserve funds for fees: entry fees for all potential positions + buffer
+    // We reserve entry fees for remaining slots + one exit fee as buffer
+    const reserveForFees = entryFees * availableSlots + entryFees; // Entry fees + one exit fee buffer
+    const availableForPositions = Math.max(0, free - reserveForFees);
+
+    if (availableForPositions <= 0) {
+      return minPositionSize;
+    }
+
+    // Distribute evenly across available slots
+    const calculatedSize = availableForPositions / availableSlots;
+    
     // Ensure position size is at least minPositionSize to cover fees
     return Math.max(calculatedSize, minPositionSize);
   }
@@ -267,8 +286,9 @@ export class PositionManager {
 
     // Получаем размер позиции из Account с учетом working balance
     const workingBalance = this.safetyManager.getWorkingBalance(this.account.getTotalBalance());
-    // Minimum position size: 0.0035 SOL to ensure fees don't eat profit
-    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, workingBalance);
+    const entryFees = config.priorityFee + config.signatureFee;
+    // Calculate position size: distribute evenly, reserve for fees, min 0.0035 SOL
+    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, workingBalance, this.positions.size, entryFees);
     // Apply safety caps (stealth cap, night mode, reserve cap if available)
     const positionSize = this.safetyManager.applySafetyCaps(basePositionSize);
     
