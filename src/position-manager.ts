@@ -291,7 +291,20 @@ export class PositionManager {
     // Calculate position size: distribute evenly, reserve for fees, min 0.0035 SOL
     const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, workingBalance, this.positions.size, entryFees);
     // Apply safety caps (stealth cap, night mode, reserve cap if available)
-    const positionSize = this.safetyManager.applySafetyCaps(basePositionSize);
+    let positionSize = this.safetyManager.applySafetyCaps(basePositionSize);
+    
+    // Ensure position size is still above minimum after safety caps
+    // This is critical: night mode or other caps might reduce it below minimum
+    const MIN_POSITION_SIZE_AFTER_CAPS = 0.0035;
+    if (positionSize < MIN_POSITION_SIZE_AFTER_CAPS) {
+      // If safety caps reduced it too much, use minimum
+      // But only if we have enough balance
+      if (this.account.getFreeBalance() >= MIN_POSITION_SIZE_AFTER_CAPS) {
+        positionSize = MIN_POSITION_SIZE_AFTER_CAPS;
+      } else {
+        throw new Error(`Position size too small after safety caps: ${positionSize} < ${MIN_POSITION_SIZE_AFTER_CAPS}, insufficient balance`);
+      }
+    }
     
     // Рассчитываем комиссии (entryFees уже объявлен выше)
     const investedAmount = positionSize - entryFees;
