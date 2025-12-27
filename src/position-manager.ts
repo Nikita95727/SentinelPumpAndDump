@@ -454,7 +454,9 @@ export class PositionManager {
       };
       
       // 6. Запускаем параллельный мониторинг (НЕ await!)
-      void this.monitorPosition(position);
+      this.monitorPosition(position).catch(err => {
+        console.error(`❌ [ERROR] monitorPosition failed for ${position.token.slice(0, 8)}:`, err);
+      });
       
       logger.log({
         timestamp: getCurrentTimestamp(),
