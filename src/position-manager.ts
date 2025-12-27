@@ -631,6 +631,16 @@ export class PositionManager {
       message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)}`,
     });
 
+    // CRITICAL: Start monitoring immediately after position is created
+    this.monitorPosition(position).catch(err => {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: position.token,
+        message: `❌ [ERROR] monitorPosition failed: ${err.message}`,
+      });
+    });
+
     return position;
   }
 
