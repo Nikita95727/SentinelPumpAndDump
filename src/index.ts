@@ -13,6 +13,7 @@ class PumpFunSniper {
   private connection: Awaited<ReturnType<typeof getConnection>> | null = null;
   private statsInterval: NodeJS.Timeout | null = null;
   private isShuttingDown = false;
+  private lastBalanceLogTime: number = 0;
 
   async start(): Promise<void> {
     console.log('🚀 Starting Pump.fun Sniper Bot (Optimized)...');
@@ -82,8 +83,12 @@ class PumpFunSniper {
     // Проверяем баланс перед обработкой токена
     // Если баланса нет, не обрабатываем токен (не засоряем очередь)
     if (!this.positionManager.hasEnoughBalanceForTrading()) {
-      // Не логируем каждый раз, чтобы не засорять логи
-      // Логируем только периодически или при изменении состояния
+      // Логируем периодически для диагностики
+      const now = Date.now();
+      if (!this.lastBalanceLogTime || (now - this.lastBalanceLogTime) > 60000) { // Раз в минуту
+        console.log(`[${new Date().toLocaleTimeString()}] INFO | Insufficient balance for trading. Free balance: ${this.positionManager.getCurrentDeposit().toFixed(6)} SOL`);
+        this.lastBalanceLogTime = now;
+      }
       return;
     }
 
@@ -91,6 +96,7 @@ class PumpFunSniper {
       // Пытаемся открыть позицию (НЕ ждем батч!)
       await this.positionManager.tryOpenPosition(candidate);
     } catch (error) {
+      console.error(`[${new Date().toLocaleTimeString()}] ERROR | Error handling new token ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`);
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'error',
