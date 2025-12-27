@@ -836,8 +836,13 @@ export class PositionManager {
       .filter(p => p.status === 'active')
       .reduce((sum, p) => sum + (p.reservedAmount || 0), 0);
     
-    // Если lockedBalance не совпадает с суммой reservedAmount в позициях - это проблема
-    if (Math.abs(lockedBalance - totalReservedInPositions) > 0.0001) {
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Если нет позиций, но есть застрявшие средства - сбрасываем
+    if (this.positions.size === 0 && lockedBalance > 0.0001) {
+      console.error(`⚠️ BALANCE DESYNC: No positions but lockedBalance=${lockedBalance.toFixed(6)}`);
+      console.error(`   Fixing: setting lockedBalance to 0`);
+      this.account.fixLockedBalance(0);
+    } else if (Math.abs(lockedBalance - totalReservedInPositions) > 0.0001) {
+      // Рассинхронизация между lockedBalance и позициями
       console.error(`⚠️ BALANCE DESYNC: lockedBalance=${lockedBalance.toFixed(6)}, totalReservedInPositions=${totalReservedInPositions.toFixed(6)}, diff=${(lockedBalance - totalReservedInPositions).toFixed(6)}`);
       console.error(`   Active positions: ${activePositions.length}, Total positions: ${this.positions.size}`);
       // Исправляем рассинхронизацию
