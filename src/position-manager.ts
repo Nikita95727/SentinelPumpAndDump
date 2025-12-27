@@ -173,6 +173,19 @@ export class PositionManager {
   }
 
   /**
+   * Проверяет, есть ли достаточно баланса для открытия хотя бы одной позиции
+   * @returns true если есть баланс, false если нет
+   */
+  hasEnoughBalanceForTrading(): boolean {
+    const entryFees = config.priorityFee + config.signatureFee;
+    const minPositionSize = 0.0035; // Минимальный размер позиции
+    const requiredAmount = minPositionSize + entryFees; // Минимум для одной позиции
+    
+    const freeBalance = this.account.getFreeBalance();
+    return freeBalance >= requiredAmount;
+  }
+
+  /**
    * Пытается открыть позицию для токена
    * Возвращает true если позиция открыта, false если нет свободных слотов или проверка не прошла
    */

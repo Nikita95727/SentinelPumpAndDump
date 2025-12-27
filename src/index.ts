@@ -79,6 +79,14 @@ class PumpFunSniper {
   private async handleNewToken(candidate: TokenCandidate): Promise<void> {
     if (!this.positionManager || this.isShuttingDown) return;
 
+    // Проверяем баланс перед обработкой токена
+    // Если баланса нет, не обрабатываем токен (не засоряем очередь)
+    if (!this.positionManager.hasEnoughBalanceForTrading()) {
+      // Не логируем каждый раз, чтобы не засорять логи
+      // Логируем только периодически или при изменении состояния
+      return;
+    }
+
     try {
       // Пытаемся открыть позицию (НЕ ждем батч!)
       await this.positionManager.tryOpenPosition(candidate);
