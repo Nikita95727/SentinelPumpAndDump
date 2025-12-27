@@ -234,18 +234,23 @@ export class PositionManager {
     // }
 
     // 3. Проверка: достаточно ли средств для открытия позиции?
-    // TEMPORARILY DISABLED: Safety caps removed
+    // Проверяем минимальный требуемый резерв (positionSize + exitFees + exitSlippage)
     const entryFees = config.priorityFee + config.signatureFee;
-    // Calculate position size: distribute evenly, reserve for fees, min 0.0035 SOL
-    const positionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, this.account.getTotalBalance(), this.positions.size, entryFees);
-    const requiredAmount = positionSize;
+    const exitFees = config.priorityFee + config.signatureFee;
+    const MIN_POSITION_SIZE = 0.0035;
     
-    if (this.account.getFreeBalance() < requiredAmount) {
+    // Рассчитываем минимальный требуемый резерв для одной позиции
+    const minInvestedAmount = MIN_POSITION_SIZE - entryFees;
+    const minExpectedProceeds = minInvestedAmount * config.takeProfitMultiplier;
+    const minExitSlippage = minExpectedProceeds * config.slippageMax;
+    const minTotalReserved = MIN_POSITION_SIZE + exitFees + minExitSlippage;
+    
+    if (this.account.getFreeBalance() < minTotalReserved) {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: candidate.mint,
-        message: `Insufficient balance: ${this.account.getFreeBalance().toFixed(6)} SOL < ${requiredAmount.toFixed(6)} SOL`,
+        message: `Insufficient balance: ${this.account.getFreeBalance().toFixed(6)} SOL < ${minTotalReserved.toFixed(6)} SOL (min required for position)`,
       });
       return false;
     }
