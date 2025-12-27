@@ -192,6 +192,14 @@ export class PositionManager {
     const requiredAmount = minPositionSize + exitFees + exitSlippage;
     
     const freeBalance = this.account.getFreeBalance();
+    const totalBalance = this.account.getTotalBalance();
+    const lockedBalance = this.account.getLockedBalance();
+    
+    // Диагностика: логируем если баланс недостаточен
+    if (freeBalance < requiredAmount) {
+      console.log(`[DEBUG] hasEnoughBalanceForTrading: freeBalance=${freeBalance.toFixed(6)}, totalBalance=${totalBalance.toFixed(6)}, lockedBalance=${lockedBalance.toFixed(6)}, required=${requiredAmount.toFixed(6)}`);
+    }
+    
     return freeBalance >= requiredAmount;
   }
 
