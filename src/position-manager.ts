@@ -7,6 +7,7 @@ import { getCurrentTimestamp, sleep, calculateSlippage, formatUsd } from './util
 import { quickSecurityCheck } from './quick-filters';
 import { priceFetcher } from './price-fetcher';
 import { TokenFilters } from './filters';
+import { earlyActivityTracker } from './early-activity-tracker';
 
 const MAX_POSITIONS = 10;
 const MAX_HOLD_TIME = 90_000; // 90 секунд
@@ -173,7 +174,16 @@ export class PositionManager {
       return false;
     }
 
-    // 3. Быстрая проверка безопасности (ТОЛЬКО критичное!)
+    // 3. Early activity check - skip tokens with no early life
+    // This gate reduces dead/flat trades without cutting winners
+    const hasEarlyActivity = earlyActivityTracker.hasEarlyActivity(candidate.mint);
+    if (!hasEarlyActivity) {
+      // Token showed no early activity within observation window - skip
+      // This is NOT a permanent blacklist, just avoiding clearly dead tokens
+      return false;
+    }
+
+    // 4. Быстрая проверка безопасности (ТОЛЬКО критичное!)
     const securityCheckStart = Date.now();
     const passed = await quickSecurityCheck(candidate);
     const securityCheckDuration = Date.now() - securityCheckStart;
@@ -188,11 +198,11 @@ export class PositionManager {
       return false;
     }
 
-    // 4. Открываем позицию
+    // 5. Открываем позицию
     try {
       const position = await this.openPosition(candidate);
       
-      // 5. Запускаем параллельный мониторинг (НЕ await!)
+      // 6. Запускаем параллельный мониторинг (НЕ await!)
       void this.monitorPosition(position);
       
       logger.log({

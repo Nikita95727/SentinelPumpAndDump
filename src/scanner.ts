@@ -5,6 +5,7 @@ import { TokenCandidate } from './types';
 import { logger } from './logger';
 import { getCurrentTimestamp, sleep } from './utils';
 import { getRpcPool } from './rpc-pool';
+import { earlyActivityTracker } from './early-activity-tracker';
 
 export class TokenScanner {
   private ws: WebSocket | null = null;
@@ -381,6 +382,9 @@ export class TokenScanner {
         const mintAddress = this.extractMintFromTransaction(tx);
         
         if (mintAddress) {
+          // Start early activity observation for this token
+          earlyActivityTracker.startObservation(mintAddress);
+          
           // Используем время транзакции как время создания токена (более точно)
           // Но для приоритетных очередей используем время уведомления минус задержка обработки
           const txTime = tx.blockTime ? tx.blockTime * 1000 : notificationTime;
