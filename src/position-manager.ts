@@ -292,8 +292,7 @@ export class PositionManager {
     // Apply safety caps (stealth cap, night mode, reserve cap if available)
     const positionSize = this.safetyManager.applySafetyCaps(basePositionSize);
     
-    // Рассчитываем комиссии
-    const entryFees = config.priorityFee + config.signatureFee;
+    // Рассчитываем комиссии (entryFees уже объявлен выше)
     const investedAmount = positionSize - entryFees;
 
     if (investedAmount <= 0) {
