@@ -215,6 +215,26 @@ export class PumpFunSwap {
         return result;
       }
 
+      // ✅ FIX: НЕ ретраим при критичных ошибках инфраструктуры (ATA/programId)
+      // Эти ошибки не исправятся ретраем - нужна ручная проверка
+      const errorMsg = result.error || '';
+      const isInfrastructureError = 
+        errorMsg.includes('incorrect program id') ||
+        errorMsg.includes('IncorrectProgramId') ||
+        errorMsg.includes('missing account') ||
+        errorMsg.includes('AccountNotFound') ||
+        errorMsg.includes('invalid account');
+      
+      if (isInfrastructureError) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: tokenMint,
+          message: `❌ CRITICAL: SELL FAILED due to infrastructure error (ATA/programId) - STOPPING retries to prevent fee burn: ${result.error}`,
+        });
+        return result;
+      }
+
       const is3012Error = result.error?.includes('Custom:3012') || result.error?.includes('"Custom":3012');
 
       if (!is3012Error || attempt === MAX_RETRIES) {
@@ -262,6 +282,18 @@ export class PumpFunSwap {
         message: `🔄 Pump.fun SELL (SDK) attempt ${attempt}: ${amountTokens} tokens → ${tokenMint}`,
       });
 
+      // ✅ FIX: Получаем ATA address ПЕРЕД получением инструкций SDK
+      // НИКОГДА не предполагаем что ATA существует - токены могли быть получены, но ATA creation могло фейлиться
+      const ata = await getAssociatedTokenAddress(
+        mintPubkey,
+        wallet.publicKey
+      );
+
+      // ✅ FIX: Проверяем существует ли ATA (НЕ создаем если уже существует)
+      const ataAccountInfo = await this.connection.getAccountInfo(ata);
+      const needsAta = ataAccountInfo === null;
+
+      // Получаем инструкции через SDK
       const sellInstructions = await this.sdk.getSellInstructionsByTokenAmount(
         wallet.publicKey,
         mintPubkey,
@@ -270,6 +302,15 @@ export class PumpFunSwap {
         'processed'
       );
 
+      // ✅ FIX: Удаляем ВСЕ ATA creation инструкции из SDK (они могут быть с неправильным programId)
+      // Фильтруем по programId - удаляем все инструкции Associated Token Program
+      const filteredInstructions = sellInstructions.instructions.filter(ix => {
+        const programIdStr = ix.programId.toString();
+        // Удаляем инструкции Associated Token Program (SDK может создавать их неправильно)
+        return programIdStr !== ASSOCIATED_TOKEN_PROGRAM_ID.toString();
+      });
+
+      // Создаем транзакцию
       const transaction = new Transaction();
       transaction.add(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 })
@@ -277,7 +318,23 @@ export class PumpFunSwap {
       transaction.add(
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 150_000 })
       );
-      transaction.add(...sellInstructions.instructions);
+
+      // ✅ FIX: Добавляем ПРАВИЛЬНУЮ ATA creation ПЕРЕД Pump.fun SELL инструкцией (только если нужно)
+      // Порядок: ComputeBudget -> ATA creation (if needed) -> SELL instruction
+      if (needsAta) {
+        const ataIx = createAssociatedTokenAccountInstruction(
+          wallet.publicKey, // payer
+          ata,              // ata address
+          wallet.publicKey, // owner
+          mintPubkey,       // mint
+          TOKEN_PROGRAM_ID,
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        );
+        transaction.add(ataIx);
+      }
+
+      // Добавляем отфильтрованные SDK инструкции (Pump.fun SELL и другие, БЕЗ ATA)
+      transaction.add(...filteredInstructions);
 
       const signature = await sendAndConfirmTransaction(this.connection, transaction, [wallet], {
         commitment: 'processed',
@@ -306,14 +363,35 @@ export class PumpFunSwap {
       const sellDuration = sellEndTime - sellStartTime;
       const errorMessage = error instanceof Error ? error.message : String(error);
 
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'error',
-        token: tokenMint,
-        message: `❌ Pump.fun SELL (SDK) attempt ${attempt} FAILED: ${errorMessage} | Duration: ${sellDuration}ms`,
-      });
+      // ✅ FIX: Определяем тип ошибки для правильной обработки
+      const isInfrastructureError = 
+        errorMessage.includes('incorrect program id') ||
+        errorMessage.includes('IncorrectProgramId') ||
+        errorMessage.includes('missing account') ||
+        errorMessage.includes('AccountNotFound') ||
+        errorMessage.includes('invalid account');
 
-      return { success: false, error: errorMessage };
+      // ✅ FIX: Логируем критичные ошибки инфраструктуры отдельно
+      if (isInfrastructureError) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: tokenMint,
+          message: `❌ CRITICAL: Pump.fun SELL (SDK) attempt ${attempt} FAILED due to infrastructure error: ${errorMessage} | Duration: ${sellDuration}ms | This may indicate ATA/programId issue - position may need manual intervention`,
+        });
+      } else {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: tokenMint,
+          message: `❌ Pump.fun SELL (SDK) attempt ${attempt} FAILED: ${errorMessage} | Duration: ${sellDuration}ms`,
+        });
+      }
+
+      return { 
+        success: false, 
+        error: errorMessage
+      };
     }
   }
 }
