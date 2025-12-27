@@ -10,7 +10,7 @@ import { TokenFilters } from './filters';
 import { earlyActivityTracker } from './early-activity-tracker';
 import { SafetyManager } from './safety-manager';
 
-const MAX_POSITIONS = 10;
+// Используем config.maxOpenPositions вместо хардкода
 const MAX_HOLD_TIME = 90_000; // 90 секунд
 const TRAILING_STOP_PCT = 0.25;
 const CHECK_INTERVAL = 2000; // Проверка каждые 2 секунды (даем импульсу развиться, но не пропускаем падение)
@@ -74,9 +74,21 @@ class Account {
   }
 
   /**
+   * Deduct amount from deposit (for position opening)
+   * ISSUE #1: Deduct FULL positionSize from deposit (includes entry fees)
+   */
+  deductFromDeposit(amount: number): void {
+    if (amount <= 0) return;
+    this.totalBalance -= amount;
+    if (this.totalBalance < 0) {
+      this.totalBalance = 0;
+    }
+  }
+
+  /**
    * Release reserved funds and update total balance with net proceeds
-   * proceeds = investedAmount * multiplier - exitFees
-   * reservedAmount = amount that was locked
+   * ISSUE #1 FIX: On close, add back (grossReturn - exitFees) to deposit
+   * proceeds already has exitFees deducted
    */
   release(reservedAmount: number, proceeds: number): void {
     if (reservedAmount < 0 || this.lockedBalance < reservedAmount) {
@@ -88,11 +100,8 @@ class Account {
     // Release the locked amount
     this.lockedBalance -= reservedAmount;
     
-    // Update total balance: add net profit/loss
-    // netChange = proceeds - reservedAmount
-    // This correctly accounts for: we locked reservedAmount, got back proceeds
-    const netChange = proceeds - reservedAmount;
-    this.totalBalance += netChange;
+    // ISSUE #1 FIX: proceeds already has exitFees deducted, so add it back to deposit
+    this.totalBalance += proceeds;
     
     // Update peak
     if (this.totalBalance > this.peakBalance) {
@@ -289,12 +298,12 @@ export class PositionManager {
     }
 
     // 1. Проверка: есть ли свободные слоты?
-    if (this.positions.size >= MAX_POSITIONS) {
+    if (this.positions.size >= config.maxOpenPositions) {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: candidate.mint,
-        message: `No free slots (${this.positions.size}/${MAX_POSITIONS})`,
+        message: `No free slots (${this.positions.size}/${config.maxOpenPositions})`,
       });
       return false;
     }
@@ -495,10 +504,12 @@ export class PositionManager {
     });
 
     // Получаем размер позиции из Account с учетом working balance
-    // TEMPORARILY DISABLED: Safety caps removed for testing
     const entryFees = config.priorityFee + config.signatureFee;
     // Calculate position size: distribute evenly, reserve for fees, min 0.0035 SOL
-    const positionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, this.account.getTotalBalance(), this.positions.size, entryFees);
+    let positionSize = this.account.getPositionSize(config.maxOpenPositions, 0.0035, this.account.getTotalBalance(), this.positions.size, entryFees);
+    
+    // Apply safety caps (maxSolPerTrade = 0.05 SOL) - ограничение для избежания влияния на цену
+    positionSize = this.safetyManager.applySafetyCaps(positionSize);
     
     // Ensure position size is at least minimum
     const MIN_POSITION_SIZE = 0.0035;
@@ -547,6 +558,10 @@ export class PositionManager {
     if (!this.account.reserve(totalReservedAmount)) {
       throw new Error(`Failed to reserve ${totalReservedAmount} SOL (insufficient free balance). Required: positionSize=${positionSize} + exitFees=${exitFees} + exitSlippage=${exitSlippage.toFixed(6)})`);
     }
+    
+    // ISSUE #1: Deduct FULL positionSize from deposit (includes entry fees)
+    // Entry fees are already included in positionSize, so we deduct the full amount
+    this.account.deductFromDeposit(positionSize);
 
     // Рассчитываем slippage
     const slippage = calculateSlippage();
@@ -733,21 +748,25 @@ export class PositionManager {
         safeInvested = 0.003;
       }
       
-      // Calculate proceeds: investedAmount * multiplier - exitFees
-      let proceeds = safeInvested * safeMultiplier - exitFee;
+      // ISSUE #1 FIX: Calculate grossReturn first, then deduct exitFees
+      // grossReturn = investedAmount * multiplier
+      let grossReturn = safeInvested * safeMultiplier;
       
-      // Cap proceeds at reasonable maximum (10x invested)
-      if (proceeds > safeInvested * 10) {
-        proceeds = safeInvested * 10 - exitFee;
+      // Cap grossReturn at reasonable maximum (10x invested)
+      if (grossReturn > safeInvested * 10) {
+        grossReturn = safeInvested * 10;
       }
+      
+      // Deduct exit fees from gross return
+      let proceeds = grossReturn - exitFee;
       
       // Ensure proceeds >= 0
       if (proceeds < 0) {
         proceeds = 0;
       }
       
-      // Release funds and update balance via Account
-      // This is the ONLY place where totalBalance changes
+      // ISSUE #1 FIX: Release funds and add back (grossReturn - exitFees) to deposit
+      // proceeds already has exitFees deducted
       this.account.release(reservedAmount, proceeds);
       
       // Update safety manager with new balance (for drawdown tracking and profit lock)
@@ -899,7 +918,7 @@ export class PositionManager {
 
     return {
       activePositions: activePositions.length,
-      availableSlots: MAX_POSITIONS - activePositions.length,
+      availableSlots: config.maxOpenPositions - activePositions.length,
       positions,
     };
   }

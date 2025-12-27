@@ -42,7 +42,7 @@ export const config: Config = {
   redisPassword: process.env.REDIS_PASSWORD || undefined,
   logDir: process.env.LOG_DIR || './logs',
   // Safety mechanisms
-  maxSolPerTrade: parseFloat(process.env.MAX_SOL_PER_TRADE || '0.15'), // Hard cap per trade (stealth)
+  maxSolPerTrade: parseFloat(process.env.MAX_SOL_PER_TRADE || '0.05'), // Hard cap per trade (stealth) - безопасный размер, не влияет на цену
   maxReservePercent: parseFloat(process.env.MAX_RESERVE_PERCENT || '1.0'), // Max % of reserves per trade (if data available)
   nightModeEnabled: process.env.NIGHT_MODE_ENABLED !== 'false',
   nightModeStartHour: parseInt(process.env.NIGHT_MODE_START_HOUR || '0', 10), // UTC hour (0-23)
