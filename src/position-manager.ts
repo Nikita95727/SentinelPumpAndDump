@@ -124,9 +124,21 @@ class Account {
       return minPositionSize;
     }
 
-    // Reserve funds for fees: entry fees for all potential positions + buffer
-    // We reserve entry fees for remaining slots + one exit fee as buffer
-    const reserveForFees = entryFees * availableSlots + entryFees; // Entry fees + one exit fee buffer
+    // Reserve funds for fees: entry fees + exit fees + exit slippage for all potential positions
+    // Для каждой позиции нужно резервировать: entry fees + exit fees + exit slippage
+    const exitFees = entryFees; // Exit fees = entry fees (same amount)
+    
+    // Рассчитываем консервативный резерв для exit slippage на основе минимального размера позиции
+    // Минимальный investedAmount после вычета entry fees
+    const minInvestedAmount = Math.max(0, minPositionSize - entryFees);
+    // Expected proceeds при take profit для минимальной позиции
+    const minExpectedProceeds = minInvestedAmount * config.takeProfitMultiplier;
+    // Консервативный exit slippage (максимальный slippage)
+    const minExitSlippage = minExpectedProceeds * config.slippageMax;
+    
+    // Резерв для каждой позиции: entry fees + exit fees + exit slippage
+    const reservePerPosition = entryFees + exitFees + minExitSlippage;
+    const reserveForFees = reservePerPosition * availableSlots;
     const availableForPositions = Math.max(0, free - reserveForFees);
 
     if (availableForPositions <= 0) {
@@ -174,12 +186,22 @@ export class PositionManager {
 
   /**
    * Проверяет, есть ли достаточно баланса для открытия хотя бы одной позиции
+   * Учитывает резервы для входа, выхода и slippage
    * @returns true если есть баланс, false если нет
    */
   hasEnoughBalanceForTrading(): boolean {
     const entryFees = config.priorityFee + config.signatureFee;
+    const exitFees = config.priorityFee + config.signatureFee;
     const minPositionSize = 0.0035; // Минимальный размер позиции
-    const requiredAmount = minPositionSize + entryFees; // Минимум для одной позиции
+    const investedAmount = minPositionSize - entryFees; // После вычета entry fees
+    
+    // Рассчитываем резерв для выхода (exit fees + slippage)
+    // Expected proceeds при take profit: investedAmount * 2.5
+    const expectedProceedsAtTakeProfit = investedAmount * config.takeProfitMultiplier;
+    const exitSlippage = expectedProceedsAtTakeProfit * config.slippageMax;
+    
+    // Общий требуемый резерв: positionSize + exitFees + exitSlippage
+    const requiredAmount = minPositionSize + exitFees + exitSlippage;
     
     const freeBalance = this.account.getFreeBalance();
     return freeBalance >= requiredAmount;
@@ -425,7 +447,8 @@ export class PositionManager {
       }
     }
     
-    // Рассчитываем комиссии (entryFees уже объявлен выше)
+    // Рассчитываем комиссии
+    const exitFees = config.priorityFee + config.signatureFee;
     const investedAmount = positionSize - entryFees;
 
     if (investedAmount <= 0) {
@@ -433,7 +456,6 @@ export class PositionManager {
     }
 
     // Additional check: ensure investedAmount is sufficient for profit after exit fees
-    const exitFees = config.priorityFee + config.signatureFee;
     const totalFees = entryFees + exitFees;
     // For 2.5x profit: investedAmount * 1.5 must be > totalFees
     const minInvestedForProfit = totalFees / 1.5;
@@ -441,14 +463,25 @@ export class PositionManager {
       throw new Error(`Position size too small: investedAmount (${investedAmount}) < minimum for profit (${minInvestedForProfit})`);
     }
 
+    // Рассчитываем резерв для выхода:
+    // - exitFees (комиссия на выход)
+    // - exitSlippage (slippage на выход, рассчитываем как процент от expected proceeds)
+    // Expected proceeds при take profit (2.5x): investedAmount * 2.5
+    const expectedProceedsAtTakeProfit = investedAmount * config.takeProfitMultiplier;
+    // Slippage на выход: используем максимальный slippage для безопасности
+    const exitSlippage = expectedProceedsAtTakeProfit * config.slippageMax;
+    
+    // Общий резерв для позиции: investedAmount + entryFees + exitFees + exitSlippage
+    const totalReservedAmount = positionSize + exitFees + exitSlippage;
+
     // Защита от некорректных значений
-    if (investedAmount > 1.0 || positionSize > 1.0) {
-      throw new Error(`Invalid amounts: positionSize=${positionSize}, investedAmount=${investedAmount}`);
+    if (investedAmount > 1.0 || positionSize > 1.0 || totalReservedAmount > 1.0) {
+      throw new Error(`Invalid amounts: positionSize=${positionSize}, investedAmount=${investedAmount}, totalReserved=${totalReservedAmount}`);
     }
 
-    // Резервируем средства через Account
-    if (!this.account.reserve(positionSize)) {
-      throw new Error(`Failed to reserve ${positionSize} SOL (insufficient free balance)`);
+    // Резервируем средства через Account (включая резерв для выхода)
+    if (!this.account.reserve(totalReservedAmount)) {
+      throw new Error(`Failed to reserve ${totalReservedAmount} SOL (insufficient free balance). Required: positionSize=${positionSize} + exitFees=${exitFees} + exitSlippage=${exitSlippage.toFixed(6)})`);
     }
 
     // Рассчитываем slippage
@@ -456,7 +489,7 @@ export class PositionManager {
     const actualEntryPrice = entryPrice * (1 + slippage);
 
     // Создаем позицию
-    // Position stores: reservedAmount (positionSize) and investedAmount (after fees)
+    // Position stores: reservedAmount (totalReservedAmount включая exit fees и slippage) and investedAmount (after entry fees)
     const position: Position = {
       token: candidate.mint,
       entryPrice: actualEntryPrice,
@@ -467,8 +500,8 @@ export class PositionManager {
       currentPrice: actualEntryPrice,
       status: 'active',
       errorCount: 0,
-      // Store reservedAmount for proper accounting on close
-      reservedAmount: positionSize,
+      // Store totalReservedAmount for proper accounting on close (includes exit fees and slippage)
+      reservedAmount: totalReservedAmount,
     };
 
     this.positions.set(candidate.mint, position);
