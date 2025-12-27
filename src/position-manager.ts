@@ -626,6 +626,7 @@ export class PositionManager {
    * Использует промежуточный расчет цены по импульсу для более быстрой реакции
    */
   private async monitorPosition(position: Position): Promise<void> {
+    console.log(`🔍 [DEBUG] monitorPosition started for ${position.token.slice(0, 8)}...`);
     let lastPriceCheck = Date.now();
     
     while (position.status === 'active') {
@@ -635,6 +636,7 @@ export class PositionManager {
       
       // КРИТИЧЕСКАЯ ПРОВЕРКА: Timeout (90 секунд) - проверяем ВСЕГДА, независимо от проверки цены
       if (elapsed >= MAX_HOLD_TIME) {
+        console.log(`⏰ [DEBUG] TIMEOUT triggered for ${position.token.slice(0, 8)}... after ${(elapsed/1000).toFixed(1)}s`);
         const currentPrice = position.currentPrice || position.entryPrice;
         await this.closePosition(position, 'timeout', currentPrice);
         return;
