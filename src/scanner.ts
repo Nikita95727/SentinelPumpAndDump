@@ -195,11 +195,44 @@ export class TokenScanner {
       // Обработка уведомлений о логах
       if (message.method === 'logsNotification' && message.params) {
         const notification = message.params;
+        const logs = notification.result?.value?.logs || [];
+        
+        // Check for early activity (buy/swap transactions) for tokens we're observing
+        // This uses ONLY WebSocket data, no RPC calls
+        const hasBuySwapActivity = logs.some((log: string) => {
+          const lowerLog = log.toLowerCase();
+          return (
+            lowerLog.includes('swap') ||
+            lowerLog.includes('buy') ||
+            lowerLog.includes('instruction: buy') ||
+            lowerLog.includes('instruction: swap')
+          );
+        });
+        
+        // If this looks like a buy/swap, try to extract mint and record activity
+        if (hasBuySwapActivity) {
+          // Try to extract mint from logs (cheap, no RPC)
+          // Look for mint patterns in logs - pump.fun tokens are base58 strings
+          for (const log of logs) {
+            // Simple pattern: mint addresses are base58 strings of specific length
+            // Match potential mint addresses (32-44 chars, base58)
+            const mintMatches = log.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/g);
+            if (mintMatches) {
+              for (const potentialMint of mintMatches) {
+                // Skip system accounts
+                if (potentialMint === '11111111111111111111111111111111' ||
+                    potentialMint === 'So11111111111111111111111111111111111111112') {
+                  continue;
+                }
+                // Record activity for any mint we're observing
+                earlyActivityTracker.recordActivity(potentialMint);
+              }
+            }
+          }
+        }
         
         // СТРОГАЯ ФИЛЬТРАЦИЯ: проверяем наличие событий создания токена ДО добавления в очередь
         // Откидываем все остальные уведомления сразу
-        const logs = notification.result?.value?.logs || [];
-        
         // Более точная проверка на создание токена
         // Ищем специфичные паттерны создания токена в pump.fun
         const hasTokenCreation = logs.some((log: string) => {
