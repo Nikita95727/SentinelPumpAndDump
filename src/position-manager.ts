@@ -844,8 +844,10 @@ export class PositionManager {
           }
 
           // ОБЩАЯ ЗАЩИТА: Держим близко к timeout и цена сильно упала
-          // Если держим 85+ секунд и текущая цена < 70% от пика - принудительный выход
-          if (timeHeldSeconds >= 85 && currentMultiplier < peakMultiplier * 0.70) {
+          // Если держим 85+ секунд и текущая цена < 50% от пика - принудительный выход
+          // Для самородков (peak > 10x) используем более мягкое условие: < 40% от пика
+          const emergencyDropThreshold = peakMultiplier >= 10.0 ? 0.40 : 0.50;
+          if (timeHeldSeconds >= 85 && currentMultiplier < peakMultiplier * emergencyDropThreshold) {
             await this.closePosition(position, 'emergency_exit', currentMultiplier);
             return;
           }
@@ -926,12 +928,16 @@ export class PositionManager {
       const investedAmount = position.investedSol; // Amount actually invested (after entry fees)
       const reservedAmount = position.reservedAmount || investedAmount; // Amount that was locked
       
-      // Защита от некорректных значений multiplier
-      let safeMultiplier = multiplier;
-      if (multiplier > 100 || multiplier < 0 || !isFinite(multiplier)) {
-        console.error(`⚠️ Invalid multiplier: ${multiplier}, using 1.0`);
-        safeMultiplier = 1.0;
+      // Защита от некорректных значений exitPrice (может быть огромным из-за bonding curve ошибок)
+      let safeExitPrice = exitPrice;
+      if (exitPrice > position.entryPrice * 1000 || exitPrice <= 0 || !isFinite(exitPrice)) {
+        // Цена некорректна - используем текущую кэшированную цену или entryPrice
+        safeExitPrice = position.currentPrice && position.currentPrice > 0 ? position.currentPrice : position.entryPrice;
+        console.error(`⚠️ Invalid exitPrice: ${exitPrice}, using safeExitPrice: ${safeExitPrice}`);
       }
+      
+      // Пересчитываем multiplier с безопасной ценой
+      const safeMultiplier = safeExitPrice / position.entryPrice;
       
       // Защита от некорректных значений investedAmount
       let safeInvested = investedAmount;
@@ -944,9 +950,15 @@ export class PositionManager {
       // grossReturn = investedAmount * multiplier
       let grossReturn = safeInvested * safeMultiplier;
       
-      // Cap grossReturn at reasonable maximum (10x invested)
-      if (grossReturn > safeInvested * 10) {
-        grossReturn = safeInvested * 10;
+      // Cap grossReturn at reasonable maximum (100x invested) - увеличено с 10x для самородков
+      // Но только если multiplier не подозрительно большой
+      if (safeMultiplier > 1000) {
+        // Подозрительно большой multiplier - cap at 100x
+        grossReturn = safeInvested * 100;
+        console.error(`⚠️ Suspicious multiplier: ${safeMultiplier.toFixed(2)}x, capping grossReturn at 100x invested`);
+      } else if (grossReturn > safeInvested * 100) {
+        // Нормальный multiplier, но grossReturn слишком большой - cap at 100x
+        grossReturn = safeInvested * 100;
       }
       
       // Deduct exit fees from gross return
