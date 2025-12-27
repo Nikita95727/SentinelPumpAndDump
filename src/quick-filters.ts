@@ -30,8 +30,9 @@ function setMicroCache<T>(key: string, value: T, ttl: number = MICRO_CACHE_TTL):
  * Быстрая проверка безопасности - ОПТИМИЗИРОВАННАЯ
  * Pipeline: локальные проверки → RPC mint check → кеш
  * Цель: фильтрация за <30-40ms, максимальная надежность
+ * @param skipFreezeCheck - для queue1 можно пропустить проверку freezeAuthority (ускорение)
  */
-export async function quickSecurityCheck(candidate: TokenCandidate): Promise<boolean> {
+export async function quickSecurityCheck(candidate: TokenCandidate, skipFreezeCheck: boolean = false): Promise<boolean> {
   try {
     // ===== 1. LOCAL / ZERO-COST CHECKS (NO ASYNC, NO RPC) =====
     
@@ -130,6 +131,11 @@ export async function quickSecurityCheck(candidate: TokenCandidate): Promise<boo
       mintAuthority: mintRenounced,
       freezeAuthority: freezeRenounced,
     }, 100);
+    
+    // Для queue1 можно пропустить проверку freezeAuthority (ускорение, минимальный риск)
+    if (skipFreezeCheck) {
+      return mintRenounced; // Только mintAuthority проверка
+    }
     
     // Обе проверки должны пройти
     return mintRenounced && freezeRenounced;

@@ -225,7 +225,13 @@ export class PositionManager {
       return false;
     }
 
-    // 4. Early activity check - skip tokens with no early life
+    // 4. Определяем очередь токена для оптимизаций
+    const age = (Date.now() - candidate.createdAt) / 1000;
+    const isQueue1 = age >= config.queue1MinDelaySeconds && age <= config.queue1MaxDelaySeconds;
+    const isQueue2 = age >= config.queue2MinDelaySeconds && age <= config.queue2MaxDelaySeconds;
+    const isPriority = isQueue1 || isQueue2;
+
+    // 5. Early activity check - skip tokens with no early life
     // This gate reduces dead/flat trades without cutting winners
     const earlyActivityCheckStart = Date.now();
     const hasEarlyActivity = earlyActivityTracker.hasEarlyActivity(candidate.mint);
@@ -237,27 +243,89 @@ export class PositionManager {
       return false;
     }
 
-    // 5. Быстрая проверка безопасности (ТОЛЬКО критичное!)
+    // 6. ОПТИМИЗАЦИЯ: Параллельная обработка security check + price fetch для приоритетных очередей
     const securityCheckStart = Date.now();
-    const passed = await quickSecurityCheck(candidate);
-    const securityCheckDuration = Date.now() - securityCheckStart;
+    const openStartTime = Date.now(); // Для измерения openDuration
+    let securityCheckDuration = 0;
+    let openDuration = 0;
+    let passed = false;
+    let position: Position | null = null;
 
-    if (!passed) {
+    if (isPriority) {
+      // Для queue1 и queue2: параллельная обработка
+      // skipFreezeCheck только для queue1 (более агрессивная оптимизация)
+      const [securityResult, positionResult] = await Promise.allSettled([
+        quickSecurityCheck(candidate, isQueue1), // skipFreezeCheck только для queue1
+        this.openPosition(candidate, isPriority).catch((error) => {
+          // Если price fetch провалился, это не критично - security check все равно нужен
+          return null;
+        }),
+      ]);
+
+      securityCheckDuration = Date.now() - securityCheckStart;
+      openDuration = Date.now() - openStartTime;
+      
+      if (securityResult.status === 'fulfilled') {
+        passed = securityResult.value;
+      } else {
+        passed = false;
+      }
+
+      if (positionResult.status === 'fulfilled') {
+        position = positionResult.value;
+      }
+
+      if (!passed) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `Security check failed (${securityCheckDuration}ms)`,
+        });
+        return false;
+      }
+
+      if (!position) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: candidate.mint,
+          message: `Failed to open position (parallel processing)`,
+        });
+        return false;
+      }
+    } else {
+      // Для остальных очередей: последовательная обработка (как было)
+      passed = await quickSecurityCheck(candidate);
+      securityCheckDuration = Date.now() - securityCheckStart;
+
+      if (!passed) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `Security check failed (${securityCheckDuration}ms)`,
+        });
+        return false;
+      }
+
+      // Открываем позицию
+      position = await this.openPosition(candidate, isPriority);
+      openDuration = Date.now() - openStartTime;
+    }
+
+    // 7. Позиция открыта успешно
+    if (!position) {
       logger.log({
         timestamp: getCurrentTimestamp(),
-        type: 'info',
+        type: 'error',
         token: candidate.mint,
-        message: `Security check failed (${securityCheckDuration}ms)`,
+        message: `Position is null after processing`,
       });
       return false;
     }
 
-    // 5. Открываем позицию
     try {
-      const openStartTime = Date.now();
-      const position = await this.openPosition(candidate);
-      const openDuration = Date.now() - openStartTime;
-      
       // Calculate total time from token creation to position opening
       const totalTimeFromCreation = (Date.now() - tokenCreatedAt) / 1000; // seconds
       const tokenAgeAtOpen = totalTimeFromCreation;
@@ -299,16 +367,17 @@ export class PositionManager {
 
   /**
    * Открывает позицию для токена
+   * @param isPriority - для queue1/queue2: убираем задержки перед price fetch
    */
-  private async openPosition(candidate: TokenCandidate): Promise<Position> {
+  private async openPosition(candidate: TokenCandidate, isPriority: boolean = false): Promise<Position> {
     const openStartTime = Date.now();
 
     // TIMING ANALYSIS: Get price at detection time for comparison
     const priceFetchStart = Date.now();
     const tokenAgeBeforePriceFetch = (Date.now() - candidate.createdAt) / 1000;
     
-    // Получаем цену входа
-    const entryPrice = await this.filters.getEntryPrice(candidate.mint);
+    // Получаем цену входа (для приоритетных очередей убираем задержку)
+    const entryPrice = await this.filters.getEntryPrice(candidate.mint, isPriority);
     const priceFetchDuration = Date.now() - priceFetchStart;
     const tokenAgeAfterPriceFetch = (Date.now() - candidate.createdAt) / 1000;
     

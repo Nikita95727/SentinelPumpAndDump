@@ -1074,7 +1074,7 @@ export class TokenFilters {
     }
   }
 
-  async getEntryPrice(mint: string): Promise<number> {
+  async getEntryPrice(mint: string, isPriority: boolean = false): Promise<number> {
     const maxRetries = 3;
     let lastError: any = null;
 
@@ -1083,7 +1083,10 @@ export class TokenFilters {
     
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        await sleep(config.rpcRequestDelay);
+        // Для приоритетных очередей (queue1, queue2) убираем задержку - RPC pool уже управляет rate limiting
+        if (!isPriority) {
+          await sleep(config.rpcRequestDelay);
+        }
         
         // Получаем цену напрямую из bonding curve контракта pump.fun
         // НЕ используем Jupiter API - новые токены не индексируются сразу
