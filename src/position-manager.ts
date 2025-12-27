@@ -124,12 +124,10 @@ class Account {
       return minPositionSize;
     }
 
-    // Reserve funds for entry fees only in getPositionSize
-    // Exit fees and slippage будут резервироваться при открытии каждой позиции отдельно
-    // Резервируем entry fees только для реально доступных слотов, но не все сразу
-    // Используем более консервативный подход: резервируем только для 1-2 позиций вперед
-    const reserveForEntryFees = entryFees * Math.min(availableSlots, 2); // Резервируем только для 2 позиций
-    const availableForPositions = Math.max(0, free - reserveForEntryFees);
+    // Не резервируем entry fees заранее в getPositionSize
+    // Все резервы (entry fees + exit fees + slippage) будут проверяться при открытии позиции
+    // Это позволяет более гибко использовать баланс
+    const availableForPositions = free;
 
     if (availableForPositions <= 0) {
       return minPositionSize;
