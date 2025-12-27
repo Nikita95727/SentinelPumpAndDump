@@ -331,6 +331,20 @@ export class PositionManager {
       return false;
     }
 
+    // ⚡ КРИТИЧНО: Минимальный возраст токена для стабильной работы SDK
+    const MIN_TOKEN_AGE_SECONDS = 5;
+    if (tokenAgeAtStart < MIN_TOKEN_AGE_SECONDS) {
+      const waitTime = (MIN_TOKEN_AGE_SECONDS - tokenAgeAtStart) * 1000;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `⏱️ Token too young (${tokenAgeAtStart.toFixed(2)}s), waiting ${(waitTime / 1000).toFixed(2)}s for SDK initialization...`,
+      });
+      // Ждем пока токену не исполнится MIN_TOKEN_AGE_SECONDS
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+
     // 1. Проверка: есть ли свободные слоты?
     if (this.positions.size >= config.maxOpenPositions) {
       logger.log({
