@@ -48,6 +48,14 @@ class Account {
     return this.peakBalance;
   }
 
+  // Метод для исправления рассинхронизации (только для диагностики)
+  fixLockedBalance(correctValue: number): void {
+    this.lockedBalance = correctValue;
+    if (this.lockedBalance < 0) {
+      this.lockedBalance = 0;
+    }
+  }
+
   /**
    * Reserve funds for a position
    * Returns true if successful, false if insufficient funds
@@ -819,6 +827,24 @@ export class PositionManager {
       multiplier: p.currentPrice ? (p.currentPrice / p.entryPrice).toFixed(2) + 'x' : '1.00x',
       age: `${Math.floor((Date.now() - p.entryTime) / 1000)}s`,
     }));
+
+    // Диагностика: проверяем рассинхронизацию баланса
+    const freeBalance = this.account.getFreeBalance();
+    const totalBalance = this.account.getTotalBalance();
+    const lockedBalance = this.account.getLockedBalance();
+    const totalReservedInPositions = Array.from(this.positions.values())
+      .filter(p => p.status === 'active')
+      .reduce((sum, p) => sum + (p.reservedAmount || 0), 0);
+    
+    // Если lockedBalance не совпадает с суммой reservedAmount в позициях - это проблема
+    if (Math.abs(lockedBalance - totalReservedInPositions) > 0.0001) {
+      console.error(`⚠️ BALANCE DESYNC: lockedBalance=${lockedBalance.toFixed(6)}, totalReservedInPositions=${totalReservedInPositions.toFixed(6)}, diff=${(lockedBalance - totalReservedInPositions).toFixed(6)}`);
+      console.error(`   Active positions: ${activePositions.length}, Total positions: ${this.positions.size}`);
+      // Исправляем рассинхронизацию
+      const correctLocked = totalReservedInPositions;
+      this.account.fixLockedBalance(correctLocked);
+      console.error(`   Fixed: lockedBalance set to ${correctLocked.toFixed(6)}`);
+    }
 
     return {
       activePositions: activePositions.length,
