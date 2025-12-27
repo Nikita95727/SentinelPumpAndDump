@@ -425,6 +425,9 @@ export class PositionManager {
       // This is the ONLY place where totalBalance changes
       this.account.release(reservedAmount, proceeds);
       
+      // Update safety manager with new balance (for drawdown tracking and profit lock)
+      this.safetyManager.updateSessionBalance(this.account.getTotalBalance());
+      
       // Calculate profit for logging
       const profit = proceeds - reservedAmount;
       
