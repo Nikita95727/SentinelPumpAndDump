@@ -206,8 +206,9 @@ export class PositionManager {
 
     // 3. Проверка: достаточно ли средств для открытия позиции?
     const workingBalance = this.safetyManager.getWorkingBalance(this.account.getTotalBalance());
-    // Minimum position size: 0.0035 SOL to ensure fees don't eat profit
-    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, workingBalance);
+    const entryFees = config.priorityFee + config.signatureFee;
+    // Calculate position size: distribute evenly, reserve for fees, min 0.0035 SOL
+    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, workingBalance, this.positions.size, entryFees);
     const positionSize = this.safetyManager.applySafetyCaps(basePositionSize);
     const requiredAmount = positionSize;
     
