@@ -27,6 +27,21 @@ function setMicroCache<T>(key: string, value: T, ttl: number = MICRO_CACHE_TTL):
 }
 
 /**
+ * Выполняет RPC запрос с timeout (2 секунды)
+ * Это критично для быстрой фильтрации токенов
+ */
+async function getMintWithTimeout(connection: Connection, mintPubkey: PublicKey, timeoutMs: number = 2000): Promise<any> {
+  const rpcTimeout = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error('RPC timeout')), timeoutMs);
+  });
+  
+  return Promise.race([
+    getMint(connection, mintPubkey),
+    rpcTimeout
+  ]);
+}
+
+/**
  * Быстрая проверка безопасности - ОПТИМИЗИРОВАННАЯ
  * Pipeline: локальные проверки → RPC mint check → кеш
  * Цель: фильтрация за <30-40ms, максимальная надежность
@@ -86,11 +101,11 @@ export async function quickSecurityCheck(candidate: TokenCandidate, skipFreezeCh
         supply: BigInt(sharedCached.supply),
       };
     } else {
-      // 2.3. RPC запрос (единственный обязательный)
+      // 2.3. RPC запрос (единственный обязательный) с timeout 2 секунды
       const rpcPool = getRpcPool();
       const connection = rpcPool.getConnection();
       try {
-        mintInfo = await getMint(connection, mintPubkey);
+        mintInfo = await getMintWithTimeout(connection, mintPubkey);
         
         // Кешируем в общий кеш (10 секунд)
         await cache.set(sharedCacheKey, {
@@ -100,7 +115,7 @@ export async function quickSecurityCheck(candidate: TokenCandidate, skipFreezeCh
           supply: mintInfo.supply.toString(),
         }, 10);
       } catch (rpcError: any) {
-        // RPC ошибка - токен может быть слишком новым или не существует
+        // RPC ошибка или timeout - токен может быть слишком новым или не существует
         // Не логируем на hot path, просто пропускаем
         return false;
       }
@@ -175,7 +190,7 @@ async function checkLpBurned(mint: string): Promise<boolean> {
       const rpcPool = getRpcPool();
       const connection = rpcPool.getConnection();
       try {
-        mintInfo = await getMint(connection, mintPubkey);
+        mintInfo = await getMintWithTimeout(connection, mintPubkey);
         
         // Кешируем результат на 10 секунд
         await cache.set(cacheKey, {
@@ -184,7 +199,7 @@ async function checkLpBurned(mint: string): Promise<boolean> {
           decimals: mintInfo.decimals,
         }, 10);
       } catch (rpcError: any) {
-        // Если RPC ошибка - токен может быть слишком новым
+        // Если RPC ошибка или timeout - токен может быть слишком новым
         return false;
       }
     }
@@ -223,14 +238,14 @@ async function checkMintRenounced(mint: string): Promise<boolean> {
       const rpcPool = getRpcPool();
       const connection = rpcPool.getConnection();
       try {
-        mintInfo = await getMint(connection, mintPubkey);
+        mintInfo = await getMintWithTimeout(connection, mintPubkey);
         
         // Кешируем результат на 10 секунд
         await cache.set(cacheKey, {
           mintAuthority: mintInfo.mintAuthority?.toString() || null,
         }, 10);
       } catch (rpcError: any) {
-        // Если RPC ошибка - токен может быть слишком новым или не существует
+        // Если RPC ошибка или timeout - токен может быть слишком новым или не существует
         // Для pump.fun токенов это нормально на ранней стадии
         return false;
       }

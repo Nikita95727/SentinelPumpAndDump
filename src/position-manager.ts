@@ -550,6 +550,14 @@ export class PositionManager {
     while (position.status === 'active') {
       const now = Date.now();
       const timeSinceLastCheck = now - lastPriceCheck;
+      const elapsed = Date.now() - position.entryTime;
+      
+      // КРИТИЧЕСКАЯ ПРОВЕРКА: Timeout (90 секунд) - проверяем ВСЕГДА, независимо от проверки цены
+      if (elapsed >= MAX_HOLD_TIME) {
+        const currentPrice = position.currentPrice || position.entryPrice;
+        await this.closePosition(position, 'timeout', currentPrice);
+        return;
+      }
       
       // Проверяем прогнозируемую цену каждые PREDICTION_CHECK_INTERVAL
       // и реальную цену каждые CHECK_INTERVAL
@@ -559,7 +567,6 @@ export class PositionManager {
       try {
         // Используем кэшированную цену из updateAllPrices
         const currentPrice = position.currentPrice || position.entryPrice;
-        const elapsed = Date.now() - position.entryTime;
 
         // ПРОМЕЖУТОЧНАЯ ПРОВЕРКА: Используем прогнозируемую цену для раннего обнаружения
         if (shouldCheckPrediction) {
@@ -600,13 +607,7 @@ export class PositionManager {
             return;
           }
 
-          // Условие 2: Timeout (90 секунд)
-          if (elapsed >= MAX_HOLD_TIME) {
-            await this.closePosition(position, 'timeout', currentPrice);
-            return;
-          }
-
-          // Условие 3: Trailing Stop (25% от пика)
+          // Условие 2: Trailing Stop (25% от пика)
           const dropFromPeak = (position.peakPrice - currentPrice) / position.peakPrice;
           if (dropFromPeak >= TRAILING_STOP_PCT) {
             await this.closePosition(position, 'trailing_stop', currentPrice);
