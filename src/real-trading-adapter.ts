@@ -248,17 +248,25 @@ export class RealTradingAdapter {
     }
 
     const { getAssociatedTokenAddress } = await import('@solana/spl-token');
+    const { PublicKey } = await import('@solana/web3.js');
     const tokenAccount = await getAssociatedTokenAddress(
-      new (await import('@solana/web3.js')).PublicKey(mint),
+      new PublicKey(mint),
       publicKey
     );
     
-    const balance = await this.pumpFunSwap.getTokenBalance(tokenAccount);
-
-    // Обновить кэш
-    this.tokenBalanceCache.set(mint, { balance, timestamp: now });
-
-    return balance;
+    // Get token balance directly from connection
+    try {
+      const accountInfo = await this.connection.getTokenAccountBalance(tokenAccount);
+      const balance = parseInt(accountInfo.value.amount);
+      
+      // Обновить кэш
+      this.tokenBalanceCache.set(mint, { balance, timestamp: now });
+      
+      return balance;
+    } catch (error) {
+      // Token account doesn't exist or other error
+      return 0;
+    }
   }
 
   /**
