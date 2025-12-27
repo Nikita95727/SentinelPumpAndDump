@@ -630,11 +630,18 @@ export class PositionManager {
   private async monitorPosition(position: Position): Promise<void> {
     console.log(`🔍 [DEBUG] monitorPosition started for ${position.token.slice(0, 8)}...`);
     let lastPriceCheck = Date.now();
+    let loopCount = 0;
     
     while (position.status === 'active') {
+      loopCount++;
       const now = Date.now();
       const timeSinceLastCheck = now - lastPriceCheck;
       const elapsed = Date.now() - position.entryTime;
+      
+      // Log every 10 loops to see if loop is running
+      if (loopCount % 10 === 0) {
+        console.log(`🔄 [DEBUG] monitorPosition loop #${loopCount} for ${position.token.slice(0, 8)}... elapsed=${(elapsed/1000).toFixed(1)}s status=${position.status}`);
+      }
       
       // КРИТИЧЕСКАЯ ПРОВЕРКА: Timeout (90 секунд) - проверяем ВСЕГДА, независимо от проверки цены
       if (elapsed >= MAX_HOLD_TIME) {
