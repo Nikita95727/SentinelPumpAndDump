@@ -248,7 +248,13 @@ export class PositionManager {
 
     // 5. Открываем позицию
     try {
+      const openStartTime = Date.now();
       const position = await this.openPosition(candidate);
+      const openDuration = Date.now() - openStartTime;
+      
+      // Calculate total time from token creation to position opening
+      const totalTimeFromCreation = (Date.now() - candidate.createdAt) / 1000; // seconds
+      const tokenAgeAtOpen = totalTimeFromCreation;
       
       // 6. Запускаем параллельный мониторинг (НЕ await!)
       void this.monitorPosition(position);
@@ -257,7 +263,7 @@ export class PositionManager {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: candidate.mint,
-        message: `Position opened successfully (security check: ${securityCheckDuration}ms)`,
+        message: `Position opened successfully | Token age: ${tokenAgeAtOpen.toFixed(2)}s | Security check: ${securityCheckDuration}ms | Open duration: ${openDuration}ms | Total delay: ${totalTimeFromCreation.toFixed(2)}s`,
       });
       
       return true;
@@ -286,23 +292,19 @@ export class PositionManager {
     }
 
     // Получаем размер позиции из Account с учетом working balance
-    const workingBalance = this.safetyManager.getWorkingBalance(this.account.getTotalBalance());
+    // TEMPORARILY DISABLED: Safety caps removed for testing
     const entryFees = config.priorityFee + config.signatureFee;
     // Calculate position size: distribute evenly, reserve for fees, min 0.0035 SOL
-    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, workingBalance, this.positions.size, entryFees);
-    // Apply safety caps (stealth cap, night mode, reserve cap if available)
-    let positionSize = this.safetyManager.applySafetyCaps(basePositionSize);
+    const positionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, this.account.getTotalBalance(), this.positions.size, entryFees);
     
-    // Ensure position size is still above minimum after safety caps
-    // This is critical: night mode or other caps might reduce it below minimum
-    const MIN_POSITION_SIZE_AFTER_CAPS = 0.0035;
-    if (positionSize < MIN_POSITION_SIZE_AFTER_CAPS) {
-      // If safety caps reduced it too much, use minimum
-      // But only if we have enough balance
-      if (this.account.getFreeBalance() >= MIN_POSITION_SIZE_AFTER_CAPS) {
-        positionSize = MIN_POSITION_SIZE_AFTER_CAPS;
+    // Ensure position size is at least minimum
+    const MIN_POSITION_SIZE = 0.0035;
+    if (positionSize < MIN_POSITION_SIZE) {
+      if (this.account.getFreeBalance() >= MIN_POSITION_SIZE) {
+        // Use minimum if we have enough balance
+        // This shouldn't happen with new logic, but keep as safety
       } else {
-        throw new Error(`Position size too small after safety caps: ${positionSize} < ${MIN_POSITION_SIZE_AFTER_CAPS}, insufficient balance`);
+        throw new Error(`Position size too small: ${positionSize} < ${MIN_POSITION_SIZE}, insufficient balance`);
       }
     }
     
