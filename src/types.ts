@@ -22,6 +22,8 @@ export interface Position {
   slippage?: number; // использованный slippage (опционально)
   status: 'active' | 'closing' | 'closed';
   errorCount?: number;
+  // Price history for momentum calculation
+  priceHistory?: Array<{ price: number; timestamp: number }>; // Последние 2-3 цены для расчета импульса
 }
 
 export interface PositionStats {

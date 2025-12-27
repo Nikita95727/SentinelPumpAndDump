@@ -14,6 +14,8 @@ const MAX_POSITIONS = 10;
 const MAX_HOLD_TIME = 90_000; // 90 секунд
 const TRAILING_STOP_PCT = 0.25;
 const CHECK_INTERVAL = 1000; // Проверка каждую секунду (быстрее реагирование на take profit)
+const PREDICTION_CHECK_INTERVAL = 200; // Проверка прогнозируемой цены каждые 200ms
+const MAX_PRICE_HISTORY = 3; // Храним последние 3 цены для расчета импульса
 
 /**
  * Single source of truth for account balance
@@ -485,40 +487,85 @@ export class PositionManager {
 
   /**
    * Параллельный мониторинг позиции
+   * Использует промежуточный расчет цены по импульсу для более быстрой реакции
    */
   private async monitorPosition(position: Position): Promise<void> {
+    let lastPriceCheck = Date.now();
+    
     while (position.status === 'active') {
-      await sleep(CHECK_INTERVAL);
+      const now = Date.now();
+      const timeSinceLastCheck = now - lastPriceCheck;
+      
+      // Проверяем прогнозируемую цену каждые PREDICTION_CHECK_INTERVAL
+      // и реальную цену каждые CHECK_INTERVAL
+      const shouldCheckPrediction = timeSinceLastCheck >= PREDICTION_CHECK_INTERVAL;
+      const shouldCheckRealPrice = timeSinceLastCheck >= CHECK_INTERVAL;
 
       try {
         // Используем кэшированную цену из updateAllPrices
         const currentPrice = position.currentPrice || position.entryPrice;
         const elapsed = Date.now() - position.entryTime;
-        const multiplier = currentPrice / position.entryPrice;
 
-        // Обновляем peak
-        if (currentPrice > position.peakPrice) {
-          position.peakPrice = currentPrice;
+        // ПРОМЕЖУТОЧНАЯ ПРОВЕРКА: Используем прогнозируемую цену для раннего обнаружения
+        if (shouldCheckPrediction) {
+          const predictedPrice = this.calculatePredictedPrice(position);
+          
+          if (predictedPrice !== null && predictedPrice > 0) {
+            const predictedMultiplier = predictedPrice / position.entryPrice;
+            
+            // Если прогноз показывает достижение take profit, проверяем реальную цену
+            if (predictedMultiplier >= config.takeProfitMultiplier) {
+              // Прогноз показал достижение цели - проверяем реальную цену
+              // Используем реальную цену для финального решения
+              const realMultiplier = currentPrice / position.entryPrice;
+              
+              if (realMultiplier >= config.takeProfitMultiplier) {
+                // Реальная цена подтверждает - выходим
+                await this.closePosition(position, 'take_profit', currentPrice);
+                return;
+              }
+              // Если реальная цена еще не достигла цели, продолжаем мониторинг
+            }
+          }
         }
 
-        // Условие 1: Take Profit - выходим сразу как только видим 2.5x или выше
-        // Не ждем больше, чтобы не резать себе прибыль
-        if (multiplier >= config.takeProfitMultiplier) {
-          await this.closePosition(position, 'take_profit', currentPrice);
-          return;
+        // ОСНОВНАЯ ПРОВЕРКА: Реальная цена (каждую секунду)
+        if (shouldCheckRealPrice) {
+          const multiplier = currentPrice / position.entryPrice;
+
+          // Обновляем peak
+          if (currentPrice > position.peakPrice) {
+            position.peakPrice = currentPrice;
+          }
+
+          // Условие 1: Take Profit - выходим сразу как только видим 2.5x или выше
+          // Не ждем больше, чтобы не резать себе прибыль
+          if (multiplier >= config.takeProfitMultiplier) {
+            await this.closePosition(position, 'take_profit', currentPrice);
+            return;
+          }
+
+          // Условие 2: Timeout (90 секунд)
+          if (elapsed >= MAX_HOLD_TIME) {
+            await this.closePosition(position, 'timeout', currentPrice);
+            return;
+          }
+
+          // Условие 3: Trailing Stop (25% от пика)
+          const dropFromPeak = (position.peakPrice - currentPrice) / position.peakPrice;
+          if (dropFromPeak >= TRAILING_STOP_PCT) {
+            await this.closePosition(position, 'trailing_stop', currentPrice);
+            return;
+          }
+
+          lastPriceCheck = now; // Обновляем время последней проверки реальной цены
         }
 
-        // Условие 2: Timeout (90 секунд)
-        if (elapsed >= MAX_HOLD_TIME) {
-          await this.closePosition(position, 'timeout', currentPrice);
-          return;
-        }
-
-        // Условие 3: Trailing Stop (25% от пика)
-        const dropFromPeak = (position.peakPrice - currentPrice) / position.peakPrice;
-        if (dropFromPeak >= TRAILING_STOP_PCT) {
-          await this.closePosition(position, 'trailing_stop', currentPrice);
-          return;
+        // Если не было проверки реальной цены, ждем меньше времени
+        if (!shouldCheckRealPrice) {
+          await sleep(PREDICTION_CHECK_INTERVAL);
+        } else {
+          await sleep(CHECK_INTERVAL);
         }
 
       } catch (error) {
@@ -648,13 +695,27 @@ export class PositionManager {
     const tokens = Array.from(this.positions.keys());
     const prices = await priceFetcher.getPricesBatch(tokens);
 
-    // Кэшируем в объектах позиций
+    // Кэшируем в объектах позиций и сохраняем историю для расчета импульса
+    const now = Date.now();
     for (const token of tokens) {
       const position = this.positions.get(token);
       if (position && position.status === 'active') {
         const price = prices.get(token);
         
         if (price && price > 0) {
+          // Сохраняем историю цен для расчета импульса
+          if (!position.priceHistory) {
+            position.priceHistory = [];
+          }
+          
+          // Добавляем новую цену
+          position.priceHistory.push({ price, timestamp: now });
+          
+          // Ограничиваем историю последними MAX_PRICE_HISTORY значениями
+          if (position.priceHistory.length > MAX_PRICE_HISTORY) {
+            position.priceHistory.shift();
+          }
+          
           position.currentPrice = price;
         } else {
           // При ошибке используем entryPrice
@@ -662,6 +723,43 @@ export class PositionManager {
         }
       }
     }
+  }
+
+  /**
+   * Рассчитывает прогнозируемую цену на основе импульса
+   * @param position - позиция для расчета
+   * @returns прогнозируемая цена или null если недостаточно данных
+   */
+  private calculatePredictedPrice(position: Position): number | null {
+    if (!position.priceHistory || position.priceHistory.length < 2) {
+      return null; // Недостаточно данных для расчета импульса
+    }
+
+    const history = position.priceHistory;
+    const lastPrice = history[history.length - 1];
+    const previousPrice = history[history.length - 2];
+    
+    // Рассчитываем скорость изменения цены (импульс)
+    const timeDelta = (lastPrice.timestamp - previousPrice.timestamp) / 1000; // в секундах
+    if (timeDelta <= 0) {
+      return null; // Некорректные данные
+    }
+    
+    const priceDelta = lastPrice.price - previousPrice.price;
+    const velocity = priceDelta / timeDelta; // изменение цены в секунду
+    
+    // Рассчитываем время с последнего обновления
+    const timeSinceLastUpdate = (Date.now() - lastPrice.timestamp) / 1000; // в секундах
+    
+    // Прогнозируемая цена = последняя цена + (импульс * время с последнего обновления)
+    const predictedPrice = lastPrice.price + (velocity * timeSinceLastUpdate);
+    
+    // Защита от отрицательных или некорректных значений
+    if (predictedPrice <= 0 || !isFinite(predictedPrice)) {
+      return null;
+    }
+    
+    return predictedPrice;
   }
 
   /**
