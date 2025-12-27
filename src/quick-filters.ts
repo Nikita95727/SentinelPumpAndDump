@@ -27,10 +27,11 @@ function setMicroCache<T>(key: string, value: T, ttl: number = MICRO_CACHE_TTL):
 }
 
 /**
- * Выполняет RPC запрос с timeout (2 секунды)
+ * Выполняет RPC запрос с timeout (1 секунда - агрессивный timeout)
  * Это критично для быстрой фильтрации токенов
+ * Если RPC не отвечает за 1 секунду, токен уже старый
  */
-async function getMintWithTimeout(connection: Connection, mintPubkey: PublicKey, timeoutMs: number = 2000): Promise<any> {
+async function getMintWithTimeout(connection: Connection, mintPubkey: PublicKey, timeoutMs: number = 1000): Promise<any> {
   const rpcTimeout = new Promise<never>((_, reject) => {
     setTimeout(() => reject(new Error('RPC timeout')), timeoutMs);
   });
@@ -42,10 +43,12 @@ async function getMintWithTimeout(connection: Connection, mintPubkey: PublicKey,
 }
 
 /**
- * Быстрая проверка безопасности - ОПТИМИЗИРОВАННАЯ
+ * Быстрая проверка безопасности - МАКСИМАЛЬНО УПРОЩЕННАЯ
  * Pipeline: локальные проверки → RPC mint check → кеш
- * Цель: фильтрация за <30-40ms, максимальная надежность
- * @param skipFreezeCheck - для queue1 можно пропустить проверку freezeAuthority (ускорение)
+ * Цель: фильтрация за <500ms, только критичные проверки
+ * 
+ * КРИТИЧНО: mintAuthority === null (защита от honeypot/scam)
+ * Остальное: не критично для безопасности, убрано для скорости
  */
 export async function quickSecurityCheck(candidate: TokenCandidate, skipFreezeCheck: boolean = false): Promise<boolean> {
   try {
@@ -58,6 +61,7 @@ export async function quickSecurityCheck(candidate: TokenCandidate, skipFreezeCh
     }
     
     // 1.2. Проверяем что адрес валидный (без RPC)
+    // PublicKey валидация уже проверяет формат, длина не нужна
     let mintPubkey: PublicKey;
     try {
       mintPubkey = new PublicKey(candidate.mint);
@@ -65,54 +69,39 @@ export async function quickSecurityCheck(candidate: TokenCandidate, skipFreezeCh
       return false; // Невалидный адрес
     }
     
-    // 1.3. Heuristic: pump.fun токены обычно имеют длину 44 символа (base58)
-    // Слишком короткие адреса - вероятно не валидные токены
-    if (candidate.mint.length < 32 || candidate.mint.length > 44) {
-      return false;
-    }
-    
     // ===== 2. SINGLE RPC CHECK (MANDATORY) =====
-    // Проверяем mint account: mintAuthority === null, freezeAuthority === null
+    // Проверяем ТОЛЬКО mintAuthority === null (критично для безопасности)
+    // Убраны: decimals, supply, freezeAuthority (не критично для pump.fun)
     
-    // 2.1. Проверяем микро-кеш (50-150ms TTL)
+    // 2.1. Проверяем микро-кеш (100ms TTL)
     const cacheKey = `mintAuth:${candidate.mint}`;
-    const cached = getMicroCache<{ mintAuthority: boolean; freezeAuthority: boolean }>(cacheKey);
+    const cached = getMicroCache<boolean>(cacheKey);
     if (cached !== null) {
       // Кеш попадание - используем кешированное значение
-      return cached.mintAuthority && cached.freezeAuthority;
+      return cached;
     }
     
-    // 2.2. Проверяем Redis/общий кеш (более долгий TTL)
+    // 2.2. Проверяем Redis/общий кеш (10 секунд TTL)
     const sharedCacheKey = `mint:${candidate.mint}`;
     const sharedCached = await cache.get<{ 
-      mintAuthority: string | null; 
-      freezeAuthority: string | null;
-      decimals: number;
-      supply: string;
+      mintAuthority: string | null;
     }>(sharedCacheKey);
     
-    let mintInfo: any;
+    let mintAuthority: PublicKey | null = null;
     if (sharedCached) {
       // Используем кешированные данные
-      mintInfo = {
-        mintAuthority: sharedCached.mintAuthority ? new PublicKey(sharedCached.mintAuthority) : null,
-        freezeAuthority: sharedCached.freezeAuthority ? new PublicKey(sharedCached.freezeAuthority) : null,
-        decimals: sharedCached.decimals,
-        supply: BigInt(sharedCached.supply),
-      };
+      mintAuthority = sharedCached.mintAuthority ? new PublicKey(sharedCached.mintAuthority) : null;
     } else {
-      // 2.3. RPC запрос (единственный обязательный) с timeout 2 секунды
+      // 2.3. RPC запрос (единственный обязательный) с timeout 1 секунда
       const rpcPool = getRpcPool();
       const connection = rpcPool.getConnection();
       try {
-        mintInfo = await getMintWithTimeout(connection, mintPubkey);
+        const mintInfo = await getMintWithTimeout(connection, mintPubkey);
+        mintAuthority = mintInfo.mintAuthority;
         
-        // Кешируем в общий кеш (10 секунд)
+        // Кешируем в общий кеш (10 секунд) - только mintAuthority
         await cache.set(sharedCacheKey, {
-          mintAuthority: mintInfo.mintAuthority?.toString() || null,
-          freezeAuthority: mintInfo.freezeAuthority?.toString() || null,
-          decimals: mintInfo.decimals,
-          supply: mintInfo.supply.toString(),
+          mintAuthority: mintAuthority?.toString() || null,
         }, 10);
       } catch (rpcError: any) {
         // RPC ошибка или timeout - токен может быть слишком новым или не существует
@@ -121,39 +110,14 @@ export async function quickSecurityCheck(candidate: TokenCandidate, skipFreezeCh
       }
     }
     
-    // 2.4. Валидация mint params (если доступны)
-    // Проверяем decimals в разумном диапазоне (6-9 для pump.fun)
-    if (mintInfo.decimals !== undefined) {
-      if (mintInfo.decimals < 6 || mintInfo.decimals > 9) {
-        return false;
-      }
-    }
-    
-    // Проверяем supply > 0
-    if (mintInfo.supply !== undefined) {
-      if (mintInfo.supply === BigInt(0) || mintInfo.supply < BigInt(0)) {
-        return false;
-      }
-    }
-    
-    // 2.5. Критичные проверки: mintAuthority и freezeAuthority должны быть null
-    const mintRenounced = mintInfo.mintAuthority === null;
-    // freezeAuthority может отсутствовать в старых версиях, считаем null = безопасно
-    const freezeRenounced = mintInfo.freezeAuthority === null || mintInfo.freezeAuthority === undefined;
+    // 2.4. КРИТИЧНАЯ ПРОВЕРКА: mintAuthority должен быть null
+    // Это защита от honeypot/scam токенов
+    const mintRenounced = mintAuthority === null;
     
     // Кешируем результат в микро-кеш (100ms TTL)
-    setMicroCache(cacheKey, {
-      mintAuthority: mintRenounced,
-      freezeAuthority: freezeRenounced,
-    }, 100);
+    setMicroCache(cacheKey, mintRenounced, 100);
     
-    // Для queue1 можно пропустить проверку freezeAuthority (ускорение, минимальный риск)
-    if (skipFreezeCheck) {
-      return mintRenounced; // Только mintAuthority проверка
-    }
-    
-    // Обе проверки должны пройти
-    return mintRenounced && freezeRenounced;
+    return mintRenounced;
     
   } catch (error) {
     // Любая ошибка - пропускаем токен (не логируем на hot path)
