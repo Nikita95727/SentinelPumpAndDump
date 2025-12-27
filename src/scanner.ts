@@ -263,8 +263,13 @@ export class TokenScanner {
   }
 
   private async processQueue(): Promise<void> {
-    // ПРИОРИТЕТНАЯ ОБРАБОТКА: Сначала обрабатываем queue1 и queue2, только потом queue3
-    // Если есть токены в приоритетных очередях - прерываем обработку queue3
+    // QUEUE3 ОТКЛЮЧЕНА: Неэффективна и занимает машинное время
+    // Освобождаем ресурсы для queue1 и queue2
+    // Статистика: queue3 показала 0% успешности, средний multiplier 0.37x
+    return;
+    
+    // ЗАКОММЕНТИРОВАНО: Вся обработка queue3 отключена
+    /*
     if (this.isProcessingQueue || this.notificationQueue.length === 0) {
       return;
     }
@@ -362,6 +367,7 @@ export class TokenScanner {
         message: `Queue3 processed: ${processedCount} notifications in ${totalDuration}ms, avg ${(totalDuration / processedCount).toFixed(0)}ms, remaining: ${this.notificationQueue.length}`,
       });
     }
+    */
   }
 
   private async processLogNotification(notification: any, isPriority: boolean = false): Promise<void> {
