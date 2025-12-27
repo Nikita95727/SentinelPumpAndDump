@@ -433,6 +433,7 @@ export class TokenScanner {
           };
 
           const totalDuration = Date.now() - processStartTime;
+          const notificationToProcessingDelay = processStartTime - notificationTime;
           const age = (Date.now() - candidate.createdAt) / 1000;
 
           // ЭКСПЕРИМЕНТ: Обрабатываем ТОЛЬКО queue1 (0-5 сек)
@@ -446,7 +447,7 @@ export class TokenScanner {
               timestamp: getCurrentTimestamp(),
               type: 'token_received',
               token: mintAddress,
-              message: `[EXPERIMENT] New token detected (queue 1, 0-5s, RISKY): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, processing time: ${totalDuration}ms`,
+              message: `[EXPERIMENT] New token detected (queue 1, 0-5s, RISKY): ${mintAddress.substring(0, 8)}..., age: ${age.toFixed(1)}s, notification→processing delay: ${notificationToProcessingDelay}ms, processing time: ${totalDuration}ms, created at: ${new Date(estimatedCreationTime).toISOString()}`,
             });
             // Приоритетная обработка - запускаем немедленно
             this.processQueue1();

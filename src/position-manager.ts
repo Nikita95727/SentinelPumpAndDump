@@ -175,6 +175,11 @@ export class PositionManager {
    * Возвращает true если позиция открыта, false если нет свободных слотов или проверка не прошла
    */
   async tryOpenPosition(candidate: TokenCandidate): Promise<boolean> {
+    // TIMING ANALYSIS: Track all stages for hypothesis validation
+    const processingStartTime = Date.now();
+    const tokenCreatedAt = candidate.createdAt;
+    const tokenAgeAtStart = (processingStartTime - tokenCreatedAt) / 1000; // seconds
+    
     // 0. Фильтр: исключаем SOL токен
     const SOL_MINT = 'So11111111111111111111111111111111111111112';
     if (candidate.mint === SOL_MINT) {
@@ -222,7 +227,10 @@ export class PositionManager {
 
     // 4. Early activity check - skip tokens with no early life
     // This gate reduces dead/flat trades without cutting winners
+    const earlyActivityCheckStart = Date.now();
     const hasEarlyActivity = earlyActivityTracker.hasEarlyActivity(candidate.mint);
+    const earlyActivityCheckDuration = Date.now() - earlyActivityCheckStart;
+    
     if (!hasEarlyActivity) {
       // Token showed no early activity within observation window - skip
       // This is NOT a permanent blacklist, just avoiding clearly dead tokens
@@ -251,8 +259,21 @@ export class PositionManager {
       const openDuration = Date.now() - openStartTime;
       
       // Calculate total time from token creation to position opening
-      const totalTimeFromCreation = (Date.now() - candidate.createdAt) / 1000; // seconds
+      const totalTimeFromCreation = (Date.now() - tokenCreatedAt) / 1000; // seconds
       const tokenAgeAtOpen = totalTimeFromCreation;
+      const totalProcessingTime = Date.now() - processingStartTime;
+      
+      // Store timing data in position for later analysis
+      (position as any).timingData = {
+        tokenCreatedAt,
+        processingStartTime,
+        tokenAgeAtStart,
+        earlyActivityCheckDuration,
+        securityCheckDuration,
+        openDuration,
+        totalProcessingTime,
+        tokenAgeAtOpen,
+      };
       
       // 6. Запускаем параллельный мониторинг (НЕ await!)
       void this.monitorPosition(position);
@@ -261,7 +282,7 @@ export class PositionManager {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: candidate.mint,
-        message: `Position opened successfully | Token age: ${tokenAgeAtOpen.toFixed(2)}s | Security check: ${securityCheckDuration}ms | Open duration: ${openDuration}ms | Total delay: ${totalTimeFromCreation.toFixed(2)}s`,
+        message: `Position opened successfully | Token age at start: ${tokenAgeAtStart.toFixed(2)}s | Token age at open: ${tokenAgeAtOpen.toFixed(2)}s | Early activity: ${earlyActivityCheckDuration}ms | Security check: ${securityCheckDuration}ms | Open duration: ${openDuration}ms | Total processing: ${totalProcessingTime}ms | Entry price: ${position.entryPrice.toFixed(8)}`,
       });
       
       return true;
@@ -282,12 +303,26 @@ export class PositionManager {
   private async openPosition(candidate: TokenCandidate): Promise<Position> {
     const openStartTime = Date.now();
 
+    // TIMING ANALYSIS: Get price at detection time for comparison
+    const priceFetchStart = Date.now();
+    const tokenAgeBeforePriceFetch = (Date.now() - candidate.createdAt) / 1000;
+    
     // Получаем цену входа
     const entryPrice = await this.filters.getEntryPrice(candidate.mint);
+    const priceFetchDuration = Date.now() - priceFetchStart;
+    const tokenAgeAfterPriceFetch = (Date.now() - candidate.createdAt) / 1000;
     
     if (entryPrice <= 0) {
       throw new Error(`Invalid entry price: ${entryPrice}`);
     }
+    
+    // Log price fetch timing for analysis
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      token: candidate.mint,
+      message: `Price fetch: age before: ${tokenAgeBeforePriceFetch.toFixed(2)}s, age after: ${tokenAgeAfterPriceFetch.toFixed(2)}s, duration: ${priceFetchDuration}ms, price: ${entryPrice.toFixed(8)}`,
+    });
 
     // Получаем размер позиции из Account с учетом working balance
     // TEMPORARILY DISABLED: Safety caps removed for testing
@@ -484,6 +519,12 @@ export class PositionManager {
       // Calculate profit for logging
       const profit = proceeds - reservedAmount;
       
+      // TIMING ANALYSIS: Extract timing data for hypothesis validation
+      const timingData = (position as any).timingData || {};
+      const tokenAgeAtEntry = timingData.tokenAgeAtOpen || 0;
+      const tokenAgeAtExit = (Date.now() - (timingData.tokenCreatedAt || position.entryTime)) / 1000;
+      const holdDuration = (Date.now() - position.entryTime) / 1000;
+      
       // Удаляем из активных
       this.positions.delete(position.token);
       position.status = 'closed';
@@ -499,7 +540,7 @@ export class PositionManager {
         reason,
       });
 
-      // Legacy logger (for console output)
+      // Enhanced logger with timing analysis for hypothesis validation
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'sell',
@@ -508,7 +549,7 @@ export class PositionManager {
         multiplier,
         profitSol: profit,
         reason,
-        message: `Position closed: ${position.token.substring(0, 8)}..., ${multiplier.toFixed(2)}x, profit=${profit.toFixed(6)} SOL, reason=${reason}`,
+        message: `Position closed: ${position.token.substring(0, 8)}..., ${safeMultiplier.toFixed(2)}x, profit=${profit.toFixed(6)} SOL, reason=${reason} | TIMING ANALYSIS: Entry age: ${tokenAgeAtEntry.toFixed(2)}s, Exit age: ${tokenAgeAtExit.toFixed(2)}s, Hold: ${holdDuration.toFixed(2)}s, Entry price: ${position.entryPrice.toFixed(8)}, Exit price: ${exitPrice.toFixed(8)}`,
       });
 
     } catch (error) {
