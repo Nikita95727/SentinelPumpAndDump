@@ -6,6 +6,7 @@ import { tradeLogger } from './trade-logger';
 import { getCurrentTimestamp, sleep, calculateDrawdown } from './utils';
 import { config } from './config';
 import { TokenCandidate } from './types';
+import { RealTradingAdapter } from './real-trading-adapter';
 
 class PumpFunSniper {
   private scanner: TokenScanner | null = null;
@@ -14,10 +15,10 @@ class PumpFunSniper {
   private statsInterval: NodeJS.Timeout | null = null;
   private isShuttingDown = false;
   private lastBalanceLogTime: number = 0;
+  private realTradingAdapter?: RealTradingAdapter;
 
   async start(): Promise<void> {
     console.log('🚀 Starting Pump.fun Sniper Bot (Optimized)...');
-    console.log(`Initial Deposit: ${config.initialDeposit} SOL ($${config.initialDeposit * config.solUsdRate})`);
     console.log(`Helius WS URL: ${config.heliusWsUrl.substring(0, 50)}...`);
 
     try {
@@ -25,12 +26,46 @@ class PumpFunSniper {
       this.connection = await getConnection();
       console.log('✅ Connected to Solana RPC');
 
-      // Для paper trading всегда используем initialDeposit из config
-      // Не восстанавливаем из файла (для реальной торговли баланс будет из кошелька)
-      const initialDeposit = config.initialDeposit;
+      let initialDeposit = config.initialDeposit;
 
-      // Инициализируем PositionManager
-      this.positionManager = new PositionManager(this.connection, initialDeposit);
+      // 🔴 REAL TRADING MODE
+      if (config.realTradingEnabled) {
+        console.log('\n🔴 ===============================================');
+        console.log('🔴 REAL TRADING MODE ENABLED');
+        console.log('🔴 ===============================================\n');
+
+        if (!config.walletMnemonic) {
+          throw new Error('❌ WALLET_MNEMONIC not set in .env, but REAL_TRADING_ENABLED=true');
+        }
+
+        this.realTradingAdapter = new RealTradingAdapter(this.connection);
+        const success = await this.realTradingAdapter.initialize(config.walletMnemonic);
+
+        if (!success) {
+          throw new Error('❌ Failed to initialize real trading wallet');
+        }
+
+        // Получаем реальный баланс из кошелька
+        initialDeposit = await this.realTradingAdapter.getBalance();
+        console.log(`✅ Real wallet balance: ${initialDeposit.toFixed(6)} SOL ($${(initialDeposit * config.solUsdRate).toFixed(2)})`);
+
+        // Health check
+        const health = await this.realTradingAdapter.healthCheck();
+        if (!health.healthy) {
+          console.warn(`⚠️ Wallet health warning: ${health.error}`);
+        }
+      } else {
+        console.log('📄 Paper Trading Mode (Simulation)');
+        console.log(`Initial Deposit: ${config.initialDeposit} SOL ($${(config.initialDeposit * config.solUsdRate).toFixed(2)})`);
+        initialDeposit = config.initialDeposit;
+      }
+
+      // Инициализируем PositionManager с optional real trading adapter
+      this.positionManager = new PositionManager(
+        this.connection,
+        initialDeposit,
+        this.realTradingAdapter
+      );
       console.log(`✅ Position Manager initialized with ${initialDeposit.toFixed(6)} SOL`);
 
       // Инициализируем сканер

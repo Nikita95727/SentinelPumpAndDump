@@ -9,6 +9,7 @@ import { priceFetcher } from './price-fetcher';
 import { TokenFilters } from './filters';
 import { earlyActivityTracker } from './early-activity-tracker';
 import { SafetyManager } from './safety-manager';
+import { RealTradingAdapter } from './real-trading-adapter';
 
 // Используем config.maxOpenPositions вместо хардкода
 const MAX_HOLD_TIME = 90_000; // 90 секунд
@@ -165,12 +166,28 @@ export class PositionManager {
   private account: Account; // Single source of truth for balance
   private safetyManager: SafetyManager;
   private tradeIdCounter: number = 0;
+  private realTradingAdapter?: RealTradingAdapter; // Optional real trading adapter
 
-  constructor(connection: Connection, initialDeposit: number) {
+  constructor(connection: Connection, initialDeposit: number, realTradingAdapter?: RealTradingAdapter) {
     this.connection = connection;
     this.filters = new TokenFilters(connection);
     this.account = new Account(initialDeposit);
     this.safetyManager = new SafetyManager(initialDeposit);
+    this.realTradingAdapter = realTradingAdapter;
+
+    if (realTradingAdapter) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: '🔴 REAL TRADING MODE ENABLED IN POSITION MANAGER',
+      });
+    } else {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: '📄 Paper trading mode (simulation)',
+      });
+    }
 
     // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем и исправляем баланс при старте
     this.fixBalanceDesync();
@@ -613,6 +630,45 @@ export class PositionManager {
     const tradeId = this.generateTradeId();
     (position as any).tradeId = tradeId;
 
+    // 🔴 REAL TRADING: Execute real buy if enabled
+    if (this.realTradingAdapter) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `🔴 Executing REAL BUY: ${positionSize.toFixed(6)} SOL → ${candidate.mint}`,
+      });
+
+      const buyResult = await this.realTradingAdapter.executeBuy(candidate.mint, positionSize);
+
+      if (!buyResult.success) {
+        // Rollback: Real trade failed
+        this.positions.delete(candidate.mint);
+        this.account.reserve(-totalReservedAmount); // Release reserved funds
+        this.account.deductFromDeposit(-positionSize); // Add back deducted amount
+
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: candidate.mint,
+          message: `❌ REAL BUY FAILED: ${buyResult.error}`,
+        });
+
+        throw new Error(`Real trade failed: ${buyResult.error}`);
+      }
+
+      // Store transaction signature for tracking
+      (position as any).buySignature = buyResult.signature;
+      (position as any).tokensReceived = buyResult.tokensReceived;
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `✅ REAL BUY SUCCESS: signature=${buyResult.signature}, received=${buyResult.tokensReceived} tokens`,
+      });
+    }
+
     // Non-blocking trade logging
     tradeLogger.logTradeOpen({
       tradeId,
@@ -628,7 +684,7 @@ export class PositionManager {
       token: candidate.mint,
       investedSol: investedAmount,
       entryPrice: actualEntryPrice,
-      message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)}`,
+      message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)}${this.realTradingAdapter ? ' 🔴 REAL' : ' 📄 SIM'}`,
     });
 
     // CRITICAL: Start monitoring immediately after position is created
@@ -828,7 +884,43 @@ export class PositionManager {
     position.status = 'closing';
 
     try {
-      // Симуляция продажи
+      // 🔴 REAL TRADING: Execute real sell if enabled
+      if (this.realTradingAdapter) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: position.token,
+          message: `🔴 Executing REAL SELL: ${position.token} → SOL (expected ~${(position.investedSol * (exitPrice / position.entryPrice)).toFixed(6)} SOL)`,
+        });
+
+        const sellResult = await this.realTradingAdapter.executeSell(
+          position.token,
+          position.investedSol * (exitPrice / position.entryPrice) // Expected proceeds
+        );
+
+        if (!sellResult.success) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: position.token,
+            message: `❌ REAL SELL FAILED: ${sellResult.error}, continuing with accounting...`,
+          });
+          // НЕ throw - позиция уже закрыта в памяти, продолжаем с учетом
+        } else {
+          // Store transaction signature
+          (position as any).sellSignature = sellResult.signature;
+          (position as any).solReceived = sellResult.solReceived;
+
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: position.token,
+            message: `✅ REAL SELL SUCCESS: signature=${sellResult.signature}, received=${sellResult.solReceived?.toFixed(6)} SOL`,
+          });
+        }
+      }
+
+      // Accounting (paper or real)
       const exitFee = config.priorityFee + config.signatureFee;
       const multiplier = exitPrice / position.entryPrice;
       const investedAmount = position.investedSol; // Amount actually invested (after entry fees)

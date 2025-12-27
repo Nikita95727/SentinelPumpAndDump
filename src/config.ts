@@ -52,7 +52,8 @@ export const config: Config = {
   profitLockEnabled: process.env.PROFIT_LOCK_ENABLED !== 'false',
   profitLockThresholdPct: parseFloat(process.env.PROFIT_LOCK_THRESHOLD_PCT || '20.0'), // Lock profit if balance increases by this %
   profitLockPercent: parseFloat(process.env.PROFIT_LOCK_PERCENT || '50.0'), // Lock this % of profit above threshold
-  // Wallet configuration
+  // Real trading configuration
+  realTradingEnabled: process.env.REAL_TRADING_ENABLED === 'true', // 🔴 IMPORTANT: Must be explicitly enabled
   walletMnemonic: process.env.WALLET_MNEMONIC || '', // Seed-фраза для кошелька (опционально, для реальной торговли)
 };
 

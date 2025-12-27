@@ -130,6 +130,8 @@ export interface Config {
   profitLockEnabled: boolean;
   profitLockThresholdPct: number;
   profitLockPercent: number;
+  // Real trading configuration
+  realTradingEnabled: boolean;
   walletMnemonic: string;
 }
 
