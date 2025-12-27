@@ -101,13 +101,22 @@ class Account {
   /**
    * Get position size based on current free balance
    * Safety caps are applied externally by SafetyManager
+   * 
+   * Minimum position size ensures fees never eat profit:
+   * - Entry fees: 0.001005 SOL
+   * - Exit fees: 0.001005 SOL
+   * - For 2.5x profit: investedAmount * 1.5 > totalFees
+   * - Minimum invested: ~0.00134 SOL
+   * - Minimum positionSize: ~0.002345 SOL (with 50% safety margin: 0.0035 SOL)
    */
-  getPositionSize(maxPositions: number, minPositionSize: number = 0.001, workingBalance?: number): number {
+  getPositionSize(maxPositions: number, minPositionSize: number = 0.0035, workingBalance?: number): number {
     const free = workingBalance !== undefined ? workingBalance - this.lockedBalance : this.getFreeBalance();
     if (free <= 0) {
       return minPositionSize;
     }
-    return Math.max(free / maxPositions, minPositionSize);
+    const calculatedSize = free / maxPositions;
+    // Ensure position size is at least minPositionSize to cover fees
+    return Math.max(calculatedSize, minPositionSize);
   }
 }
 
@@ -178,7 +187,8 @@ export class PositionManager {
 
     // 3. Проверка: достаточно ли средств для открытия позиции?
     const workingBalance = this.safetyManager.getWorkingBalance(this.account.getTotalBalance());
-    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.001, workingBalance);
+    // Minimum position size: 0.0035 SOL to ensure fees don't eat profit
+    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, workingBalance);
     const positionSize = this.safetyManager.applySafetyCaps(basePositionSize);
     const requiredAmount = positionSize;
     
@@ -257,7 +267,8 @@ export class PositionManager {
 
     // Получаем размер позиции из Account с учетом working balance
     const workingBalance = this.safetyManager.getWorkingBalance(this.account.getTotalBalance());
-    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.001, workingBalance);
+    // Minimum position size: 0.0035 SOL to ensure fees don't eat profit
+    const basePositionSize = this.account.getPositionSize(MAX_POSITIONS, 0.0035, workingBalance);
     // Apply safety caps (stealth cap, night mode, reserve cap if available)
     const positionSize = this.safetyManager.applySafetyCaps(basePositionSize);
     
@@ -267,6 +278,15 @@ export class PositionManager {
 
     if (investedAmount <= 0) {
       throw new Error(`Insufficient funds after fees: ${investedAmount}`);
+    }
+
+    // Additional check: ensure investedAmount is sufficient for profit after exit fees
+    const exitFees = config.priorityFee + config.signatureFee;
+    const totalFees = entryFees + exitFees;
+    // For 2.5x profit: investedAmount * 1.5 must be > totalFees
+    const minInvestedForProfit = totalFees / 1.5;
+    if (investedAmount < minInvestedForProfit) {
+      throw new Error(`Position size too small: investedAmount (${investedAmount}) < minimum for profit (${minInvestedForProfit})`);
     }
 
     // Защита от некорректных значений
