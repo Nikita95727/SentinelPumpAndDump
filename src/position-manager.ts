@@ -722,34 +722,76 @@ export class PositionManager {
         // ОСНОВНАЯ ПРОВЕРКА: Реальная цена (каждые 2 секунды)
         // Увеличенный интервал дает импульсу развиться, но не пропускаем падение благодаря trailing stop
         if (shouldCheckRealPrice) {
-          const multiplier = currentPrice / position.entryPrice;
+          const currentMultiplier = currentPrice / position.entryPrice;
+          const timeHeldSeconds = elapsed / 1000;
 
           // Обновляем peak
           if (currentPrice > position.peakPrice) {
             position.peakPrice = currentPrice;
           }
 
-          // УСЛОВИЕ 1: Trailing Stop (25% от пика) - ОСНОВНОЙ МЕХАНИЗМ ВЫХОДА
-          // Используем только trailing stop, чтобы поймать большие импульсы
-          // Это позволит выйти на 7x, 31x, 150x вместо фиксированного 2.5x
-          // Выходим только если токен упал на 25% от пика
+          const peakMultiplier = position.peakPrice / position.entryPrice;
           const dropFromPeak = (position.peakPrice - currentPrice) / position.peakPrice;
-          if (dropFromPeak >= TRAILING_STOP_PCT) {
-            await this.closePosition(position, 'trailing_stop', currentPrice);
+
+          // === ГИБРИДНАЯ СТРАТЕГИЯ ВЫХОДА ===
+          
+          // СТРАТЕГИЯ 1: Слабый импульс (пик < 3x)
+          // Выходим сразу на 2.5x - токен не показал сильного роста
+          if (peakMultiplier < 3.0 && currentMultiplier >= config.takeProfitMultiplier) {
+            await this.closePosition(position, 'take_profit', currentMultiplier);
             return;
           }
 
-          // УСЛОВИЕ 2: Минимальный Take Profit (только для защиты от медленных токенов)
-          // Выходим только если токен достиг 2.5x, но пик не выше 3x
-          // Это защита от случаев, когда токен не растет выше 2.5x и начинает падать
-          if (multiplier >= config.takeProfitMultiplier) {
-            const peakMultiplier = position.peakPrice / position.entryPrice;
-            // Если пик не выше 3x, значит токен не имеет сильного импульса - выходим
-            if (peakMultiplier < 3.0) {
-              await this.closePosition(position, 'take_profit', currentPrice);
+          // СТРАТЕГИЯ 2: Средний импульс (3x ≤ пик < 5x)
+          // Адаптивный trailing stop 20% - баланс между жадностью и безопасностью
+          if (peakMultiplier >= 3.0 && peakMultiplier < 5.0) {
+            if (dropFromPeak >= 0.20) {
+              await this.closePosition(position, 'trailing_stop', currentMultiplier);
               return;
             }
-            // Если пик > 3x, продолжаем держать (trailing stop поймает больший импульс)
+            
+            // Защита: держим 70+ секунд и упали на 15% от пика - выходим
+            if (timeHeldSeconds >= 70 && dropFromPeak >= 0.15) {
+              await this.closePosition(position, 'late_exit', currentMultiplier);
+              return;
+            }
+          }
+
+          // СТРАТЕГИЯ 3: Большой импульс (5x ≤ пик < 10x)
+          // Жадный trailing stop 25% - позволяем импульсу развиться
+          if (peakMultiplier >= 5.0 && peakMultiplier < 10.0) {
+            if (dropFromPeak >= 0.25) {
+              await this.closePosition(position, 'trailing_stop', currentMultiplier);
+              return;
+            }
+            
+            // Защита: держим 75+ секунд и упали на 20% от пика - выходим
+            if (timeHeldSeconds >= 75 && dropFromPeak >= 0.20) {
+              await this.closePosition(position, 'late_exit', currentMultiplier);
+              return;
+            }
+          }
+
+          // СТРАТЕГИЯ 4: Очень большой импульс (пик ≥ 10x)
+          // Максимально жадный trailing stop 30% - даем пространство для роста
+          if (peakMultiplier >= 10.0) {
+            if (dropFromPeak >= 0.30) {
+              await this.closePosition(position, 'trailing_stop', currentMultiplier);
+              return;
+            }
+            
+            // Защита: держим 80+ секунд и упали на 25% от пика - выходим
+            if (timeHeldSeconds >= 80 && dropFromPeak >= 0.25) {
+              await this.closePosition(position, 'late_exit', currentMultiplier);
+              return;
+            }
+          }
+
+          // ОБЩАЯ ЗАЩИТА: Держим близко к timeout и цена сильно упала
+          // Если держим 85+ секунд и текущая цена < 70% от пика - принудительный выход
+          if (timeHeldSeconds >= 85 && currentMultiplier < peakMultiplier * 0.70) {
+            await this.closePosition(position, 'emergency_exit', currentMultiplier);
+            return;
           }
 
           lastPriceCheck = now; // Обновляем время последней проверки реальной цены
