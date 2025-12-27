@@ -204,6 +204,23 @@ export class PositionManager {
     setInterval(() => {
       this.fixBalanceDesync();
     }, 10000);
+
+    // ⚡ ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ: Статистика каждые 60 секунд (не замедляет!)
+    setInterval(() => {
+      const stats = this.getStats();
+      const totalBalance = this.account.getTotalBalance();
+      const freeBalance = this.account.getFreeBalance();
+      const lockedBalance = this.account.getLockedBalance();
+      const peakBalance = this.account.getPeakBalance();
+      const profit = totalBalance - initialDeposit;
+      const profitPct = (profit / initialDeposit) * 100;
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `📊 STATUS: Active: ${stats.activePositions}/${config.maxOpenPositions}, Balance: ${totalBalance.toFixed(6)} SOL (${profitPct >= 0 ? '+' : ''}${profitPct.toFixed(2)}%), Free: ${freeBalance.toFixed(6)}, Locked: ${lockedBalance.toFixed(6)}, Peak: ${peakBalance.toFixed(6)}`,
+      });
+    }, 60000); // Каждые 60 секунд
   }
 
   /**

@@ -3,6 +3,7 @@ import fetch from 'node-fetch';
 import { logger } from './logger';
 import { getCurrentTimestamp } from './utils';
 
+// Jupiter API v6 endpoints (из примера ChatGPT)
 const JUPITER_QUOTE_API = 'https://quote-api.jup.ag/v6/quote';
 const JUPITER_SWAP_API = 'https://quote-api.jup.ag/v6/swap';
 

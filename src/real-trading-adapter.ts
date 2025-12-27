@@ -1,22 +1,23 @@
 import { WalletManager } from './wallet';
-import { JupiterSwap } from './jupiter-swap';
+import { PumpFunSwap } from './pumpfun-swap';
 import { Connection } from '@solana/web3.js';
 import { logger } from './logger';
 import { getCurrentTimestamp } from './utils';
 
 /**
  * Real Trading Adapter
- * Интегрирует WalletManager и JupiterSwap для реальной торговли
+ * Интегрирует WalletManager и PumpFunSwap для реальной торговли
+ * Использует прямые свапы через Pump.fun (быстрее и незаметнее чем Jupiter)
  */
 export class RealTradingAdapter {
   private walletManager: WalletManager;
-  private jupiterSwap: JupiterSwap;
+  private pumpFunSwap: PumpFunSwap;
   private tokenBalanceCache = new Map<string, { balance: number; timestamp: number }>(); // mint → {balance, timestamp}
   private readonly CACHE_TTL = 5000; // 5 секунд
 
   constructor(private connection: Connection) {
     this.walletManager = new WalletManager();
-    this.jupiterSwap = new JupiterSwap(connection);
+    this.pumpFunSwap = new PumpFunSwap(connection);
   }
 
   /**
@@ -71,21 +72,33 @@ export class RealTradingAdapter {
     mint: string,
     amountSol: number
   ): Promise<{ success: boolean; signature?: string; error?: string; tokensReceived?: number }> {
+    const buyStartTime = Date.now(); // ⚡ Timing
     const keypair = this.walletManager.getKeypair();
     
     if (!keypair) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: mint,
+        message: `🔴 REAL BUY FAILED: Wallet not initialized`,
+      });
       return { success: false, error: 'Wallet not initialized' };
     }
+
+    const balanceBefore = await this.getBalance();
 
     logger.log({
       timestamp: getCurrentTimestamp(),
       type: 'info',
       token: mint,
-      message: `🔄 Executing REAL BUY: ${amountSol} SOL → ${mint}`,
+      message: `🔄 Executing REAL BUY: ${amountSol} SOL → ${mint}, balance: ${balanceBefore.toFixed(6)} SOL`,
     });
 
-    // Выполнить swap через Jupiter
-    const result = await this.jupiterSwap.buy(keypair, mint, amountSol);
+    // Выполнить swap через Pump.fun
+    const result = await this.pumpFunSwap.buy(keypair, mint, amountSol);
+
+    const buyDuration = Date.now() - buyStartTime;
+    const balanceAfter = await this.getBalance().catch(() => balanceBefore); // Fallback on error
 
     if (result.success) {
       // Сохранить в кэш (примерное количество токенов)
@@ -96,11 +109,12 @@ export class RealTradingAdapter {
         });
       }
 
+      // ⚡ ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ SUCCESS
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `✅ REAL BUY SUCCESS: ${result.signature}, received ~${result.outAmount} tokens`,
+        message: `✅ REAL BUY SUCCESS: ${result.signature} | Invested: ${amountSol} SOL, Tokens: ${result.outAmount}, Duration: ${buyDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL (${(balanceAfter - balanceBefore >= 0 ? '+' : '')}${(balanceAfter - balanceBefore).toFixed(6)}), Explorer: https://solscan.io/tx/${result.signature}`,
       });
 
       return {
@@ -109,11 +123,12 @@ export class RealTradingAdapter {
         tokensReceived: result.outAmount,
       };
     } else {
+      // 🔴 КРИТИЧНОЕ ЛОГИРОВАНИЕ FAIL
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'error',
         token: mint,
-        message: `❌ REAL BUY FAILED: ${result.error}`,
+        message: `❌ REAL BUY FAILED: ${result.error} | Invested: ${amountSol} SOL, Duration: ${buyDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL`,
       });
 
       return {
@@ -130,17 +145,26 @@ export class RealTradingAdapter {
     mint: string,
     expectedAmountSol: number // Ожидаемая сумма для расчёта (не используется для swap)
   ): Promise<{ success: boolean; signature?: string; error?: string; solReceived?: number }> {
+    const sellStartTime = Date.now(); // ⚡ Timing
     const keypair = this.walletManager.getKeypair();
     
     if (!keypair) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: mint,
+        message: `🔴 REAL SELL FAILED: Wallet not initialized`,
+      });
       return { success: false, error: 'Wallet not initialized' };
     }
+
+    const balanceBefore = await this.getBalance();
 
     logger.log({
       timestamp: getCurrentTimestamp(),
       type: 'info',
       token: mint,
-      message: `🔄 Executing REAL SELL: ${mint} → SOL (expected ~${expectedAmountSol.toFixed(6)} SOL)`,
+      message: `🔄 Executing REAL SELL: ${mint} → SOL (expected ~${expectedAmountSol.toFixed(6)} SOL), balance: ${balanceBefore.toFixed(6)} SOL`,
     });
 
     // Получить баланс токенов
@@ -164,8 +188,11 @@ export class RealTradingAdapter {
       message: `Token balance: ${tokenBalance} units, selling all`,
     });
 
-    // Выполнить swap через Jupiter
-    const result = await this.jupiterSwap.sell(keypair, mint, tokenBalance);
+    // Выполнить swap через Pump.fun
+    const result = await this.pumpFunSwap.sell(keypair, mint, tokenBalance);
+
+    const sellDuration = Date.now() - sellStartTime;
+    const balanceAfter = await this.getBalance().catch(() => balanceBefore); // Fallback on error
 
     if (result.success) {
       const solReceived = result.outAmount ? result.outAmount / 1e9 : 0;
@@ -173,11 +200,12 @@ export class RealTradingAdapter {
       // Очистить кэш
       this.tokenBalanceCache.delete(mint);
 
+      // ⚡ ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ SUCCESS
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `✅ REAL SELL SUCCESS: ${result.signature}, received ${solReceived.toFixed(6)} SOL`,
+        message: `✅ REAL SELL SUCCESS: ${result.signature} | Received: ${solReceived.toFixed(6)} SOL (expected: ${expectedAmountSol.toFixed(6)}), Duration: ${sellDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL (${(balanceAfter - balanceBefore >= 0 ? '+' : '')}${(balanceAfter - balanceBefore).toFixed(6)}), Explorer: https://solscan.io/tx/${result.signature}`,
       });
 
       return {
@@ -186,11 +214,12 @@ export class RealTradingAdapter {
         solReceived,
       };
     } else {
+      // 🔴 КРИТИЧНОЕ ЛОГИРОВАНИЕ FAIL
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'error',
         token: mint,
-        message: `❌ REAL SELL FAILED: ${result.error}`,
+        message: `❌ REAL SELL FAILED: ${result.error} | Expected: ${expectedAmountSol.toFixed(6)} SOL, Duration: ${sellDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL`,
       });
 
       return {
@@ -218,7 +247,13 @@ export class RealTradingAdapter {
       return 0;
     }
 
-    const balance = await this.jupiterSwap.getTokenBalance(publicKey, mint);
+    const { getAssociatedTokenAddress } = await import('@solana/spl-token');
+    const tokenAccount = await getAssociatedTokenAddress(
+      new (await import('@solana/web3.js')).PublicKey(mint),
+      publicKey
+    );
+    
+    const balance = await this.pumpFunSwap.getTokenBalance(tokenAccount);
 
     // Обновить кэш
     this.tokenBalanceCache.set(mint, { balance, timestamp: now });
@@ -247,6 +282,31 @@ export class RealTradingAdapter {
         healthy: false,
         error: error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  /**
+   * Предварительно создать ATA для токена
+   * Вызывается ЗАРАНЕЕ чтобы не замедлять buy транзакцию
+   */
+  async prepareTokenAccount(mint: string): Promise<boolean> {
+    const keypair = this.walletManager.getKeypair();
+    
+    if (!keypair) {
+      return false;
+    }
+
+    try {
+      await this.pumpFunSwap.ensureTokenAccount(keypair, mint);
+      return true;
+    } catch (error) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: mint,
+        message: `❌ Failed to prepare token account: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return false;
     }
   }
 }
