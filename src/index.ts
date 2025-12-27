@@ -86,8 +86,8 @@ class PumpFunSniper {
       // Логируем периодически для диагностики
       const now = Date.now();
       if (!this.lastBalanceLogTime || (now - this.lastBalanceLogTime) > 60000) { // Раз в минуту
-        const stats = this.positionManager.getStats();
-        console.log(`[${new Date().toLocaleTimeString()}] INFO | Insufficient balance for trading. Free balance: ${stats.freeBalance?.toFixed(6) || 'N/A'} SOL, Total: ${stats.totalBalance?.toFixed(6) || 'N/A'} SOL`);
+        const freeBalance = this.positionManager.hasEnoughBalanceForTrading() ? 'OK' : 'INSUFFICIENT';
+        console.log(`[${new Date().toLocaleTimeString()}] INFO | Insufficient balance for trading. Current deposit: ${this.positionManager.getCurrentDeposit().toFixed(6)} SOL`);
         this.lastBalanceLogTime = now;
       }
       return;
