@@ -19,7 +19,7 @@ export class PumpFunSwap {
     // Create AnchorProvider for SDK (dummy wallet, we'll pass real keypair to buy/sell)
     const wallet = new NodeWallet(new Keypair());
     const provider = new AnchorProvider(connection, wallet, {
-      commitment: 'finalized', // SDK требует finalized для корректной работы
+      commitment: 'confirmed', // Быстрее чем finalized, но надежнее чем processed
     });
     
     this.sdk = new PumpFunSDK(provider);
@@ -70,8 +70,8 @@ export class PumpFunSwap {
         buyAmountLamports,
         slippageBasisPoints,
         priorityFees,
-        'finalized', // commitment
-        'finalized' // finality
+        'confirmed', // commitment - быстрее чем finalized
+        'confirmed' // finality
       );
 
       const buyEndTime = Date.now();
@@ -162,8 +162,8 @@ export class PumpFunSwap {
         sellAmount,
         slippageBasisPoints,
         priorityFees,
-        'finalized', // commitment
-        'finalized' // finality
+        'confirmed', // commitment - быстрее чем finalized
+        'confirmed' // finality
       );
 
       const sellEndTime = Date.now();
