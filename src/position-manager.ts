@@ -554,14 +554,17 @@ export class PositionManager {
       throw new Error(`Invalid amounts: positionSize=${positionSize}, investedAmount=${investedAmount}, totalReserved=${totalReservedAmount}`);
     }
 
+    // ISSUE #1: Deduct FULL positionSize from deposit FIRST (includes entry fees)
+    // This must happen BEFORE reserve() to maintain correct freeBalance calculation
+    this.account.deductFromDeposit(positionSize);
+    
     // Резервируем средства через Account (включая резерв для выхода)
+    // Note: reserve() only increases lockedBalance, doesn't touch totalBalance
     if (!this.account.reserve(totalReservedAmount)) {
+      // Rollback: add back positionSize if reserve fails
+      this.account.deductFromDeposit(-positionSize);
       throw new Error(`Failed to reserve ${totalReservedAmount} SOL (insufficient free balance). Required: positionSize=${positionSize} + exitFees=${exitFees} + exitSlippage=${exitSlippage.toFixed(6)})`);
     }
-    
-    // ISSUE #1: Deduct FULL positionSize from deposit (includes entry fees)
-    // Entry fees are already included in positionSize, so we deduct the full amount
-    this.account.deductFromDeposit(positionSize);
 
     // Рассчитываем slippage
     const slippage = calculateSlippage();
