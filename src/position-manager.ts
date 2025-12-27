@@ -455,7 +455,12 @@ export class PositionManager {
       
       // 6. Запускаем параллельный мониторинг (НЕ await!)
       this.monitorPosition(position).catch(err => {
-        console.error(`❌ [ERROR] monitorPosition failed for ${position.token.slice(0, 8)}:`, err);
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: position.token,
+          message: `❌ [ERROR] monitorPosition failed: ${err.message}`,
+        });
       });
       
       logger.log({
@@ -628,7 +633,12 @@ export class PositionManager {
    * Использует промежуточный расчет цены по импульсу для более быстрой реакции
    */
   private async monitorPosition(position: Position): Promise<void> {
-    console.log(`🔍 [DEBUG] monitorPosition started for ${position.token.slice(0, 8)}...`);
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      token: position.token,
+      message: `🔍 [DEBUG] monitorPosition started`,
+    });
     let lastPriceCheck = Date.now();
     let loopCount = 0;
     
@@ -640,12 +650,22 @@ export class PositionManager {
       
       // Log every 10 loops to see if loop is running
       if (loopCount % 10 === 0) {
-        console.log(`🔄 [DEBUG] monitorPosition loop #${loopCount} for ${position.token.slice(0, 8)}... elapsed=${(elapsed/1000).toFixed(1)}s status=${position.status}`);
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: position.token,
+          message: `🔄 [DEBUG] monitorPosition loop #${loopCount} elapsed=${(elapsed/1000).toFixed(1)}s status=${position.status}`,
+        });
       }
       
       // КРИТИЧЕСКАЯ ПРОВЕРКА: Timeout (90 секунд) - проверяем ВСЕГДА, независимо от проверки цены
       if (elapsed >= MAX_HOLD_TIME) {
-        console.log(`⏰ [DEBUG] TIMEOUT triggered for ${position.token.slice(0, 8)}... after ${(elapsed/1000).toFixed(1)}s`);
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: position.token,
+          message: `⏰ [DEBUG] TIMEOUT triggered after ${(elapsed/1000).toFixed(1)}s`,
+        });
         const currentPrice = position.currentPrice || position.entryPrice;
         await this.closePosition(position, 'timeout', currentPrice);
         return;
