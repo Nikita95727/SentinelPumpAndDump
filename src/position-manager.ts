@@ -331,18 +331,18 @@ export class PositionManager {
       return false;
     }
 
-    // ⚡ УБРАЛ ЗАДЕРЖКУ - будем входить максимально быстро!
-    // const MIN_TOKEN_AGE_SECONDS = 1;
-    // if (tokenAgeAtStart < MIN_TOKEN_AGE_SECONDS) {
-    //   const waitTime = (MIN_TOKEN_AGE_SECONDS - tokenAgeAtStart) * 1000;
-    //   logger.log({
-    //     timestamp: getCurrentTimestamp(),
-    //     type: 'info',
-    //     token: candidate.mint,
-    //     message: `⏱️ Token too young (${tokenAgeAtStart.toFixed(2)}s), waiting ${(waitTime / 1000).toFixed(2)}s...`,
-    //   });
-    //   await new Promise(resolve => setTimeout(resolve, waitTime));
-    // }
+    // ⚡ КРИТИЧНО: Ждем 5 секунд для гарантированной инициализации токена
+    const MIN_TOKEN_AGE_SECONDS = 5;
+    if (tokenAgeAtStart < MIN_TOKEN_AGE_SECONDS) {
+      const waitTime = (MIN_TOKEN_AGE_SECONDS - tokenAgeAtStart) * 1000;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `⏱️ Token too young (${tokenAgeAtStart.toFixed(2)}s), waiting ${(waitTime / 1000).toFixed(2)}s for initialization...`,
+      });
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
 
     // 1. Проверка: есть ли свободные слоты?
     if (this.positions.size >= config.maxOpenPositions) {
