@@ -104,7 +104,7 @@ export class PumpFunSwap {
         message: `🔄 Pump.fun BUY (SDK) attempt ${attempt}: ${amountSol} SOL → ${tokenMint}`,
       });
 
-      // ✅ FIX: Создаем ATA правильно через SPL Token helper
+      // Проверяем нужна ли ATA ПЕРЕД получением инструкций SDK
       const ata = await getAssociatedTokenAddress(
         mintPubkey,
         wallet.publicKey,
@@ -112,8 +112,6 @@ export class PumpFunSwap {
         TOKEN_PROGRAM_ID,
         ASSOCIATED_TOKEN_PROGRAM_ID
       );
-
-      // Проверяем существует ли ATA
       const ataAccountInfo = await this.connection.getAccountInfo(ata);
       const needsAta = ataAccountInfo === null;
 
@@ -126,6 +124,13 @@ export class PumpFunSwap {
         'processed'
       );
 
+      // ✅ FIX: Удаляем все ATA creation инструкции из SDK (они могут быть неправильными)
+      // Оставляем только Pump.fun и другие инструкции
+      const filteredInstructions = buyInstructions.instructions.filter(ix => {
+        // Удаляем инструкции Associated Token Program (SDK может создавать их неправильно)
+        return ix.programId.toString() !== ASSOCIATED_TOKEN_PROGRAM_ID.toString();
+      });
+
       // Создаем транзакцию
       const transaction = new Transaction();
       transaction.add(
@@ -135,7 +140,7 @@ export class PumpFunSwap {
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
       );
 
-      // ✅ FIX: Добавляем ПРАВИЛЬНУЮ ATA creation ТОЛЬКО если нужно
+      // ✅ FIX: Добавляем ПРАВИЛЬНУЮ ATA creation ПЕРЕД SDK инструкциями если нужно
       if (needsAta) {
         const ataIx = createAssociatedTokenAccountInstruction(
           wallet.publicKey, // payer
@@ -148,7 +153,7 @@ export class PumpFunSwap {
         transaction.add(ataIx);
       }
 
-      transaction.add(...buyInstructions.instructions);
+      transaction.add(...filteredInstructions);
 
       // Отправляем с skipPreflight
       const signature = await sendAndConfirmTransaction(this.connection, transaction, [wallet], {
