@@ -101,10 +101,9 @@ export class PumpFunSwap {
 
       // ⚡ КРИТИЧНО: Параллельные запросы для PDA (экономим время)
       const userTokenAccount = await getAssociatedTokenAddress(mintPubkey, wallet.publicKey);
-      const [bondingCurve, associatedBondingCurve, accountInfo] = await Promise.all([
+      const [bondingCurve, associatedBondingCurve] = await Promise.all([
         this.getBondingCurvePDA(mintPubkey),
         this.getAssociatedBondingCurve(mintPubkey),
-        this.connection.getAccountInfo(userTokenAccount),
       ]);
       
       const transaction = new Transaction();
@@ -112,23 +111,13 @@ export class PumpFunSwap {
       // ⚡ КРИТИЧНО: Агрессивные priority fees для быстрого включения в блок
       // Compute budget: увеличиваем лимит и платим premium за скорость
       transaction.add(
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }) // Достаточно для buy + ATA
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }) // Достаточно для buy
       );
       transaction.add(
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }) // Агрессивный приоритет
       );
 
-      // Создать ATA если не существует
-      if (!accountInfo) {
-        transaction.add(
-          createAssociatedTokenAccountInstruction(
-            wallet.publicKey,
-            userTokenAccount,
-            wallet.publicKey,
-            mintPubkey
-          )
-        );
-      }
+      // Pump.fun сама создает ATA если нужно - не добавляем createAssociatedTokenAccountInstruction!
 
       // Buy instruction
       const buyIx = this.createBuyInstruction(
