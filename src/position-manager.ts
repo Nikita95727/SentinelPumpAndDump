@@ -163,6 +163,9 @@ export class PositionManager {
     this.account = new Account(initialDeposit);
     this.safetyManager = new SafetyManager(initialDeposit);
 
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем и исправляем баланс при старте
+    this.fixBalanceDesync();
+
     // Централизованное обновление цен каждые 2 секунды
     setInterval(() => this.updateAllPrices(), CHECK_INTERVAL);
     
@@ -170,6 +173,11 @@ export class PositionManager {
     setInterval(() => {
       this.safetyManager.updateSessionBalance(this.account.getTotalBalance());
     }, 5000); // Every 5 seconds
+
+    // Периодическая проверка баланса (каждые 10 секунд)
+    setInterval(() => {
+      this.fixBalanceDesync();
+    }, 10000);
   }
 
   /**
@@ -178,6 +186,53 @@ export class PositionManager {
   private generateTradeId(): string {
     this.tradeIdCounter++;
     return `trade-${Date.now()}-${this.tradeIdCounter}`;
+  }
+
+  /**
+   * Исправляет рассинхронизацию баланса
+   * Вызывается при старте и периодически
+   */
+  private fixBalanceDesync(): void {
+    const activePositions = Array.from(this.positions.values()).filter(p => p.status === 'active');
+    const totalReservedInPositions = activePositions.reduce((sum, p) => sum + (p.reservedAmount || 0), 0);
+    
+    const freeBalance = this.account.getFreeBalance();
+    const totalBalance = this.account.getTotalBalance();
+    const lockedBalance = this.account.getLockedBalance();
+
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ 1: Если нет позиций, но есть застрявшие средства
+    if (activePositions.length === 0 && lockedBalance > 0.0001) {
+      console.error(`⚠️ BALANCE DESYNC FIX: No positions but lockedBalance=${lockedBalance.toFixed(6)}. Resetting to 0.`);
+      this.account.fixLockedBalance(0);
+      return;
+    }
+
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ 2: Если lockedBalance больше totalBalance - это невозможно
+    if (lockedBalance > totalBalance + 0.0001) {
+      console.error(`⚠️ BALANCE DESYNC FIX: lockedBalance=${lockedBalance.toFixed(6)} > totalBalance=${totalBalance.toFixed(6)}. This is impossible!`);
+      console.error(`   Fixing: setting lockedBalance to ${totalReservedInPositions.toFixed(6)} (actual reserved)`);
+      this.account.fixLockedBalance(totalReservedInPositions);
+      return;
+    }
+
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ 3: Если freeBalance отрицательный
+    if (freeBalance < -0.0001) {
+      console.error(`⚠️ BALANCE DESYNC FIX: freeBalance=${freeBalance.toFixed(6)} is negative!`);
+      console.error(`   totalBalance=${totalBalance.toFixed(6)}, lockedBalance=${lockedBalance.toFixed(6)}, totalReserved=${totalReservedInPositions.toFixed(6)}`);
+      // Исправляем: устанавливаем lockedBalance равным реально зарезервированному
+      this.account.fixLockedBalance(totalReservedInPositions);
+      console.error(`   Fixed: lockedBalance set to ${totalReservedInPositions.toFixed(6)}`);
+      return;
+    }
+
+    // Обычная проверка: рассинхронизация между lockedBalance и позициями
+    if (Math.abs(lockedBalance - totalReservedInPositions) > 0.0001) {
+      console.error(`⚠️ BALANCE DESYNC FIX: lockedBalance=${lockedBalance.toFixed(6)} != totalReservedInPositions=${totalReservedInPositions.toFixed(6)}, diff=${(lockedBalance - totalReservedInPositions).toFixed(6)}`);
+      console.error(`   Active positions: ${activePositions.length}`);
+      const correctLocked = totalReservedInPositions;
+      this.account.fixLockedBalance(correctLocked);
+      console.error(`   Fixed: lockedBalance set to ${correctLocked.toFixed(6)}`);
+    }
   }
 
   /**
@@ -839,28 +894,8 @@ export class PositionManager {
       age: `${Math.floor((Date.now() - p.entryTime) / 1000)}s`,
     }));
 
-    // Диагностика: проверяем рассинхронизацию баланса
-    const freeBalance = this.account.getFreeBalance();
-    const totalBalance = this.account.getTotalBalance();
-    const lockedBalance = this.account.getLockedBalance();
-    const totalReservedInPositions = Array.from(this.positions.values())
-      .filter(p => p.status === 'active')
-      .reduce((sum, p) => sum + (p.reservedAmount || 0), 0);
-    
-    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Если нет позиций, но есть застрявшие средства - сбрасываем
-    if (this.positions.size === 0 && lockedBalance > 0.0001) {
-      console.error(`⚠️ BALANCE DESYNC: No positions but lockedBalance=${lockedBalance.toFixed(6)}`);
-      console.error(`   Fixing: setting lockedBalance to 0`);
-      this.account.fixLockedBalance(0);
-    } else if (Math.abs(lockedBalance - totalReservedInPositions) > 0.0001) {
-      // Рассинхронизация между lockedBalance и позициями
-      console.error(`⚠️ BALANCE DESYNC: lockedBalance=${lockedBalance.toFixed(6)}, totalReservedInPositions=${totalReservedInPositions.toFixed(6)}, diff=${(lockedBalance - totalReservedInPositions).toFixed(6)}`);
-      console.error(`   Active positions: ${activePositions.length}, Total positions: ${this.positions.size}`);
-      // Исправляем рассинхронизацию
-      const correctLocked = totalReservedInPositions;
-      this.account.fixLockedBalance(correctLocked);
-      console.error(`   Fixed: lockedBalance set to ${correctLocked.toFixed(6)}`);
-    }
+    // Исправление баланса (используем централизованный метод)
+    this.fixBalanceDesync();
 
     return {
       activePositions: activePositions.length,
