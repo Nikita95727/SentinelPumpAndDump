@@ -601,18 +601,27 @@ export class PositionManager {
             position.peakPrice = currentPrice;
           }
 
-          // Условие 1: Take Profit - выходим при достижении 2.5x или выше
-          // Благодаря интервалу 2s, импульс успевает развиться до 3-4x
-          if (multiplier >= config.takeProfitMultiplier) {
-            await this.closePosition(position, 'take_profit', currentPrice);
-            return;
-          }
-
-          // Условие 2: Trailing Stop (25% от пика)
+          // УСЛОВИЕ 1: Trailing Stop (25% от пика) - ОСНОВНОЙ МЕХАНИЗМ ВЫХОДА
+          // Используем только trailing stop, чтобы поймать большие импульсы
+          // Это позволит выйти на 7x, 31x, 150x вместо фиксированного 2.5x
+          // Выходим только если токен упал на 25% от пика
           const dropFromPeak = (position.peakPrice - currentPrice) / position.peakPrice;
           if (dropFromPeak >= TRAILING_STOP_PCT) {
             await this.closePosition(position, 'trailing_stop', currentPrice);
             return;
+          }
+
+          // УСЛОВИЕ 2: Минимальный Take Profit (только для защиты от медленных токенов)
+          // Выходим только если токен достиг 2.5x, но пик не выше 3x
+          // Это защита от случаев, когда токен не растет выше 2.5x и начинает падать
+          if (multiplier >= config.takeProfitMultiplier) {
+            const peakMultiplier = position.peakPrice / position.entryPrice;
+            // Если пик не выше 3x, значит токен не имеет сильного импульса - выходим
+            if (peakMultiplier < 3.0) {
+              await this.closePosition(position, 'take_profit', currentPrice);
+              return;
+            }
+            // Если пик > 3x, продолжаем держать (trailing stop поймает больший импульс)
           }
 
           lastPriceCheck = now; // Обновляем время последней проверки реальной цены
