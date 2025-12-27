@@ -104,14 +104,13 @@ export class PumpFunSwap {
         message: `🔄 Pump.fun BUY (SDK) attempt ${attempt}: ${amountSol} SOL → ${tokenMint}`,
       });
 
-      // Проверяем нужна ли ATA ПЕРЕД получением инструкций SDK
+      // ✅ FIX: Получаем ATA address ПЕРЕД получением инструкций SDK
       const ata = await getAssociatedTokenAddress(
         mintPubkey,
-        wallet.publicKey,
-        false,
-        TOKEN_PROGRAM_ID,
-        ASSOCIATED_TOKEN_PROGRAM_ID
+        wallet.publicKey
       );
+
+      // ✅ FIX: Проверяем существует ли ATA (НЕ создаем если уже существует)
       const ataAccountInfo = await this.connection.getAccountInfo(ata);
       const needsAta = ataAccountInfo === null;
 
@@ -124,11 +123,12 @@ export class PumpFunSwap {
         'processed'
       );
 
-      // ✅ FIX: Удаляем все ATA creation инструкции из SDK (они могут быть неправильными)
-      // Оставляем только Pump.fun и другие инструкции
+      // ✅ FIX: Удаляем ВСЕ ATA creation инструкции из SDK (они могут быть с неправильным programId)
+      // Фильтруем по programId - удаляем все инструкции Associated Token Program
       const filteredInstructions = buyInstructions.instructions.filter(ix => {
+        const programIdStr = ix.programId.toString();
         // Удаляем инструкции Associated Token Program (SDK может создавать их неправильно)
-        return ix.programId.toString() !== ASSOCIATED_TOKEN_PROGRAM_ID.toString();
+        return programIdStr !== ASSOCIATED_TOKEN_PROGRAM_ID.toString();
       });
 
       // Создаем транзакцию
@@ -140,7 +140,7 @@ export class PumpFunSwap {
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
       );
 
-      // ✅ FIX: Добавляем ПРАВИЛЬНУЮ ATA creation ПЕРЕД SDK инструкциями если нужно
+      // ✅ FIX: Добавляем ПРАВИЛЬНУЮ ATA creation ПЕРЕД Pump.fun BUY инструкцией (только если нужно)
       if (needsAta) {
         const ataIx = createAssociatedTokenAccountInstruction(
           wallet.publicKey, // payer
@@ -153,6 +153,7 @@ export class PumpFunSwap {
         transaction.add(ataIx);
       }
 
+      // Добавляем отфильтрованные SDK инструкции (Pump.fun BUY и другие, БЕЗ ATA)
       transaction.add(...filteredInstructions);
 
       // Отправляем с skipPreflight
