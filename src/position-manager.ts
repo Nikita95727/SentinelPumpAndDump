@@ -19,6 +19,8 @@ const TRAILING_STOP_PCT = 0.25;
 const CHECK_INTERVAL = 2000; // Проверка каждые 2 секунды (даем импульсу развиться, но не пропускаем падение)
 const PREDICTION_CHECK_INTERVAL = 200; // Проверка прогнозируемой цены каждые 200ms (быстрое обнаружение импульса)
 const MAX_PRICE_HISTORY = 3; // Храним последние 3 цены для расчета импульса
+const PRICE_SILENCE_THRESHOLD = 5_000; // ms — максимум без реальной цены
+const FAILSAFE_DROP_FROM_PEAK = 0.30;  // 30% от пика
 
 /**
  * Single source of truth for account balance
@@ -375,13 +377,26 @@ export class PositionManager {
     // 3. СТУПЕНЧАТАЯ ФИЛЬТРАЦИЯ + READINESS CHECK
     // ✅ ПРИОРИТЕТ: Проверка готовности каждые 200ms
     // ✅ Фильтры прерываются, если занимают больше времени, чем интервал проверки
-    // ✅ Токены, прошедшие все фильтры, ждут готовности неограниченно долго
+    // ✅ Токены, прошедшие все фильтры, ждут готовности до 2 минут (120 секунд)
+    // ✅ Если токен не готов за 2 минуты - выкидываем из очереди (найдем замену)
     const READINESS_CHECK_INTERVAL = 200; // ms
+    const READINESS_TIMEOUT_MS = 120_000; // 2 минуты (120 секунд)
     const readinessWaitStart = Date.now();
     let filterStage = 0;
     let allFiltersPassed = false; // Флаг: все фильтры пройдены
 
     while (true) {
+      // ✅ ТАЙМАУТ: Если прошло 2 минуты - выкидываем токен из очереди
+      const timeWaiting = Date.now() - readinessWaitStart;
+      if (timeWaiting >= READINESS_TIMEOUT_MS) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `⏱️ Token readiness timeout (${(timeWaiting / 1000).toFixed(1)}s): ${candidate.mint.substring(0, 8)}... not ready after 2 minutes, discarding from queue`,
+        });
+        return false; // Выкидываем токен из очереди
+      }
       // ✅ ПРИОРИТЕТ #1: Проверка готовности токена (read-only RPC)
       const isReady = await checkTokenReadiness(this.connection, candidate.mint);
       
@@ -428,9 +443,9 @@ export class PositionManager {
       }
 
       // Токен еще не готов
-      // ✅ Если все фильтры пройдены - ждем готовности неограниченно долго
+      // ✅ Если все фильтры пройдены - ждем готовности до таймаута (2 минуты)
       if (allFiltersPassed) {
-        // Сильный кандидат - ждем готовности без таймаута
+        // Сильный кандидат - ждем готовности, но с таймаутом 2 минуты
         await sleep(READINESS_CHECK_INTERVAL);
         continue;
       }
@@ -594,6 +609,7 @@ export class PositionManager {
         investedSol: investedAmount,
         investedUsd: formatUsd(investedAmount),
         entryTime: Date.now(),
+        lastRealPriceUpdate: Date.now(),
         peakPrice: actualEntryPrice,
         currentPrice: actualEntryPrice,
         status: 'active',
@@ -857,6 +873,7 @@ export class PositionManager {
       investedSol: investedAmount, // Amount actually invested (after entry fees)
       investedUsd: formatUsd(investedAmount),
       entryTime: Date.now(),
+      lastRealPriceUpdate: Date.now(),
       peakPrice: actualEntryPrice,
       currentPrice: actualEntryPrice,
       status: 'active',
@@ -956,8 +973,39 @@ export class PositionManager {
     let loopCount = 0;
     
     while (position.status === 'active') {
-      loopCount++;
       const now = Date.now();
+      const lastUpdate = position.lastRealPriceUpdate || position.entryTime;
+      const silenceDuration = now - lastUpdate;
+
+      if (silenceDuration >= PRICE_SILENCE_THRESHOLD) {
+        const predicted = this.calculatePredictedPrice(position);
+        const peak = position.peakPrice || position.entryPrice;
+        const fallbackPrice = position.currentPrice || position.entryPrice;
+
+        const predictedCollapse =
+          predicted !== null &&
+          predicted < peak * (1 - FAILSAFE_DROP_FROM_PEAK);
+
+        const noPrediction = predicted === null;
+
+        if (predictedCollapse || noPrediction) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: position.token,
+            message: `🚨 FAILSAFE EXIT: no real price for ${silenceDuration}ms`,
+          });
+
+          await this.closePosition(
+            position,
+            'failsafe_no_price_feed',
+            fallbackPrice
+          );
+          return;
+        }
+      }
+
+      loopCount++;
       const timeSinceLastCheck = now - lastPriceCheck;
       const elapsed = Date.now() - position.entryTime;
       
@@ -1337,6 +1385,7 @@ export class PositionManager {
           }
           
           position.currentPrice = price;
+          position.lastRealPriceUpdate = now;
         } else {
           // При ошибке используем entryPrice
           position.currentPrice = position.entryPrice;

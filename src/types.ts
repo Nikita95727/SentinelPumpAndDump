@@ -16,6 +16,7 @@ export interface Position {
   localHigh?: number; // локальный максимум для трейлинг-стопа (опционально)
   peakPrice: number; // пиковая цена для трейлинг-стопа
   currentPrice?: number; // кэш текущей цены
+  lastRealPriceUpdate: number; // timestamp последнего обновления реальной цены
   takeProfitTarget?: number; // entryPrice * multiplier (опционально)
   stopLossTarget?: number; // для трейлинг-стопа (опционально)
   exitTimer?: number; // timestamp когда нужно закрыть (90 сек) (опционально)

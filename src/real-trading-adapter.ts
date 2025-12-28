@@ -1,5 +1,6 @@
 import { WalletManager } from './wallet';
 import { PumpFunSwap } from './pumpfun-swap';
+import { JupiterSwap } from './jupiter-swap';
 import { Connection } from '@solana/web3.js';
 import { logger } from './logger';
 import { getCurrentTimestamp } from './utils';
@@ -12,12 +13,14 @@ import { getCurrentTimestamp } from './utils';
 export class RealTradingAdapter {
   private walletManager: WalletManager;
   private pumpFunSwap: PumpFunSwap;
+  private jupiterSwap: JupiterSwap; // Fallback для SELL через Pump.fun
   private tokenBalanceCache = new Map<string, { balance: number; timestamp: number }>(); // mint → {balance, timestamp}
   private readonly CACHE_TTL = 5000; // 5 секунд
 
   constructor(private connection: Connection) {
     this.walletManager = new WalletManager();
     this.pumpFunSwap = new PumpFunSwap(connection);
+    this.jupiterSwap = new JupiterSwap(connection);
   }
 
   /**
@@ -195,7 +198,7 @@ export class RealTradingAdapter {
       message: `Token balance: ${tokenBalance} units, selling all`,
     });
 
-    // Выполнить swap через Pump.fun
+    // Выполнить swap через Pump.fun (основной метод)
     const result = await this.pumpFunSwap.sell(keypair, mint, tokenBalance);
 
     const sellDuration = Date.now() - sellStartTime;
@@ -212,7 +215,7 @@ export class RealTradingAdapter {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `✅ REAL SELL SUCCESS: ${result.signature} | Received: ${solReceived.toFixed(6)} SOL (expected: ${expectedAmountSol.toFixed(6)}), Duration: ${sellDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL (${(balanceAfter - balanceBefore >= 0 ? '+' : '')}${(balanceAfter - balanceBefore).toFixed(6)}), Explorer: https://solscan.io/tx/${result.signature}`,
+        message: `✅ REAL SELL SUCCESS (Pump.fun): ${result.signature} | Received: ${solReceived.toFixed(6)} SOL (expected: ${expectedAmountSol.toFixed(6)}), Duration: ${sellDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL (${(balanceAfter - balanceBefore >= 0 ? '+' : '')}${(balanceAfter - balanceBefore).toFixed(6)}), Explorer: https://solscan.io/tx/${result.signature}`,
       });
 
       return {
@@ -220,18 +223,65 @@ export class RealTradingAdapter {
         signature: result.signature,
         solReceived,
       };
-    } else {
-      // 🔴 КРИТИЧНОЕ ЛОГИРОВАНИЕ FAIL
+    }
+
+    // 🔴 PUMP.FUN SELL FAILED - Пробуем через Jupiter как fallback
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'warning',
+      token: mint,
+      message: `⚠️ Pump.fun SELL failed: ${result.error}, attempting fallback via Jupiter...`,
+    });
+
+    try {
+      // Fallback: продажа через Jupiter
+      const jupiterResult = await this.jupiterSwap.sell(keypair, mint, tokenBalance);
+      
+      if (jupiterResult.success) {
+        const jupiterSolReceived = jupiterResult.outAmount ? jupiterResult.outAmount / 1e9 : 0;
+        const finalBalance = await this.getBalance().catch(() => balanceBefore);
+        
+        // Очистить кэш
+        this.tokenBalanceCache.delete(mint);
+
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: mint,
+          message: `✅ REAL SELL SUCCESS (Jupiter fallback): ${jupiterResult.signature} | Received: ${jupiterSolReceived.toFixed(6)} SOL (expected: ${expectedAmountSol.toFixed(6)}), Duration: ${Date.now() - sellStartTime}ms, Balance: ${balanceBefore.toFixed(6)} → ${finalBalance.toFixed(6)} SOL, Explorer: https://solscan.io/tx/${jupiterResult.signature}`,
+        });
+
+        return {
+          success: true,
+          signature: jupiterResult.signature,
+          solReceived: jupiterSolReceived,
+        };
+      } else {
+        // Jupiter тоже не удался
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: mint,
+          message: `❌ REAL SELL FAILED (both Pump.fun and Jupiter): Pump.fun error: ${result.error}, Jupiter error: ${jupiterResult.error} | Tokens remain in wallet, manual intervention required`,
+        });
+
+        return {
+          success: false,
+          error: `Both Pump.fun and Jupiter failed. Pump.fun: ${result.error}, Jupiter: ${jupiterResult.error}`,
+        };
+      }
+    } catch (jupiterError) {
+      // Ошибка при попытке Jupiter fallback
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'error',
         token: mint,
-        message: `❌ REAL SELL FAILED: ${result.error} | Expected: ${expectedAmountSol.toFixed(6)} SOL, Duration: ${sellDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL`,
+        message: `❌ REAL SELL FAILED: Pump.fun error: ${result.error}, Jupiter fallback error: ${jupiterError instanceof Error ? jupiterError.message : String(jupiterError)} | Tokens remain in wallet, manual intervention required`,
       });
 
       return {
         success: false,
-        error: result.error,
+        error: `Pump.fun failed: ${result.error}, Jupiter fallback error: ${jupiterError instanceof Error ? jupiterError.message : String(jupiterError)}`,
       };
     }
   }

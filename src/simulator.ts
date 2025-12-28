@@ -412,6 +412,7 @@ export class TradingSimulator {
         investedSol: invested,
         investedUsd: formatUsd(invested),
         entryTime: Date.now(),
+        lastRealPriceUpdate: Date.now(),
         peakPrice: actualEntryPrice,
         localHigh: actualEntryPrice,
         takeProfitTarget: actualEntryPrice * config.takeProfitMultiplier, // 2.5x для всех
