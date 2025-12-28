@@ -5,35 +5,45 @@ import {
   Transaction,
   sendAndConfirmTransaction,
   ComputeBudgetProgram,
+  TransactionInstruction,
+  VersionedTransaction,
+  TransactionMessage,
 } from '@solana/web3.js';
-import { PumpFunSDK } from 'pumpdotfun-sdk';
-import { AnchorProvider } from '@coral-xyz/anchor';
-import NodeWallet from '@coral-xyz/anchor/dist/cjs/nodewallet';
+import {
+  OnlinePumpSdk,
+  PumpSdk,
+  getBuyTokenAmountFromSolAmount,
+  getSellSolAmountFromTokenAmount,
+  PUMP_PROGRAM_ID,
+} from '@pump-fun/pump-sdk';
+import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import BN from 'bn.js';
 import { logger } from './logger';
 import { getCurrentTimestamp } from './utils';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
 /**
- * Pump.fun Swap - SDK + RETRY логика для Custom:3012
- * ⚡ Retry 2-3 раза с 150-300ms задержкой если токен ещё не готов
+ * Pump.fun Swap - Official @pump-fun/pump-sdk
+ * ⚡ Использует официальный SDK с правильной структурой аккаунтов
  */
 export class PumpFunSwap {
-  private sdk: PumpFunSDK;
-  private provider: AnchorProvider;
+  private sdk: OnlinePumpSdk;
+  private offlineSdk: PumpSdk;
 
   constructor(private connection: Connection) {
-    const wallet = new NodeWallet(new Keypair());
-    this.provider = new AnchorProvider(connection, wallet, { commitment: 'processed' });
-    this.sdk = new PumpFunSDK(this.provider);
+    this.sdk = new OnlinePumpSdk(connection);
+    this.offlineSdk = new PumpSdk();
+
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `✅ PumpFunSwap initialized with official @pump-fun/pump-sdk`,
+    });
   }
 
   /**
    * BUY с RETRY логикой для Custom:3012
-   */
-  /**
-   * BUY - выполняется только когда токен готов (readiness check выполнен в position-manager)
-   * Retry логика: одна попытка, если 3012/3031 - одна повторная через 800-1200ms
    */
   async buy(
     wallet: Keypair,
@@ -108,7 +118,7 @@ export class PumpFunSwap {
   }
 
   /**
-   * Одна попытка BUY через SDK
+   * Одна попытка BUY через официальный SDK
    */
   private async executeBuy(
     wallet: Keypair,
@@ -120,46 +130,139 @@ export class PumpFunSwap {
 
     try {
       const mintPubkey = new PublicKey(tokenMint);
-      const amountLamports = BigInt(Math.floor(amountSol * LAMPORTS_PER_SOL));
-      const slippageBasisPoints = BigInt(2000); // 20% slippage
+      const userPubkey = wallet.publicKey;
+      const solAmountBN = new BN(Math.floor(amountSol * LAMPORTS_PER_SOL));
+      const slippage = 20; // 20% slippage
 
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: `🔄 Pump.fun BUY (SDK) attempt ${attempt}: ${amountSol} SOL → ${tokenMint}`,
+        message: `🔄 Pump.fun BUY (Official SDK) attempt ${attempt}: ${amountSol} SOL → ${tokenMint}`,
       });
 
-      // Получаем инструкции через SDK
-      const buyInstructions = await this.sdk.getBuyInstructionsBySolAmount(
-        wallet.publicKey,
-        mintPubkey,
-        amountLamports,
-        slippageBasisPoints,
-        'processed'
-      );
+      // Получаем глобальное состояние и feeConfig
+      const global = await this.sdk.fetchGlobal();
+      const feeConfig = await this.sdk.fetchFeeConfig();
+
+      // Получаем состояние для покупки (bonding curve + ATA info)
+      const { bondingCurveAccountInfo, bondingCurve, associatedUserAccountInfo } =
+        await this.sdk.fetchBuyState(mintPubkey, userPubkey, TOKEN_PROGRAM_ID);
+
+      // Вычисляем количество токенов
+      const tokenAmount = getBuyTokenAmountFromSolAmount({
+        global,
+        feeConfig,
+        mintSupply: bondingCurve ? bondingCurve.tokenTotalSupply : null,
+        bondingCurve,
+        amount: solAmountBN,
+      });
+
+      // Получаем инструкции для покупки
+      const buyInstructions = await this.offlineSdk.buyInstructions({
+        global,
+        bondingCurveAccountInfo,
+        bondingCurve,
+        associatedUserAccountInfo,
+        mint: mintPubkey,
+        user: userPubkey,
+        amount: tokenAmount,
+        solAmount: solAmountBN,
+        slippage,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      });
 
       // Создаем транзакцию
       const transaction = new Transaction();
-      
+
       // Compute budget
       transaction.add(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
       );
 
-      // ✅ ИСПОЛЬЗУЕМ ИНСТРУКЦИИ SDK КАК ЕСТЬ - НЕ ФИЛЬТРУЕМ!
-      transaction.add(...buyInstructions.instructions);
-      
+      // Добавляем инструкции из SDK
+      transaction.add(...buyInstructions);
 
-      // Отправляем
+      // ⚡ PREFLIGHT SIMULATION: Проверяем транзакцию ДО отправки (БЕСПЛАТНО)
+      // Используем современный VersionedTransaction API (без deprecated warnings)
+      const { blockhash } = await this.connection.getLatestBlockhash('processed');
+
+      // Собираем все инструкции
+      const allInstructions = [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+        ...buyInstructions,
+      ];
+
+      // Создаём VersionedTransaction для симуляции
+      const messageV0 = new TransactionMessage({
+        payerKey: wallet.publicKey,
+        recentBlockhash: blockhash,
+        instructions: allInstructions,
+      }).compileToV0Message();
+
+      const versionedTx = new VersionedTransaction(messageV0);
+      versionedTx.sign([wallet]);
+
+      const simulationResult = await this.connection.simulateTransaction(versionedTx, {
+        commitment: 'processed',
+        sigVerify: false,
+      });
+
+      if (simulationResult.value.err) {
+        // Симуляция показала ошибку — НЕ отправляем, НЕ платим комиссию
+        const simError = JSON.stringify(simulationResult.value.err);
+        const simLogs = simulationResult.value.logs?.join('; ') || '';
+
+        // Проверяем тип ошибки
+        const is3012 = simError.includes('3012') || simLogs.includes('3012');
+        const is3031 = simError.includes('3031') || simLogs.includes('3031');
+
+        if (is3012 || is3031) {
+          // 3012/3031 в симуляции — токен не готов, можно retry без потери комиссии
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: tokenMint,
+            message: `⚡ PREFLIGHT: ${is3012 ? '3012' : '3031'} detected in simulation (FREE), token not ready yet`,
+          });
+          return {
+            success: false,
+            error: `Preflight:${is3012 ? '3012' : '3031'} (simulation, no fee lost)`
+          };
+        }
+
+        // Другая ошибка в симуляции
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: tokenMint,
+          message: `⚡ PREFLIGHT FAILED: ${simError} | Logs: ${simLogs.substring(0, 200)}`,
+        });
+        return { success: false, error: `Preflight failed: ${simError}` };
+      }
+
+      // ✅ Симуляция успешна — отправляем транзакцию
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: tokenMint,
+        message: `⚡ PREFLIGHT SUCCESS: Simulation passed, sending real transaction...`,
+      });
+
+      // Устанавливаем blockhash для legacy Transaction
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = wallet.publicKey;
+
+      // Отправляем (skipPreflight=true т.к. уже симулировали)
       const signature = await sendAndConfirmTransaction(
-        this.connection, 
-        transaction, 
+        this.connection,
+        transaction,
         [wallet],
         {
           commitment: 'processed',
-          skipPreflight: true,
-          maxRetries: 5,
+          skipPreflight: true, // Уже симулировали выше
+          maxRetries: 3,
         }
       );
 
@@ -169,7 +272,7 @@ export class PumpFunSwap {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: `✅ Pump.fun BUY (SDK) SUCCESS (attempt ${attempt}): ${signature} | Duration: ${buyDuration}ms | Explorer: https://solscan.io/tx/${signature}`,
+        message: `✅ Pump.fun BUY (Official SDK) SUCCESS (attempt ${attempt}): ${signature} | Duration: ${buyDuration}ms | Explorer: https://solscan.io/tx/${signature}`,
         token: tokenMint,
         investedSol: amountSol,
       });
@@ -177,12 +280,12 @@ export class PumpFunSwap {
       return {
         success: true,
         signature,
-        outAmount: 0,
+        outAmount: tokenAmount.toNumber(),
       };
     } catch (error: any) {
       const buyEndTime = Date.now();
       const buyDuration = buyEndTime - buyStartTime;
-      
+
       // Улучшенная обработка ошибок для Solana
       let errorMessage = 'Unknown error';
       if (error instanceof Error) {
@@ -202,7 +305,7 @@ export class PumpFunSwap {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'error',
-        message: `❌ Pump.fun BUY (SDK) attempt ${attempt} FAILED: ${errorMessage} | Duration: ${buyDuration}ms`,
+        message: `❌ Pump.fun BUY (Official SDK) attempt ${attempt} FAILED: ${errorMessage} | Duration: ${buyDuration}ms`,
         token: tokenMint,
         investedSol: amountSol,
       });
@@ -232,13 +335,13 @@ export class PumpFunSwap {
       // ✅ FIX: НЕ ретраим при критичных ошибках инфраструктуры (ATA/programId)
       // Эти ошибки не исправятся ретраем - нужна ручная проверка
       const errorMsg = result.error || '';
-      const isInfrastructureError = 
+      const isInfrastructureError =
         errorMsg.includes('incorrect program id') ||
         errorMsg.includes('IncorrectProgramId') ||
         errorMsg.includes('missing account') ||
         errorMsg.includes('AccountNotFound') ||
         errorMsg.includes('invalid account');
-      
+
       if (isInfrastructureError) {
         logger.log({
           timestamp: getCurrentTimestamp(),
@@ -275,7 +378,7 @@ export class PumpFunSwap {
   }
 
   /**
-   * Одна попытка SELL через SDK
+   * Одна попытка SELL через официальный SDK
    */
   private async executeSell(
     wallet: Keypair,
@@ -287,34 +390,102 @@ export class PumpFunSwap {
 
     try {
       const mintPubkey = new PublicKey(tokenMint);
-      const sellTokenAmount = BigInt(Math.floor(amountTokens));
-      const slippageBasisPoints = BigInt(2000);
+      const userPubkey = wallet.publicKey;
+      const sellTokenAmount = new BN(Math.floor(amountTokens));
+      const slippage = 20; // 20% slippage
 
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: `🔄 Pump.fun SELL (SDK) attempt ${attempt}: ${amountTokens} tokens → ${tokenMint}`,
+        message: `🔄 Pump.fun SELL (Official SDK) attempt ${attempt}: ${amountTokens} tokens → ${tokenMint}`,
       });
 
-      // Получаем инструкции через SDK
-      const sellInstructions = await this.sdk.getSellInstructionsByTokenAmount(
-        wallet.publicKey,
-        mintPubkey,
-        sellTokenAmount,
-        slippageBasisPoints,
-        'processed'
-      );
+      // Получаем глобальное состояние и feeConfig
+      const global = await this.sdk.fetchGlobal();
+      const feeConfig = await this.sdk.fetchFeeConfig();
+
+      // Получаем состояние для продажи (bonding curve)
+      const { bondingCurveAccountInfo, bondingCurve } =
+        await this.sdk.fetchSellState(mintPubkey, userPubkey, TOKEN_PROGRAM_ID);
+
+      // Вычисляем минимальный выход SOL
+      const minSolOutput = getSellSolAmountFromTokenAmount({
+        global,
+        feeConfig,
+        mintSupply: bondingCurve.tokenTotalSupply,
+        bondingCurve,
+        amount: sellTokenAmount,
+      });
+
+      // Получаем инструкции для продажи
+      const sellInstructions = await this.offlineSdk.sellInstructions({
+        global,
+        bondingCurveAccountInfo,
+        bondingCurve,
+        mint: mintPubkey,
+        user: userPubkey,
+        amount: sellTokenAmount,
+        solAmount: minSolOutput,
+        slippage,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        mayhemMode: false,
+      });
 
       // Создаем транзакцию
       const transaction = new Transaction();
-      
+
       transaction.add(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 150_000 })
       );
 
-      // ✅ ИСПОЛЬЗУЕМ КАК ЕСТЬ - НЕ ФИЛЬТРУЕМ!
-      transaction.add(...sellInstructions.instructions);
+      // Добавляем инструкции из SDK
+      transaction.add(...sellInstructions);
+
+      // ⚡ PREFLIGHT SIMULATION: Проверяем транзакцию ДО отправки (БЕСПЛАТНО)
+      // Используем современный VersionedTransaction API (без deprecated warnings)
+      const { blockhash } = await this.connection.getLatestBlockhash('processed');
+
+      // Собираем все инструкции
+      const allSellInstructions = [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 150_000 }),
+        ...sellInstructions,
+      ];
+
+      // Создаём VersionedTransaction для симуляции
+      const messageV0 = new TransactionMessage({
+        payerKey: wallet.publicKey,
+        recentBlockhash: blockhash,
+        instructions: allSellInstructions,
+      }).compileToV0Message();
+
+      const versionedTx = new VersionedTransaction(messageV0);
+      versionedTx.sign([wallet]);
+
+      const simulationResult = await this.connection.simulateTransaction(versionedTx, {
+        commitment: 'processed',
+        sigVerify: false,
+      });
+
+      if (simulationResult.value.err) {
+        // Симуляция показала ошибку — НЕ отправляем, НЕ платим комиссию
+        const simError = JSON.stringify(simulationResult.value.err);
+        const simLogs = simulationResult.value.logs?.join('; ') || '';
+
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: tokenMint,
+          message: `⚡ PREFLIGHT SELL FAILED: ${simError} | Logs: ${simLogs.substring(0, 200)}`,
+        });
+        return { success: false, error: `Preflight failed: ${simError}` };
+      }
+
+      // ✅ Симуляция успешна — отправляем транзакцию
+      // Устанавливаем blockhash для legacy Transaction
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = wallet.publicKey;
 
       const signature = await sendAndConfirmTransaction(
         this.connection,
@@ -322,25 +493,28 @@ export class PumpFunSwap {
         [wallet],
         {
           commitment: 'processed',
-          skipPreflight: true,
-          maxRetries: 5,
+          skipPreflight: true, // Уже симулировали выше
+          maxRetries: 3,
         }
       );
 
       const sellEndTime = Date.now();
       const sellDuration = sellEndTime - sellStartTime;
 
+      // Конвертируем SOL обратно из lamports
+      const solReceived = minSolOutput.toNumber() / LAMPORTS_PER_SOL;
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: tokenMint,
-        message: `✅ Pump.fun SELL (SDK) SUCCESS (attempt ${attempt}): ${signature} | Duration: ${sellDuration}ms | Explorer: https://solscan.io/tx/${signature}`,
+        message: `✅ Pump.fun SELL (Official SDK) SUCCESS (attempt ${attempt}): ${signature} | Duration: ${sellDuration}ms | Explorer: https://solscan.io/tx/${signature}`,
       });
 
       return {
         success: true,
         signature,
-        solReceived: 0,
+        solReceived,
       };
     } catch (error: any) {
       const sellEndTime = Date.now();
@@ -348,7 +522,7 @@ export class PumpFunSwap {
       const errorMessage = error instanceof Error ? error.message : String(error);
 
       // ✅ FIX: Определяем тип ошибки для правильной обработки
-      const isInfrastructureError = 
+      const isInfrastructureError =
         errorMessage.includes('incorrect program id') ||
         errorMessage.includes('IncorrectProgramId') ||
         errorMessage.includes('missing account') ||
@@ -361,19 +535,19 @@ export class PumpFunSwap {
           timestamp: getCurrentTimestamp(),
           type: 'error',
           token: tokenMint,
-          message: `❌ CRITICAL: Pump.fun SELL (SDK) attempt ${attempt} FAILED due to infrastructure error: ${errorMessage} | Duration: ${sellDuration}ms | This may indicate ATA/programId issue - position may need manual intervention`,
+          message: `❌ CRITICAL: Pump.fun SELL (Official SDK) attempt ${attempt} FAILED due to infrastructure error: ${errorMessage} | Duration: ${sellDuration}ms | This may indicate ATA/programId issue - position may need manual intervention`,
         });
       } else {
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'error',
           token: tokenMint,
-          message: `❌ Pump.fun SELL (SDK) attempt ${attempt} FAILED: ${errorMessage} | Duration: ${sellDuration}ms`,
+          message: `❌ Pump.fun SELL (Official SDK) attempt ${attempt} FAILED: ${errorMessage} | Duration: ${sellDuration}ms`,
         });
       }
 
-      return { 
-        success: false, 
+      return {
+        success: false,
         error: errorMessage
       };
     }
