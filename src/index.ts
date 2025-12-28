@@ -16,6 +16,7 @@ class PumpFunSniper {
   private isShuttingDown = false;
   private lastBalanceLogTime: number = 0;
   private realTradingAdapter?: RealTradingAdapter;
+  private initialDeposit: number = 0; // Сохраняем реальный начальный баланс
 
   async start(): Promise<void> {
     console.log('🚀 Starting Pump.fun Sniper Bot (Optimized)...');
@@ -54,6 +55,7 @@ class PumpFunSniper {
 
         // Получаем реальный баланс из кошелька
         initialDeposit = await this.realTradingAdapter.getBalance();
+        this.initialDeposit = initialDeposit; // Сохраняем для финальной статистики
         console.log(`✅ Real wallet balance: ${initialDeposit.toFixed(6)} SOL ($${(initialDeposit * config.solUsdRate).toFixed(2)})`);
 
         // Health check
@@ -65,6 +67,7 @@ class PumpFunSniper {
         console.log('📄 Paper Trading Mode (Simulation)');
         console.log(`Initial Deposit: ${config.initialDeposit} SOL ($${(config.initialDeposit * config.solUsdRate).toFixed(2)})`);
         initialDeposit = config.initialDeposit;
+        this.initialDeposit = initialDeposit; // Сохраняем для финальной статистики
       }
 
       // Инициализируем PositionManager с optional real trading adapter
@@ -93,7 +96,9 @@ class PumpFunSniper {
               console.log(`   ${p.token}: ${p.multiplier} (${p.age})`);
             });
             console.log(`   Available slots: ${stats.availableSlots}/${config.maxOpenPositions}`);
-            console.log(`   Deposit: ${this.positionManager.getCurrentDeposit().toFixed(6)} SOL`);
+            // Используем синхронную версию для периодической статистики (не блокируем)
+            const deposit = this.positionManager.getCurrentDepositSync();
+            console.log(`   Deposit: ${deposit.toFixed(6)} SOL`);
             console.log(`   Peak: ${this.positionManager.getPeakDeposit().toFixed(6)} SOL\n`);
           }
         }
@@ -128,8 +133,8 @@ class PumpFunSniper {
       // Логируем периодически для диагностики
       const now = Date.now();
       if (!this.lastBalanceLogTime || (now - this.lastBalanceLogTime) > 60000) { // Раз в минуту
-        // Получаем детальную информацию о балансе для диагностики
-        const deposit = this.positionManager.getCurrentDeposit();
+        // Получаем детальную информацию о балансе для диагностики (используем синхронную версию)
+        const deposit = this.positionManager.getCurrentDepositSync();
         const required = 0.004692; // Минимальный требуемый резерв
         console.log(`[${new Date().toLocaleTimeString()}] INFO | Insufficient balance for trading. Current deposit: ${deposit.toFixed(6)} SOL, Required: ${required.toFixed(6)} SOL, Has enough: ${deposit >= required}`);
         this.lastBalanceLogTime = now;
@@ -188,14 +193,32 @@ class PumpFunSniper {
       await logger.saveStats();
       const stats = logger.getDailyStats();
       if (stats && this.positionManager) {
-        const finalDeposit = this.positionManager.getCurrentDeposit();
-        const peakDeposit = this.positionManager.getPeakDeposit();
+        // В реальной торговле получаем баланс из кошелька, в симуляции - из PositionManager
+        let finalDeposit: number;
+        let peakDeposit: number;
         
-        console.log('\n=== Final Statistics ===');
-        console.log(`Date: ${stats.date}`);
-        console.log(`Initial Deposit: ${config.initialDeposit.toFixed(6)} SOL`);
-        console.log(`Final Deposit: ${finalDeposit.toFixed(6)} SOL`);
-        console.log(`Peak Deposit: ${peakDeposit.toFixed(6)} SOL`);
+        if (this.realTradingAdapter) {
+          // 🔴 РЕАЛЬНАЯ ТОРГОВЛЯ: Используем реальный баланс кошелька
+          finalDeposit = await this.realTradingAdapter.getBalance();
+          peakDeposit = this.positionManager.getPeakDeposit(); // Peak из PositionManager (может быть выше реального)
+          
+          console.log('\n=== Final Statistics (REAL TRADING) ===');
+          console.log(`Date: ${stats.date}`);
+          console.log(`Initial Deposit (Real Wallet): ${this.initialDeposit.toFixed(6)} SOL`);
+          console.log(`Final Deposit (Real Wallet): ${finalDeposit.toFixed(6)} SOL`);
+          console.log(`Peak Deposit (Tracked): ${peakDeposit.toFixed(6)} SOL`);
+        } else {
+          // 📄 СИМУЛЯЦИЯ: Используем баланс из PositionManager
+          finalDeposit = await this.positionManager.getCurrentDeposit();
+          peakDeposit = this.positionManager.getPeakDeposit();
+          
+          console.log('\n=== Final Statistics (SIMULATION) ===');
+          console.log(`Date: ${stats.date}`);
+          console.log(`Initial Deposit: ${this.initialDeposit.toFixed(6)} SOL`);
+          console.log(`Final Deposit: ${finalDeposit.toFixed(6)} SOL`);
+          console.log(`Peak Deposit: ${peakDeposit.toFixed(6)} SOL`);
+        }
+        
         console.log(`Total Trades: ${stats.totalTrades}`);
         console.log(`Hits Above 3x: ${stats.hitsAbove3x}`);
         console.log(`Max Drawdown: ${calculateDrawdown(finalDeposit, peakDeposit).toFixed(2)}%`);

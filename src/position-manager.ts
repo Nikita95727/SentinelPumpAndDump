@@ -1455,12 +1455,41 @@ export class PositionManager {
   /**
    * Получает текущий депозит
    */
-  getCurrentDeposit(): number {
+  /**
+   * Получает текущий депозит
+   * В реальной торговле возвращает баланс кошелька, в симуляции - баланс из Account
+   */
+  async getCurrentDeposit(): Promise<number> {
+    if (this.realTradingAdapter) {
+      // 🔴 РЕАЛЬНАЯ ТОРГОВЛЯ: Используем реальный баланс кошелька
+      try {
+        return await this.balanceManager.getCurrentBalance();
+      } catch (error) {
+        // Fallback на Account если не удалось получить баланс
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'warning',
+          message: `⚠️ Failed to get real balance, using Account balance: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        return this.account.getTotalBalance();
+      }
+    } else {
+      // 📄 СИМУЛЯЦИЯ: Используем баланс из Account
+      return this.account.getTotalBalance();
+    }
+  }
+
+  /**
+   * Синхронная версия getCurrentDeposit (для обратной совместимости)
+   * В реальной торговле возвращает баланс из Account (может быть несинхронизирован)
+   */
+  getCurrentDepositSync(): number {
     return this.account.getTotalBalance();
   }
 
   /**
    * Получает пиковый депозит
+   * В реальной торговле может быть выше реального баланса (если были убытки)
    */
   getPeakDeposit(): number {
     return this.account.getPeakBalance();
