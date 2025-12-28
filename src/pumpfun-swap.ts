@@ -6,17 +6,13 @@ import {
   sendAndConfirmTransaction,
   ComputeBudgetProgram,
 } from '@solana/web3.js';
-import {
-  getAssociatedTokenAddress,
-  createAssociatedTokenAccountInstruction,
-  TOKEN_PROGRAM_ID,
-  ASSOCIATED_TOKEN_PROGRAM_ID,
-} from '@solana/spl-token';
 import { PumpFunSDK } from 'pumpdotfun-sdk';
 import { AnchorProvider } from '@coral-xyz/anchor';
 import NodeWallet from '@coral-xyz/anchor/dist/cjs/nodewallet';
 import { logger } from './logger';
 import { getCurrentTimestamp } from './utils';
+import { buildCreateAtaIfMissingIx } from './solana/ata';
+import { ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
@@ -104,15 +100,13 @@ export class PumpFunSwap {
         message: `🔄 Pump.fun BUY (SDK) attempt ${attempt}: ${amountSol} SOL → ${tokenMint}`,
       });
 
-      // ✅ FIX: Получаем ATA address ПЕРЕД получением инструкций SDK
-      const ata = await getAssociatedTokenAddress(
-        mintPubkey,
-        wallet.publicKey
-      );
-
-      // ✅ FIX: Проверяем существует ли ATA (НЕ создаем если уже существует)
-      const ataAccountInfo = await this.connection.getAccountInfo(ata);
-      const needsAta = ataAccountInfo === null;
+      // ✅ FIX: Используем хелпер для создания ATA (правильный programId гарантирован)
+      const { ata, ix: ataIx } = await buildCreateAtaIfMissingIx({
+        connection: this.connection,
+        payer: wallet.publicKey,
+        owner: wallet.publicKey,
+        mint: mintPubkey,
+      });
 
       // Получаем инструкции через SDK
       const buyInstructions = await this.sdk.getBuyInstructionsBySolAmount(
@@ -123,12 +117,26 @@ export class PumpFunSwap {
         'processed'
       );
 
-      // ✅ FIX: Удаляем ВСЕ ATA creation инструкции из SDK (они могут быть с неправильным programId)
-      // Фильтруем по programId - удаляем все инструкции Associated Token Program
-      const filteredInstructions = buyInstructions.instructions.filter(ix => {
+      // ✅ FIX: Находим ATA инструкцию от SDK и проверяем/исправляем ее programId
+      let sdkAtaInstruction: any = null;
+      const filteredInstructions = buyInstructions.instructions.filter((ix, idx) => {
         const programIdStr = ix.programId.toString();
-        // Удаляем инструкции Associated Token Program (SDK может создавать их неправильно)
-        return programIdStr !== ASSOCIATED_TOKEN_PROGRAM_ID.toString();
+        const isAtaProgram = programIdStr === ASSOCIATED_TOKEN_PROGRAM_ID.toString();
+        
+        if (isAtaProgram) {
+          sdkAtaInstruction = ix;
+          // Сохраняем ATA инструкцию от SDK, но не добавляем ее в filteredInstructions
+          // Мы создадим свою правильную ATA инструкцию
+          return false; // Удаляем из filteredInstructions
+        }
+        
+        return true; // Оставляем все не-ATA инструкции
+      });
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `🔍 DEBUG: After filtering: ${filteredInstructions.length} instructions remain`,
       });
 
       // Создаем транзакцию
@@ -140,21 +148,39 @@ export class PumpFunSwap {
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
       );
 
-      // ✅ FIX: Добавляем ПРАВИЛЬНУЮ ATA creation ПЕРЕД Pump.fun BUY инструкцией (только если нужно)
-      if (needsAta) {
-        const ataIx = createAssociatedTokenAccountInstruction(
-          wallet.publicKey, // payer
-          ata,              // ata address
-          wallet.publicKey, // owner
-          mintPubkey,       // mint
-          TOKEN_PROGRAM_ID,
-          ASSOCIATED_TOKEN_PROGRAM_ID
-        );
+      // ✅ FIX: Добавляем ATA creation ПЕРЕД Pump.fun BUY инструкцией (только если нужно)
+      // Порядок: ComputeBudget -> ATA creation (if needed) -> BUY instruction
+      if (ataIx) {
         transaction.add(ataIx);
       }
 
       // Добавляем отфильтрованные SDK инструкции (Pump.fun BUY и другие, БЕЗ ATA)
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `🔍 DEBUG: Adding ${filteredInstructions.length} filtered SDK instructions`,
+      });
+      
+      for (let i = 0; i < filteredInstructions.length; i++) {
+        const ix = filteredInstructions[i];
+        const programIdStr = ix.programId.toString();
+        
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `🔍 DEBUG: SDK instruction #${i}: programId=${programIdStr}, keys=${ix.keys.length}`,
+        });
+      }
+      
       transaction.add(...filteredInstructions);
+      
+      // ✅ КРИТИЧЕСКАЯ ПРОВЕРКА: Логируем ВСЕ инструкции перед отправкой
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `🔍 DEBUG: Transaction has ${transaction.instructions.length} total instructions`,
+      });
+      
 
       // Отправляем с skipPreflight
       const signature = await sendAndConfirmTransaction(this.connection, transaction, [wallet], {
@@ -183,8 +209,23 @@ export class PumpFunSwap {
     } catch (error: any) {
       const buyEndTime = Date.now();
       const buyDuration = buyEndTime - buyStartTime;
-      const errorMessage = error instanceof Error ? error.message : String(error);
-
+      
+      // Улучшенная обработка ошибок для Solana
+      let errorMessage = 'Unknown error';
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else if (typeof error === 'string') {
+        errorMessage = error;
+      } else if (error && typeof error === 'object') {
+        // Пытаемся извлечь сообщение из Solana ошибки
+        if (error.logs && Array.isArray(error.logs)) {
+          errorMessage = `Solana error: ${error.logs.join('; ')}`;
+        } else if (error.message) {
+          errorMessage = error.message;
+        } else {
+          errorMessage = JSON.stringify(error);
+        }
+      }
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'error',
@@ -282,16 +323,14 @@ export class PumpFunSwap {
         message: `🔄 Pump.fun SELL (SDK) attempt ${attempt}: ${amountTokens} tokens → ${tokenMint}`,
       });
 
-      // ✅ FIX: Получаем ATA address ПЕРЕД получением инструкций SDK
+      // ✅ FIX: Используем хелпер для создания ATA (правильный programId гарантирован)
       // НИКОГДА не предполагаем что ATA существует - токены могли быть получены, но ATA creation могло фейлиться
-      const ata = await getAssociatedTokenAddress(
-        mintPubkey,
-        wallet.publicKey
-      );
-
-      // ✅ FIX: Проверяем существует ли ATA (НЕ создаем если уже существует)
-      const ataAccountInfo = await this.connection.getAccountInfo(ata);
-      const needsAta = ataAccountInfo === null;
+      const { ata, ix: ataIx } = await buildCreateAtaIfMissingIx({
+        connection: this.connection,
+        payer: wallet.publicKey,
+        owner: wallet.publicKey,
+        mint: mintPubkey,
+      });
 
       // Получаем инструкции через SDK
       const sellInstructions = await this.sdk.getSellInstructionsByTokenAmount(
@@ -319,17 +358,9 @@ export class PumpFunSwap {
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 150_000 })
       );
 
-      // ✅ FIX: Добавляем ПРАВИЛЬНУЮ ATA creation ПЕРЕД Pump.fun SELL инструкцией (только если нужно)
+      // ✅ FIX: Добавляем ATA creation ПЕРЕД Pump.fun SELL инструкцией (только если нужно)
       // Порядок: ComputeBudget -> ATA creation (if needed) -> SELL instruction
-      if (needsAta) {
-        const ataIx = createAssociatedTokenAccountInstruction(
-          wallet.publicKey, // payer
-          ata,              // ata address
-          wallet.publicKey, // owner
-          mintPubkey,       // mint
-          TOKEN_PROGRAM_ID,
-          ASSOCIATED_TOKEN_PROGRAM_ID
-        );
+      if (ataIx) {
         transaction.add(ataIx);
       }
 

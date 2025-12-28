@@ -247,11 +247,15 @@ export class RealTradingAdapter {
       return 0;
     }
 
-    const { getAssociatedTokenAddress } = await import('@solana/spl-token');
+    const { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = await import('@solana/spl-token');
     const { PublicKey } = await import('@solana/web3.js');
+    // ✅ CRITICAL: allowOwnerOffCurve MUST be true for pump.fun tokens
     const tokenAccount = await getAssociatedTokenAddress(
       new PublicKey(mint),
-      publicKey
+      publicKey,
+      true, // allowOwnerOffCurve = true (REQUIRED for pump.fun)
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
     );
     
     // Get token balance directly from connection
