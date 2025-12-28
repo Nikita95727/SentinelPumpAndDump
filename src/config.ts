@@ -105,14 +105,6 @@ export const config: Config = {
   maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.0035'), // Максимальный размер позиции
   personalWalletAddress: process.env.PERSONAL_WALLET_ADDRESS || '', // Адрес личного кошелька для вывода излишка
   maxReservePercent: parseFloat(process.env.MAX_RESERVE_PERCENT || '1.0'), // Max % of reserves per trade (if data available)
-  nightModeEnabled: process.env.NIGHT_MODE_ENABLED !== 'false',
-  nightModeStartHour: parseInt(process.env.NIGHT_MODE_START_HOUR || '0', 10), // UTC hour (0-23)
-  nightModeEndHour: parseInt(process.env.NIGHT_MODE_END_HOUR || '8', 10), // UTC hour (0-23)
-  nightModePositionMultiplier: parseFloat(process.env.NIGHT_MODE_POSITION_MULTIPLIER || '0.5'), // Reduce position size during night
-  sessionMaxDrawdownPct: parseFloat(process.env.SESSION_MAX_DRAWDOWN_PCT || '5.0'), // Hard stop if drawdown exceeds this
-  profitLockEnabled: process.env.PROFIT_LOCK_ENABLED !== 'false',
-  profitLockThresholdPct: parseFloat(process.env.PROFIT_LOCK_THRESHOLD_PCT || '20.0'), // Lock profit if balance increases by this %
-  profitLockPercent: parseFloat(process.env.PROFIT_LOCK_PERCENT || '50.0'), // Lock this % of profit above threshold
   // Real trading configuration
   realTradingEnabled: process.env.REAL_TRADING_ENABLED === 'true', // 🔴 IMPORTANT: Must be explicitly enabled
   walletMnemonic: process.env.WALLET_MNEMONIC || '', // Seed-фраза для кошелька (опционально, для реальной торговли)

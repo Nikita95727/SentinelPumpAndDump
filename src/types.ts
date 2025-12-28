@@ -121,14 +121,6 @@ export interface Config {
   maxPositionSize: number;
   personalWalletAddress: string;
   maxReservePercent: number;
-  nightModeEnabled: boolean;
-  nightModeStartHour: number;
-  nightModeEndHour: number;
-  nightModePositionMultiplier: number;
-  sessionMaxDrawdownPct: number;
-  profitLockEnabled: boolean;
-  profitLockThresholdPct: number;
-  profitLockPercent: number;
   // Real trading configuration
   realTradingEnabled: boolean;
   walletMnemonic: string;

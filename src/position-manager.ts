@@ -207,10 +207,7 @@ export class PositionManager {
     // Централизованное обновление цен каждые 2 секунды
     setInterval(() => this.updateAllPrices(), CHECK_INTERVAL);
     
-    // Update safety manager with current balance periodically
-    setInterval(() => {
-      this.safetyManager.updateSessionBalance(this.account.getTotalBalance());
-    }, 5000); // Every 5 seconds
+    // Safety manager no longer needs balance updates - BalanceManager handles excess withdrawal
 
     // Периодическая проверка баланса (каждые 10 секунд)
     setInterval(() => {
@@ -1241,9 +1238,6 @@ export class PositionManager {
       // ISSUE #1 FIX: Release funds and add back (grossReturn - exitFees) to deposit
       // proceeds already has exitFees deducted
       this.account.release(reservedAmount, proceeds);
-      
-      // Update safety manager with new balance (for drawdown tracking and profit lock)
-      this.safetyManager.updateSessionBalance(this.account.getTotalBalance());
       
       // ✅ Проверка баланса и вывод излишка (только для реальной торговли)
       if (this.realTradingAdapter) {
