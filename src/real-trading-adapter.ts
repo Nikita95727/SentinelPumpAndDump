@@ -21,6 +21,13 @@ export class RealTradingAdapter {
   }
 
   /**
+   * Получить WalletManager (для доступа к keypair в BalanceManager)
+   */
+  getWalletManager(): WalletManager {
+    return this.walletManager;
+  }
+
+  /**
    * Инициализировать кошелек
    */
   async initialize(mnemonic: string): Promise<boolean> {

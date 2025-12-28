@@ -1083,7 +1083,7 @@ export class TokenFilters {
     
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        // Для приоритетных очередей (queue1, queue2) убираем задержку - RPC pool уже управляет rate limiting
+        // RPC pool управляет rate limiting, задержка не нужна
         if (!isPriority) {
           await sleep(config.rpcRequestDelay);
         }

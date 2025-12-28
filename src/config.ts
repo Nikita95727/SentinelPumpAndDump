@@ -74,14 +74,8 @@ export const config: Config = {
       batchSize: 10,
       minDelaySeconds: 10,
       maxDelaySeconds: 30,
-      // Три очереди для разных временных окон
-      // Очередь 1: 0-5 сек (самый ранний вход)
-      queue1MinDelaySeconds: parseFloat(process.env.QUEUE1_MIN_DELAY_SECONDS || '0'),
-      queue1MaxDelaySeconds: parseFloat(process.env.QUEUE1_MAX_DELAY_SECONDS || '5'),
-      // Очередь 2: 5-15 сек (ранний вход)
-      queue2MinDelaySeconds: parseFloat(process.env.QUEUE2_MIN_DELAY_SECONDS || '5'),
-      queue2MaxDelaySeconds: parseFloat(process.env.QUEUE2_MAX_DELAY_SECONDS || '15'),
-      // Очередь 3: 10-30 сек (стандартный вход) - использует minDelaySeconds/maxDelaySeconds
+      // ✅ ЕДИНАЯ ОЧЕРЕДЬ: Все токены обрабатываются через одну очередь
+      // Фильтрация и readiness check определяют момент входа
   minPurchases: 5,
   minVolumeUsd: 2000,
       takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '2.5'), // Оптимизировано: 2.5x для гарантированного выхода до дампа
@@ -107,6 +101,9 @@ export const config: Config = {
   logDir: process.env.LOG_DIR || './logs',
   // Safety mechanisms
   maxSolPerTrade: parseFloat(process.env.MAX_SOL_PER_TRADE || '0.05'), // Hard cap per trade (stealth) - безопасный размер, не влияет на цену
+  maxTradingBalance: parseFloat(process.env.MAX_TRADING_BALANCE || '0.3'), // Максимальный торговый баланс (излишек выводится)
+  maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.0035'), // Максимальный размер позиции
+  personalWalletAddress: process.env.PERSONAL_WALLET_ADDRESS || '', // Адрес личного кошелька для вывода излишка
   maxReservePercent: parseFloat(process.env.MAX_RESERVE_PERCENT || '1.0'), // Max % of reserves per trade (if data available)
   nightModeEnabled: process.env.NIGHT_MODE_ENABLED !== 'false',
   nightModeStartHour: parseInt(process.env.NIGHT_MODE_START_HOUR || '0', 10), // UTC hour (0-23)

@@ -31,54 +31,80 @@ export class PumpFunSwap {
   /**
    * BUY с RETRY логикой для Custom:3012
    */
+  /**
+   * BUY - выполняется только когда токен готов (readiness check выполнен в position-manager)
+   * Retry логика: одна попытка, если 3012/3031 - одна повторная через 800-1200ms
+   */
   async buy(
     wallet: Keypair,
     tokenMint: string,
     amountSol: number // в SOL
   ): Promise<{ success: boolean; signature?: string; error?: string; outAmount?: number }> {
-    const MAX_RETRIES = 3;
-    // ✅ УМНАЯ RETRY СТРАТЕГИЯ: Экспоненциальная задержка для 3012
-    // Попытка 1: сразу (или после задержки из position-manager)
-    // Попытка 2: +300ms (токену нужно еще немного времени)
-    // Попытка 3: +500ms (последний шанс)
-    const RETRY_DELAYS = [0, 300, 500]; // ms
+    // Попытка 1: сразу (readiness check уже выполнен в position-manager)
+    const firstAttempt = await this.executeBuy(wallet, tokenMint, amountSol, 1);
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      const result = await this.executeBuy(wallet, tokenMint, amountSol, attempt);
-
-      // Успех - возвращаем результат
-      if (result.success) {
-        return result;
-      }
-
-      // Проверяем ошибку
-      const is3012Error = result.error?.includes('Custom:3012') || result.error?.includes('"Custom":3012');
-
-      // Если НЕ 3012 или последняя попытка - возвращаем ошибку
-      if (!is3012Error || attempt === MAX_RETRIES) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'error',
-          token: tokenMint,
-          message: `❌ BUY FAILED after ${attempt} attempts: ${result.error}`,
-        });
-        return result;
-      }
-
-      // Ретрай для 3012 (токен ещё не готов) с экспоненциальной задержкой
-      const retryDelay = RETRY_DELAYS[attempt - 1] || 500; // attempt начинается с 1, массив с 0
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        token: tokenMint,
-        message: `🔁 Custom:3012 (token not ready), retry ${attempt}/${MAX_RETRIES} after ${retryDelay}ms...`,
-      });
-
-      await new Promise(resolve => setTimeout(resolve, retryDelay));
+    if (firstAttempt.success) {
+      return firstAttempt;
     }
 
-    // Не должно сюда попасть, но на всякий случай
-    return { success: false, error: 'Max retries exceeded' };
+    // Проверяем ошибку
+    const errorMsg = firstAttempt.error || '';
+    const is3012Error = errorMsg.includes('Custom:3012') || errorMsg.includes('"Custom":3012');
+    const is3031Error = errorMsg.includes('Custom:3031') || errorMsg.includes('"Custom":3031');
+
+    // Если НЕ 3012/3031 - возвращаем ошибку сразу
+    if (!is3012Error && !is3031Error) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: tokenMint,
+        message: `❌ BUY FAILED: ${firstAttempt.error}`,
+      });
+      return firstAttempt;
+    }
+
+    // 3012/3031 - ждем 800-1200ms перед повторной попыткой
+    const retryDelay = 800 + Math.random() * 400; // 800-1200ms
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      token: tokenMint,
+      message: `🔁 ${is3012Error ? 'Custom:3012' : 'Custom:3031'} (token not ready), waiting ${retryDelay.toFixed(0)}ms before retry...`,
+    });
+
+    await new Promise(resolve => setTimeout(resolve, retryDelay));
+
+    // Попытка 2: одна повторная попытка
+    const secondAttempt = await this.executeBuy(wallet, tokenMint, amountSol, 2);
+
+    if (secondAttempt.success) {
+      return secondAttempt;
+    }
+
+    // Проверяем ошибку повторной попытки
+    const secondErrorMsg = secondAttempt.error || '';
+    const isSecond3012 = secondErrorMsg.includes('Custom:3012') || secondErrorMsg.includes('"Custom":3012');
+    const isSecond3031 = secondErrorMsg.includes('Custom:3031') || secondErrorMsg.includes('"Custom":3031');
+
+    if (isSecond3012 || isSecond3031) {
+      // Повторная попытка тоже вернула 3012/3031 - прекращаем
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: tokenMint,
+        message: `❌ BUY FAILED: ${isSecond3012 ? 'Custom:3012' : 'Custom:3031'} on retry, discarding token`,
+      });
+      return { success: false, error: `${isSecond3012 ? 'Custom:3012' : 'Custom:3031'} on retry` };
+    }
+
+    // Другая ошибка на повторной попытке
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'error',
+      token: tokenMint,
+      message: `❌ BUY FAILED after retry: ${secondAttempt.error}`,
+    });
+    return secondAttempt;
   }
 
   /**

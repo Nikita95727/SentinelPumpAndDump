@@ -10,6 +10,8 @@ import { TokenFilters } from './filters';
 import { earlyActivityTracker } from './early-activity-tracker';
 import { SafetyManager } from './safety-manager';
 import { RealTradingAdapter } from './real-trading-adapter';
+import { checkTokenReadiness } from './readiness-checker';
+import { BalanceManager } from './balance-manager';
 
 // Используем config.maxOpenPositions вместо хардкода
 const MAX_HOLD_TIME = 90_000; // 90 секунд
@@ -128,9 +130,9 @@ class Account {
    * - Exit fees: 0.001005 SOL
    * - For 2.5x profit: investedAmount * 1.5 > totalFees
    * - Minimum invested: ~0.00134 SOL
-   * - Minimum positionSize: ~0.002345 SOL (with 50% safety margin: 0.0035 SOL)
+   * - Minimum positionSize: настраивается через MAX_POSITION_SIZE (по умолчанию 0.0035 SOL)
    */
-  getPositionSize(maxPositions: number, minPositionSize: number = 0.0035, workingBalance?: number, currentOpenPositions: number = 0, entryFees: number = 0.001005): number {
+  getPositionSize(maxPositions: number, minPositionSize: number = config.maxPositionSize, workingBalance?: number, currentOpenPositions: number = 0, entryFees: number = 0.001005): number {
     const free = workingBalance !== undefined ? workingBalance - this.lockedBalance : this.getFreeBalance();
     if (free <= 0) {
       return minPositionSize;
@@ -167,6 +169,7 @@ export class PositionManager {
   private safetyManager: SafetyManager;
   private tradeIdCounter: number = 0;
   private realTradingAdapter?: RealTradingAdapter; // Optional real trading adapter
+  private balanceManager: BalanceManager; // Управление балансом и вывод излишка
 
   constructor(connection: Connection, initialDeposit: number, realTradingAdapter?: RealTradingAdapter) {
     this.connection = connection;
@@ -174,6 +177,15 @@ export class PositionManager {
     this.account = new Account(initialDeposit);
     this.safetyManager = new SafetyManager(initialDeposit);
     this.realTradingAdapter = realTradingAdapter;
+    this.balanceManager = new BalanceManager(connection);
+    
+    // Устанавливаем кошелек в BalanceManager если есть realTradingAdapter
+    if (realTradingAdapter) {
+      const walletKeypair = realTradingAdapter.getWalletManager()?.getKeypair();
+      if (walletKeypair) {
+        this.balanceManager.setWallet(walletKeypair);
+      }
+    }
 
     if (realTradingAdapter) {
       logger.log({
@@ -221,6 +233,28 @@ export class PositionManager {
         message: `📊 STATUS: Active: ${stats.activePositions}/${config.maxOpenPositions}, Balance: ${totalBalance.toFixed(6)} SOL (${profitPct >= 0 ? '+' : ''}${profitPct.toFixed(2)}%), Free: ${freeBalance.toFixed(6)}, Locked: ${lockedBalance.toFixed(6)}, Peak: ${peakBalance.toFixed(6)}`,
       });
     }, 60000); // Каждые 60 секунд
+
+    // ✅ ПРОВЕРКА БАЛАНСА И ВЫВОД ИЗЛИШКА: Каждые 30 секунд (только для реальной торговли)
+    if (this.realTradingAdapter) {
+      setInterval(async () => {
+        try {
+          // Получаем реальный баланс кошелька
+          const realBalance = await this.balanceManager.getCurrentBalance();
+          
+          // Проверяем и выводим излишек
+          await this.balanceManager.checkAndWithdrawExcess(realBalance);
+        } catch (error) {
+          // Неблокирующее логирование ошибки
+          void Promise.resolve().then(() => {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'error',
+              message: `❌ Balance check error: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          });
+        }
+      }, 30000); // Каждые 30 секунд
+    }
   }
 
   /**
@@ -286,7 +320,7 @@ export class PositionManager {
   hasEnoughBalanceForTrading(): boolean {
     const entryFees = config.priorityFee + config.signatureFee;
     const exitFees = config.priorityFee + config.signatureFee;
-    const minPositionSize = 0.0035; // Минимальный размер позиции
+    const minPositionSize = config.maxPositionSize; // Максимальный размер позиции из конфига
     const investedAmount = minPositionSize - entryFees; // После вычета entry fees
     
     // Рассчитываем резерв для выхода (exit fees + slippage)
@@ -311,251 +345,413 @@ export class PositionManager {
 
   /**
    * Пытается открыть позицию для токена
-   * Возвращает true если позиция открыта, false если нет свободных слотов или проверка не прошла
+   * Использует readiness check и ступенчатую фильтрацию
+   * BUY только когда токен физически готов
    */
   async tryOpenPosition(candidate: TokenCandidate): Promise<boolean> {
-    // TIMING ANALYSIS: Track all stages for hypothesis validation
     const processingStartTime = Date.now();
-    const tokenCreatedAt = candidate.createdAt;
-    const tokenAgeAtStart = (processingStartTime - tokenCreatedAt) / 1000; // seconds
     
     // 0. Фильтр: исключаем SOL токен
     const SOL_MINT = 'So11111111111111111111111111111111111111112';
     if (candidate.mint === SOL_MINT) {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        token: candidate.mint,
-        message: `Skipped SOL token (not a pump.fun token)`,
-      });
       return false;
-    }
-
-    // ✅ УМНАЯ ЗАДЕРЖКА: Добавляем задержку для молодых токенов, чтобы вход был на 5.5 секунде
-    // КРИТИЧНО: Не проспать импульс! Если токену уже 4.9+ секунд - вход сразу
-    const tokenAge = (Date.now() - candidate.createdAt) / 1000;
-    const TARGET_ENTRY_AGE = 5.5; // Целевой возраст входа (секунды)
-    const ESTIMATED_OPEN_TIME = 0.6; // Оценка времени на открытие позиции (security check + price fetch + tx)
-    
-    // Если токену еще рано (< 4.9 сек) - добавляем задержку до 5.5 сек
-    // Если токену уже 4.9+ секунд - вход сразу (не теряем импульс!)
-    if (tokenAge < TARGET_ENTRY_AGE - ESTIMATED_OPEN_TIME) {
-      const delay = (TARGET_ENTRY_AGE - ESTIMATED_OPEN_TIME) - tokenAge;
-      const delayMs = Math.max(0, Math.min(delay * 1000, 2000)); // max 2 сек задержки
-      
-      if (delayMs > 100) { // Только если задержка > 100ms (избегаем микро-задержек)
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          token: candidate.mint,
-          message: `⏳ Smart delay: token age ${tokenAge.toFixed(2)}s, adding ${delayMs.toFixed(0)}ms delay to enter at ~5.5s`,
-        });
-        await sleep(delayMs);
-      }
-    } else {
-      // Токену уже 4.9+ секунд - вход сразу (не теряем импульс!)
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        token: candidate.mint,
-        message: `⚡ Fast entry: token age ${tokenAge.toFixed(2)}s, entering immediately (no delay to preserve momentum)`,
-      });
     }
 
     // 1. Проверка: есть ли свободные слоты?
     if (this.positions.size >= config.maxOpenPositions) {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        token: candidate.mint,
-        message: `No free slots (${this.positions.size}/${config.maxOpenPositions})`,
-      });
       return false;
     }
 
-    // 2. TEMPORARILY DISABLED: Safety check removed for testing
-    // if (this.safetyManager.isHalted()) {
-    //   return false;
-    // }
-
-    // 3. Проверка: достаточно ли средств для открытия позиции?
-    // Проверяем минимальный требуемый резерв (positionSize + exitFees + exitSlippage)
+    // 2. Проверка: достаточно ли средств для открытия позиции?
     const entryFees = config.priorityFee + config.signatureFee;
     const exitFees = config.priorityFee + config.signatureFee;
-    const MIN_POSITION_SIZE = 0.0035;
-    
-    // Рассчитываем минимальный требуемый резерв для одной позиции
+    const MIN_POSITION_SIZE = config.maxPositionSize;
     const minInvestedAmount = MIN_POSITION_SIZE - entryFees;
     const minExpectedProceeds = minInvestedAmount * config.takeProfitMultiplier;
     const minExitSlippage = minExpectedProceeds * config.slippageMax;
     const minTotalReserved = MIN_POSITION_SIZE + exitFees + minExitSlippage;
     
     if (this.account.getFreeBalance() < minTotalReserved) {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        token: candidate.mint,
-        message: `Insufficient balance: ${this.account.getFreeBalance().toFixed(6)} SOL < ${minTotalReserved.toFixed(6)} SOL (min required for position)`,
-      });
       return false;
     }
 
-    // 4. Определяем очередь токена для оптимизаций
-    const age = (Date.now() - candidate.createdAt) / 1000;
-    const isQueue1 = age >= config.queue1MinDelaySeconds && age <= config.queue1MaxDelaySeconds;
-    const isQueue2 = age >= config.queue2MinDelaySeconds && age <= config.queue2MaxDelaySeconds;
-    const isPriority = isQueue1 || isQueue2;
+    // 3. СТУПЕНЧАТАЯ ФИЛЬТРАЦИЯ + READINESS CHECK
+    // ✅ ПРИОРИТЕТ: Проверка готовности каждые 200ms
+    // ✅ Фильтры прерываются, если занимают больше времени, чем интервал проверки
+    // ✅ Токены, прошедшие все фильтры, ждут готовности неограниченно долго
+    const READINESS_CHECK_INTERVAL = 200; // ms
+    const readinessWaitStart = Date.now();
+    let filterStage = 0;
+    let allFiltersPassed = false; // Флаг: все фильтры пройдены
 
-    // 5. Early activity check - skip tokens with no early life
-    // This gate reduces dead/flat trades without cutting winners
-    const earlyActivityCheckStart = Date.now();
-    const hasEarlyActivity = earlyActivityTracker.hasEarlyActivity(candidate.mint);
-    const earlyActivityCheckDuration = Date.now() - earlyActivityCheckStart;
-    
-    if (!hasEarlyActivity) {
-      // Token showed no early activity within observation window - skip
-      // This is NOT a permanent blacklist, just avoiding clearly dead tokens
-      return false;
-    }
-
-    // 6. ОПТИМИЗАЦИЯ: Параллельная обработка security check + price fetch для приоритетных очередей
-    const securityCheckStart = Date.now();
-    const openStartTime = Date.now(); // Для измерения openDuration
-    let securityCheckDuration = 0;
-    let openDuration = 0;
-    let passed = false;
-    let position: Position | null = null;
-
-    if (isPriority) {
-      // Для queue1 и queue2: параллельная обработка
-      // skipFreezeCheck только для queue1 (более агрессивная оптимизация)
-      const [securityResult, positionResult] = await Promise.allSettled([
-        quickSecurityCheck(candidate, isQueue1), // skipFreezeCheck только для queue1
-        this.openPosition(candidate, isPriority).catch((error) => {
-          // Log the error but return null to continue processing
+    while (true) {
+      // ✅ ПРИОРИТЕТ #1: Проверка готовности токена (read-only RPC)
+      const isReady = await checkTokenReadiness(this.connection, candidate.mint);
+      
+      if (isReady) {
+        // Токен готов - небольшая задержка перед BUY (50-150ms)
+        const preBuyDelay = 50 + Math.random() * 100; // 50-150ms
+        await sleep(preBuyDelay);
+        
+        // Выполняем BUY
+        const position = await this.openPositionWithReadinessCheck(candidate);
+        
+        if (position) {
+          // Позиция открыта успешно
+          this.monitorPosition(position).catch(err => {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'error',
+              token: position.token,
+              message: `❌ monitorPosition failed: ${err.message}`,
+            });
+          });
+          
           logger.log({
             timestamp: getCurrentTimestamp(),
-            type: 'error',
+            type: 'info',
             token: candidate.mint,
-            message: `openPosition failed: ${error instanceof Error ? error.message : String(error)}`,
+            message: `✅ Position opened successfully | Entry price: ${position.entryPrice.toFixed(8)}`,
           });
-          return null;
-        }),
-      ]);
-
-      securityCheckDuration = Date.now() - securityCheckStart;
-      openDuration = Date.now() - openStartTime;
-      
-      if (securityResult.status === 'fulfilled') {
-        passed = securityResult.value;
-      } else {
-        passed = false;
+          
+          return true;
+        } else {
+          // BUY не удался - логируем причину (неблокирующее)
+          // Неблокирующее логирование: используем void для fire-and-forget
+          void Promise.resolve().then(() => {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'error',
+              token: candidate.mint,
+              message: `❌ BUY failed: Position opening returned null (likely insufficient balance, invalid price, or real trade failed)`,
+            });
+          });
+          return false;
+        }
       }
 
-      if (positionResult.status === 'fulfilled') {
-        position = positionResult.value;
+      // Токен еще не готов
+      // ✅ Если все фильтры пройдены - ждем готовности неограниченно долго
+      if (allFiltersPassed) {
+        // Сильный кандидат - ждем готовности без таймаута
+        await sleep(READINESS_CHECK_INTERVAL);
+        continue;
       }
 
-      if (!passed) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          token: candidate.mint,
-          message: `Security check failed (${securityCheckDuration}ms)`,
-        });
-        return false;
+      // ✅ ПРИОРИТЕТ #2: Ступенчатая фильтрация с прерыванием
+      // Фильтры выполняются с таймаутом, чтобы не пропустить момент готовности
+      
+      if (filterStage === 0) {
+        // Фильтр 1: Early activity check (быстрый, синхронный)
+        const hasEarlyActivity = earlyActivityTracker.hasEarlyActivity(candidate.mint);
+        if (!hasEarlyActivity) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: candidate.mint,
+            message: `❌ Filter failed: No early activity, discarding`,
+          });
+          return false;
+        }
+        filterStage = 1;
+      } else if (filterStage === 1) {
+        // Фильтр 2: Security check (может занять время из-за RPC)
+        // ✅ ПРЕРЫВАЕМЫЙ: Если фильтр занимает > READINESS_CHECK_INTERVAL, прерываем и проверяем готовность
+        try {
+          const filterStartTime = Date.now();
+          const filterPromise = quickSecurityCheck(candidate, false);
+          const timeoutPromise = new Promise<'timeout'>((resolve) => {
+            setTimeout(() => resolve('timeout'), READINESS_CHECK_INTERVAL);
+          });
+          
+          // Race: либо фильтр завершится, либо таймаут
+          const result = await Promise.race([
+            filterPromise.then(result => ({ type: 'result' as const, value: result })),
+            timeoutPromise.then(() => ({ type: 'timeout' as const }))
+          ]);
+          
+          if (result.type === 'timeout') {
+            // Фильтр был прерван таймаутом - продолжаем проверку готовности
+            // Не переходим к следующему этапу, повторим фильтр в следующей итерации
+            // (фильтр может продолжить выполняться в фоне, но мы не ждем его)
+            const filterDuration = Date.now() - filterStartTime;
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: candidate.mint,
+              message: `⏱️ Filter interrupted after ${filterDuration}ms (timeout), checking readiness first`,
+            });
+            continue; // Вернемся к проверке готовности в начале цикла
+          }
+          
+          // Фильтр завершился до таймаута
+          if (result.value === false) {
+            // Фильтр не прошел
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: candidate.mint,
+              message: `❌ Filter failed: Security check failed, discarding`,
+            });
+            return false;
+          }
+          
+          // Фильтр прошел
+          filterStage = 2;
+          allFiltersPassed = true; // ✅ Все фильтры пройдены - ждем готовности неограниченно
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: candidate.mint,
+            message: `✅ All filters passed, waiting for token readiness (no timeout)`,
+          });
+        } catch (error) {
+          // Ошибка фильтра - отбрасываем токен
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: candidate.mint,
+            message: `❌ Filter error: ${error instanceof Error ? error.message : String(error)}, discarding`,
+          });
+          return false;
+        }
       }
+      // Дополнительные фильтры можно добавить здесь (filterStage 3, 4, ...)
 
-      if (!position) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'error',
-          token: candidate.mint,
-          message: `Failed to open position (parallel processing)`,
-        });
-        return false;
-      }
-    } else {
-      // Для остальных очередей: последовательная обработка (как было)
-      passed = await quickSecurityCheck(candidate);
-      securityCheckDuration = Date.now() - securityCheckStart;
-
-      if (!passed) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          token: candidate.mint,
-          message: `Security check failed (${securityCheckDuration}ms)`,
-        });
-        return false;
-      }
-
-      // Открываем позицию
-      position = await this.openPosition(candidate, isPriority);
-      openDuration = Date.now() - openStartTime;
-    }
-
-    // 7. Позиция открыта успешно
-    if (!position) {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'error',
-        token: candidate.mint,
-        message: `Position is null after processing`,
-      });
-      return false;
-    }
-
-    try {
-      // Calculate total time from token creation to position opening
-      const totalTimeFromCreation = (Date.now() - tokenCreatedAt) / 1000; // seconds
-      const tokenAgeAtOpen = totalTimeFromCreation;
-      const totalProcessingTime = Date.now() - processingStartTime;
-      
-      // Store timing data in position for later analysis
-      (position as any).timingData = {
-        tokenCreatedAt,
-        processingStartTime,
-        tokenAgeAtStart,
-        earlyActivityCheckDuration,
-        securityCheckDuration,
-        openDuration,
-        totalProcessingTime,
-        tokenAgeAtOpen,
-      };
-      
-      // 6. Запускаем параллельный мониторинг (НЕ await!)
-      this.monitorPosition(position).catch(err => {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'error',
-          token: position.token,
-          message: `❌ [ERROR] monitorPosition failed: ${err.message}`,
-        });
-      });
-      
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        token: candidate.mint,
-        message: `Position opened successfully | Token age at start: ${tokenAgeAtStart.toFixed(2)}s | Token age at open: ${tokenAgeAtOpen.toFixed(2)}s | Early activity: ${earlyActivityCheckDuration}ms | Security check: ${securityCheckDuration}ms | Open duration: ${openDuration}ms | Total processing: ${totalProcessingTime}ms | Entry price: ${position.entryPrice.toFixed(8)}`,
-      });
-      
-      return true;
-    } catch (error) {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'error',
-        token: candidate.mint,
-        message: `Error opening position: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      return false;
+      // Ждем перед следующей проверкой готовности
+      await sleep(READINESS_CHECK_INTERVAL);
     }
   }
 
   /**
-   * Открывает позицию для токена
-   * @param isPriority - для queue1/queue2: убираем задержки перед price fetch
+   * Открывает позицию с readiness check и правильной retry логикой для 3012/3031
+   */
+  private async openPositionWithReadinessCheck(candidate: TokenCandidate): Promise<Position | null> {
+    try {
+      // Получаем цену входа (isPriority больше не используется, всегда false)
+      const entryPrice = await this.filters.getEntryPrice(candidate.mint, false);
+      
+      if (entryPrice <= 0) {
+        throw new Error(`Invalid entry price: ${entryPrice}`);
+      }
+
+      // Рассчитываем размер позиции
+      const entryFees = config.priorityFee + config.signatureFee;
+      let positionSize = this.account.getPositionSize(
+        config.maxOpenPositions,
+        config.maxPositionSize,
+        this.account.getTotalBalance(),
+        this.positions.size,
+        entryFees
+      );
+      
+      positionSize = this.safetyManager.applySafetyCaps(positionSize);
+      
+      const MIN_POSITION_SIZE = config.maxPositionSize;
+      if (positionSize < MIN_POSITION_SIZE) {
+        if (this.account.getFreeBalance() < MIN_POSITION_SIZE) {
+          throw new Error(`Position size too small: ${positionSize} < ${MIN_POSITION_SIZE}, insufficient balance`);
+        }
+        positionSize = MIN_POSITION_SIZE;
+      }
+      
+      const exitFees = config.priorityFee + config.signatureFee;
+      const investedAmount = positionSize - entryFees;
+
+      if (investedAmount <= 0) {
+        throw new Error(`Insufficient funds after fees: ${investedAmount}`);
+      }
+
+      const totalFees = entryFees + exitFees;
+      const minInvestedForProfit = totalFees / 1.5;
+      if (investedAmount < minInvestedForProfit) {
+        throw new Error(`Position size too small: investedAmount (${investedAmount}) < minimum for profit (${minInvestedForProfit})`);
+      }
+
+      const expectedProceedsAtTakeProfit = investedAmount * config.takeProfitMultiplier;
+      const exitSlippage = expectedProceedsAtTakeProfit * config.slippageMax;
+      const totalReservedAmount = positionSize + exitFees + exitSlippage;
+
+      if (investedAmount > 1.0 || positionSize > 1.0 || totalReservedAmount > 1.0) {
+        throw new Error(`Invalid amounts: positionSize=${positionSize}, investedAmount=${investedAmount}, totalReserved=${totalReservedAmount}`);
+      }
+
+      const freeBalance = this.account.getFreeBalance();
+      if (freeBalance < totalReservedAmount) {
+        throw new Error(`Failed to reserve ${totalReservedAmount} SOL (insufficient free balance: ${freeBalance.toFixed(6)})`);
+      }
+      
+      this.account.deductFromDeposit(positionSize);
+      
+      if (!this.account.reserve(totalReservedAmount)) {
+        this.account.deductFromDeposit(-positionSize);
+        throw new Error(`Failed to reserve ${totalReservedAmount} SOL after deducting positionSize`);
+      }
+
+      const slippage = calculateSlippage();
+      const actualEntryPrice = entryPrice * (1 + slippage);
+
+      const position: Position = {
+        token: candidate.mint,
+        entryPrice: actualEntryPrice,
+        investedSol: investedAmount,
+        investedUsd: formatUsd(investedAmount),
+        entryTime: Date.now(),
+        peakPrice: actualEntryPrice,
+        currentPrice: actualEntryPrice,
+        status: 'active',
+        errorCount: 0,
+        reservedAmount: totalReservedAmount,
+      };
+
+      this.positions.set(candidate.mint, position);
+
+      const tradeId = this.generateTradeId();
+      (position as any).tradeId = tradeId;
+
+      // 🔴 REAL TRADING: Execute real buy if enabled
+      if (this.realTradingAdapter) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `🔴 Executing REAL BUY: ${positionSize.toFixed(6)} SOL → ${candidate.mint}`,
+        });
+
+        // ✅ BUY с правильной retry логикой для 3012/3031
+        const buyResult = await this.executeBuyWithRetry(candidate.mint, positionSize);
+
+        if (!buyResult.success) {
+          // Rollback: Real trade failed
+          this.positions.delete(candidate.mint);
+          this.account.reserve(-totalReservedAmount);
+          this.account.deductFromDeposit(-positionSize);
+
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: candidate.mint,
+            message: `❌ REAL BUY FAILED: ${buyResult.error}`,
+          });
+
+          return null;
+        }
+
+        (position as any).buySignature = buyResult.signature;
+        (position as any).tokensReceived = buyResult.tokensReceived;
+
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `✅ REAL BUY SUCCESS: signature=${buyResult.signature}, received=${buyResult.tokensReceived} tokens`,
+        });
+      }
+
+      tradeLogger.logTradeOpen({
+        tradeId,
+        token: candidate.mint,
+        investedSol: investedAmount,
+        entryPrice: actualEntryPrice,
+      });
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'buy',
+        token: candidate.mint,
+        investedSol: investedAmount,
+        entryPrice: actualEntryPrice,
+        message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)}${this.realTradingAdapter ? ' 🔴 REAL' : ' 📄 SIM'}`,
+      });
+
+      return position;
+    } catch (error) {
+      // Неблокирующее логирование ошибки с детальной информацией
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      void Promise.resolve().then(() => {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: candidate.mint,
+          message: `❌ Error opening position: ${errorMessage}`,
+        });
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Выполняет BUY с правильной retry логикой для 3012/3031
+   * Попытка 1: сразу
+   * Если 3012/3031: ждем 800-1200ms, одна повторная попытка
+   * Если повтор снова 3012/3031: прекращаем, выкидываем токен
+   */
+  private async executeBuyWithRetry(
+    tokenMint: string,
+    amountSol: number
+  ): Promise<{ success: boolean; signature?: string; error?: string; tokensReceived?: number }> {
+    if (!this.realTradingAdapter) {
+      return { success: true }; // Paper trading
+    }
+
+    // Попытка 1: сразу
+    const firstAttempt = await this.realTradingAdapter.executeBuy(tokenMint, amountSol);
+    
+    if (firstAttempt.success) {
+      return firstAttempt;
+    }
+
+    // Проверяем ошибку
+    const errorMsg = firstAttempt.error || '';
+    const is3012Error = errorMsg.includes('Custom:3012') || errorMsg.includes('"Custom":3012');
+    const is3031Error = errorMsg.includes('Custom:3031') || errorMsg.includes('"Custom":3031');
+    
+    if (!is3012Error && !is3031Error) {
+      // Не 3012/3031 - возвращаем ошибку сразу
+      return firstAttempt;
+    }
+
+    // 3012/3031 - ждем 800-1200ms перед повторной попыткой
+    const retryDelay = 800 + Math.random() * 400; // 800-1200ms
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      token: tokenMint,
+      message: `🔁 ${is3012Error ? 'Custom:3012' : 'Custom:3031'} (token not ready), waiting ${retryDelay.toFixed(0)}ms before retry...`,
+    });
+
+    await sleep(retryDelay);
+
+    // Попытка 2: одна повторная попытка
+    const secondAttempt = await this.realTradingAdapter.executeBuy(tokenMint, amountSol);
+    
+    if (secondAttempt.success) {
+      return secondAttempt;
+    }
+
+    // Проверяем ошибку повторной попытки
+    const secondErrorMsg = secondAttempt.error || '';
+    const isSecond3012 = secondErrorMsg.includes('Custom:3012') || secondErrorMsg.includes('"Custom":3012');
+    const isSecond3031 = secondErrorMsg.includes('Custom:3031') || secondErrorMsg.includes('"Custom":3031');
+    
+    if (isSecond3012 || isSecond3031) {
+      // Повторная попытка тоже вернула 3012/3031 - прекращаем, выкидываем токен
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: tokenMint,
+        message: `❌ BUY FAILED: ${isSecond3012 ? 'Custom:3012' : 'Custom:3031'} on retry, discarding token`,
+      });
+      return { success: false, error: `${isSecond3012 ? 'Custom:3012' : 'Custom:3031'} on retry` };
+    }
+
+    // Другая ошибка на повторной попытке
+    return secondAttempt;
+  }
+
+  /**
+   * @deprecated Используется openPositionWithReadinessCheck вместо этого
+   * Оставлен для обратной совместимости, но не должен вызываться
    */
   private async openPosition(candidate: TokenCandidate, isPriority: boolean = false): Promise<Position> {
     const openStartTime = Date.now();
@@ -583,14 +779,14 @@ export class PositionManager {
 
     // Получаем размер позиции из Account с учетом working balance
     const entryFees = config.priorityFee + config.signatureFee;
-    // Calculate position size: distribute evenly, reserve for fees, min 0.0035 SOL
-    let positionSize = this.account.getPositionSize(config.maxOpenPositions, 0.0035, this.account.getTotalBalance(), this.positions.size, entryFees);
+    // Calculate position size: distribute evenly, reserve for fees, min from config
+    let positionSize = this.account.getPositionSize(config.maxOpenPositions, config.maxPositionSize, this.account.getTotalBalance(), this.positions.size, entryFees);
     
     // Apply safety caps (maxSolPerTrade = 0.05 SOL) - ограничение для избежания влияния на цену
     positionSize = this.safetyManager.applySafetyCaps(positionSize);
     
     // Ensure position size is at least minimum
-    const MIN_POSITION_SIZE = 0.0035;
+    const MIN_POSITION_SIZE = config.maxPositionSize;
     if (positionSize < MIN_POSITION_SIZE) {
       if (this.account.getFreeBalance() >= MIN_POSITION_SIZE) {
         // Use minimum if we have enough balance
@@ -1048,6 +1244,19 @@ export class PositionManager {
       
       // Update safety manager with new balance (for drawdown tracking and profit lock)
       this.safetyManager.updateSessionBalance(this.account.getTotalBalance());
+      
+      // ✅ Проверка баланса и вывод излишка (только для реальной торговли)
+      if (this.realTradingAdapter) {
+        // Неблокирующая проверка баланса после закрытия позиции
+        void Promise.resolve().then(async () => {
+          try {
+            const realBalance = await this.balanceManager.getCurrentBalance();
+            await this.balanceManager.checkAndWithdrawExcess(realBalance);
+          } catch (error) {
+            // Тихая ошибка - не блокируем закрытие позиции
+          }
+        });
+      }
       
       // Calculate profit for logging
       const profit = proceeds - reservedAmount;

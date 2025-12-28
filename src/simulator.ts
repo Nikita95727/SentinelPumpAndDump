@@ -231,51 +231,19 @@ export class TradingSimulator {
       return false;
     }
 
-    const age = (Date.now() - candidate.createdAt) / 1000;
-    const isQueue1 = age >= config.queue1MinDelaySeconds && age <= config.queue1MaxDelaySeconds;
-    const isQueue2 = age >= config.queue2MinDelaySeconds && age <= config.queue2MaxDelaySeconds;
-    const isQueue3 = age >= config.minDelaySeconds && age <= config.maxDelaySeconds;
-    
-    const queueName = isQueue1 ? 'queue1 (0-5s)' : isQueue2 ? 'queue2 (5-15s)' : isQueue3 ? 'queue3 (10-30s)' : 'unknown';
-    
+    // ✅ ЕДИНАЯ ОЧЕРЕДЬ: Все токены обрабатываются одинаково
+    // Фильтрация определяется readiness check и ступенчатой фильтрацией в position-manager
     logger.log({
       timestamp: getCurrentTimestamp(),
       type: 'info',
       token: candidate.mint,
       batchId: this.currentBatch.id,
-      message: `Candidate received for batch #${this.currentBatch.id}: ${candidate.mint.substring(0, 8)}..., age: ${age.toFixed(1)}s, queue: ${queueName}, starting filters...`,
+      message: `Candidate received for batch #${this.currentBatch.id}: ${candidate.mint.substring(0, 8)}..., starting filters...`,
     });
 
-    // Применяем фильтры в зависимости от очереди
-    let passed = false;
-    if (isQueue1) {
-      // Очередь 1: минимальные проверки, но защита от скама/honeypot
-      passed = await this.filters.filterQueue1Candidate(candidate);
-      if (passed) {
-        // Помечаем как рискованный токен - должен продаваться на 2.5x гарантированно
-        candidate.isRisky = true;
-      }
-    } else if (isQueue2) {
-      // Очередь 2: средние проверки
-      passed = await this.filters.filterQueue2Candidate(candidate);
-      if (passed) {
-        // Помечаем как рискованный токен - должен продаваться на 2.5x гарантированно
-        candidate.isRisky = true;
-      }
-    } else if (isQueue3) {
-      // Очередь 3: полные проверки
-      passed = await this.filters.filterCandidate(candidate);
-    } else {
-      // Токен вне всех очередей - отклоняем
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'token_rejected',
-        token: candidate.mint,
-        batchId: this.currentBatch?.id,
-        message: `Token age ${age.toFixed(1)}s outside all queues, rejecting`,
-      });
-      return false;
-    }
+    // Применяем единую фильтрацию (используем filterQueue2Candidate как базовую)
+    // В реальной торговле фильтрация выполняется в position-manager с readiness check
+    const passed = await this.filters.filterQueue2Candidate(candidate);
     if (!passed) {
       logger.log({
         timestamp: getCurrentTimestamp(),

@@ -2,7 +2,7 @@ export interface TokenCandidate {
   mint: string;
   createdAt: number; // timestamp в миллисекундах
   signature: string; // signature создания токена
-  isRisky?: boolean; // Флаг для токенов из очередей 1-2 (более рисковые, но не honeypot)
+  isRisky?: boolean; // Флаг для рискованных токенов (не honeypot, но требуют осторожности)
 }
 
 export interface Position {
@@ -96,10 +96,6 @@ export interface Config {
   batchSize: number;
   minDelaySeconds: number;
   maxDelaySeconds: number;
-  queue1MinDelaySeconds: number;
-  queue1MaxDelaySeconds: number;
-  queue2MinDelaySeconds: number;
-  queue2MaxDelaySeconds: number;
   minPurchases: number;
   minVolumeUsd: number;
   takeProfitMultiplier: number;
@@ -121,6 +117,9 @@ export interface Config {
   logDir: string;
   // Safety mechanisms
   maxSolPerTrade: number;
+  maxTradingBalance: number;
+  maxPositionSize: number;
+  personalWalletAddress: string;
   maxReservePercent: number;
   nightModeEnabled: boolean;
   nightModeStartHour: number;

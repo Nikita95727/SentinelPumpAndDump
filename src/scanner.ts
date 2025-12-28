@@ -3,7 +3,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { config, PUMP_FUN_PROGRAM_ID } from './config';
 import { TokenCandidate } from './types';
 import { logger } from './logger';
-import { getCurrentTimestamp, sleep } from './utils';
+import { getCurrentTimestamp } from './utils';
 import { getRpcPool } from './rpc-pool';
 import { earlyActivityTracker } from './early-activity-tracker';
 
@@ -17,15 +17,10 @@ export class TokenScanner {
   private reconnectDelay = 5000;
   private isShuttingDown = false;
   private onNewTokenCallback: (candidate: TokenCandidate) => void;
-  private notificationQueue: any[] = []; // Основная очередь (10-30 сек)
-  private queue1: TokenCandidate[] = []; // Очередь 1: 0-5 сек (самый ранний вход)
-  private queue2: TokenCandidate[] = []; // Очередь 2: 5-15 сек (ранний вход)
+  private tokenQueue: TokenCandidate[] = []; // Единая очередь токенов
   private isProcessingQueue = false;
-  private isProcessingQueue1 = false;
-  private isProcessingQueue2 = false;
-  private notificationSkipCounter = 0; // Пропускаем часть уведомлений
-  private processingTokens = new Set<string>(); // Токены, которые уже обрабатываются в очередях
-  // ISSUE #2: Lightweight TTL deduplication for getTransaction calls
+  private processingTokens = new Set<string>(); // Токены, которые уже обрабатываются
+  // Deduplication для getTransaction calls
   private processedSignatures = new Map<string, number>(); // signature -> timestamp
   private processedMints = new Map<string, number>(); // mint -> timestamp
   private readonly DEDUP_TTL_MS = 60000; // 60 seconds TTL
@@ -39,7 +34,6 @@ export class TokenScanner {
 
   /**
    * Удаляет токен из отслеживания обработки
-   * Вызывается из симулятора после завершения обработки токена
    */
   removeFromProcessing(mint: string): void {
     this.processingTokens.delete(mint);
@@ -52,13 +46,14 @@ export class TokenScanner {
       message: 'Token scanner starting...',
     });
     await this.connect();
+    // Запускаем обработку единой очереди
+    this.processTokenQueue();
   }
 
   private async connect(): Promise<void> {
     if (this.isShuttingDown) return;
 
     try {
-      // Убеждаемся, что URL начинается с wss://
       let wsUrl = config.heliusWsUrl;
       if (!wsUrl.startsWith('wss://') && !wsUrl.startsWith('ws://')) {
         wsUrl = wsUrl.replace('https://', 'wss://').replace('http://', 'ws://');
@@ -69,7 +64,6 @@ export class TokenScanner {
       
       console.log(`Connecting to WebSocket: ${wsUrl.substring(0, 60)}...`);
       
-      // Добавляем заголовки для WebSocket подключения
       this.ws = new WebSocket(wsUrl, {
         headers: {
           'Origin': 'https://helius.dev',
@@ -94,11 +88,6 @@ export class TokenScanner {
 
       this.ws.on('error', (error: Error) => {
         console.error('WebSocket error:', error);
-        console.error('Error details:', {
-          message: error.message,
-          stack: error.stack,
-          name: error.name,
-        });
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'error',
@@ -152,8 +141,6 @@ export class TokenScanner {
     try {
       const programId = new PublicKey(PUMP_FUN_PROGRAM_ID);
       
-      // Подписка на логи программы pump.fun
-      // Helius использует стандартный Solana WebSocket RPC формат
       const subscribeMessage = {
         jsonrpc: '2.0',
         id: 1,
@@ -202,8 +189,7 @@ export class TokenScanner {
         const notification = message.params;
         const logs = notification.result?.value?.logs || [];
         
-        // Check for early activity (buy/swap transactions) for tokens we're observing
-        // This uses ONLY WebSocket data, no RPC calls
+        // Check for early activity (buy/swap transactions)
         const hasBuySwapActivity = logs.some((log: string) => {
           const lowerLog = log.toLowerCase();
           return (
@@ -214,35 +200,24 @@ export class TokenScanner {
           );
         });
         
-        // If this looks like a buy/swap, try to extract mint and record activity
         if (hasBuySwapActivity) {
-          // Try to extract mint from logs (cheap, no RPC)
-          // Look for mint patterns in logs - pump.fun tokens are base58 strings
           for (const log of logs) {
-            // Simple pattern: mint addresses are base58 strings of specific length
-            // Match potential mint addresses (32-44 chars, base58)
             const mintMatches = log.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/g);
             if (mintMatches) {
               for (const potentialMint of mintMatches) {
-                // Skip system accounts
                 if (potentialMint === '11111111111111111111111111111111' ||
                     potentialMint === 'So11111111111111111111111111111111111111112') {
                   continue;
                 }
-                // Record activity for any mint we're observing
                 earlyActivityTracker.recordActivity(potentialMint);
               }
             }
           }
         }
         
-        // СТРОГАЯ ФИЛЬТРАЦИЯ: проверяем наличие событий создания токена ДО добавления в очередь
-        // Откидываем все остальные уведомления сразу
-        // Более точная проверка на создание токена
-        // Ищем специфичные паттерны создания токена в pump.fun
+        // Проверяем наличие событий создания токена
         const hasTokenCreation = logs.some((log: string) => {
           const lowerLog = log.toLowerCase();
-          // Проверяем на специфичные паттерны создания токена
           return (
             lowerLog.includes('instruction: initialize') ||
             lowerLog.includes('instruction:create') ||
@@ -252,142 +227,105 @@ export class TokenScanner {
           );
         });
         
-        // Если НЕ создание токена - откидываем сразу, не добавляя в очередь
         if (!hasTokenCreation) {
-          return; // Просто откидываем, не логируем
+          return; // Не создание токена - пропускаем
         }
         
-      // ЭКСПЕРИМЕНТ: Обрабатываем ТОЛЬКО queue1
-      // Обрабатываем уведомление сразу (queue1 обрабатывается в processLogNotification)
-      // Не добавляем в notificationQueue и не обрабатываем queue2/queue3
-      void this.processLogNotification(notification, true); // isPriority = true для queue1
+        // Обрабатываем уведомление и добавляем в единую очередь
+        void this.processLogNotification(notification);
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
     }
   }
 
-  private async processQueue(): Promise<void> {
-    // QUEUE3 ОТКЛЮЧЕНА: Неэффективна и занимает машинное время
-    // Освобождаем ресурсы для queue1 и queue2
-    // Статистика: queue3 показала 0% успешности, средний multiplier 0.37x
-    return;
-    
-    // ЗАКОММЕНТИРОВАНО: Вся обработка queue3 отключена
-    /*
-    if (this.isProcessingQueue || this.notificationQueue.length === 0) {
-      return;
-    }
-
-    // Проверяем приоритетные очереди - если они не пусты, отдаем им приоритет
-    if (this.queue1.length > 0 || this.queue2.length > 0) {
-      // Приоритетные очереди имеют приоритет - не обрабатываем queue3 пока они не пусты
+  /**
+   * Обработка единой очереди токенов
+   */
+  private async processTokenQueue(): Promise<void> {
+    if (this.isProcessingQueue || this.tokenQueue.length === 0) {
+      // Если очередь пуста, проверяем снова через 100ms
+      if (!this.isShuttingDown) {
+        setTimeout(() => this.processTokenQueue(), 100);
+      }
       return;
     }
 
     this.isProcessingQueue = true;
-    const queueStartTime = Date.now();
-    const initialQueueSize = this.notificationQueue.length;
-
-    // Логируем только если очередь большая или при старте
-    if (initialQueueSize > 100 || initialQueueSize % 1000 === 0) {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        message: `Processing queue3, size: ${initialQueueSize}`,
-      });
-    }
-
-    // Параллельная обработка: до 7 уведомлений одновременно (увеличено для скорости)
-    const maxConcurrent = 7;
+    const maxConcurrent = 8; // Параллельная обработка до 8 токенов
     const processingPromises: Array<{ promise: Promise<void>; index: number }> = [];
-    let processedCount = 0;
     let promiseIndex = 0;
 
-    while (this.notificationQueue.length > 0 && !this.isShuttingDown) {
-      // ПРИОРИТЕТНАЯ ПРОВЕРКА: Прерываем обработку queue3 если появились приоритетные токены
-      if (this.queue1.length > 0 || this.queue2.length > 0) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          message: `Interrupting queue3 processing: priority queues have ${this.queue1.length} (queue1) + ${this.queue2.length} (queue2) tokens`,
-        });
-        // Прерываем обработку queue3 для обработки приоритетных очередей
-        break;
-      }
+    while (this.tokenQueue.length > 0 && !this.isShuttingDown) {
+      while (processingPromises.length < maxConcurrent && this.tokenQueue.length > 0) {
+        const candidate = this.tokenQueue.shift();
+        if (!candidate) continue;
 
-      // Запускаем до maxConcurrent параллельных обработчиков
-      while (processingPromises.length < maxConcurrent && this.notificationQueue.length > 0) {
-        const notification = this.notificationQueue.shift();
-        if (notification) {
-          const currentIndex = promiseIndex++;
-          // Обычная очередь - не приоритетная
-          const promise = this.processLogNotification(notification, false)
-            .then(() => {
-              processedCount++;
-              // Удаляем завершенный промис из массива
-              const idx = processingPromises.findIndex(p => p.index === currentIndex);
-              if (idx >= 0) {
-                processingPromises.splice(idx, 1);
-              }
-            })
-            .catch((error) => {
-              logger.log({
-                timestamp: getCurrentTimestamp(),
-                type: 'error',
-                message: `Error processing notification: ${error?.message || String(error)}`,
-              });
-              // Удаляем завершенный промис из массива
-              const idx = processingPromises.findIndex(p => p.index === currentIndex);
-              if (idx >= 0) {
-                processingPromises.splice(idx, 1);
-              }
-            });
-          processingPromises.push({ promise, index: currentIndex });
+        // Проверяем, не обрабатывается ли уже этот токен
+        if (this.processingTokens.has(candidate.mint)) {
+          continue;
         }
+
+        this.processingTokens.add(candidate.mint);
+
+        const currentIndex = promiseIndex++;
+        const promise = (async () => {
+          try {
+            await this.onNewTokenCallback(candidate);
+          } catch (error) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'error',
+              token: candidate.mint,
+              message: `Error processing token: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          } finally {
+            this.processingTokens.delete(candidate.mint);
+            const idx = processingPromises.findIndex(p => p.index === currentIndex);
+            if (idx >= 0) {
+              processingPromises.splice(idx, 1);
+            }
+          }
+        })();
+        
+        processingPromises.push({ promise, index: currentIndex });
       }
 
-      // Ждем завершения хотя бы одного обработчика перед запуском следующего
+      // Ждем завершения хотя бы одного обработчика
       if (processingPromises.length >= maxConcurrent && processingPromises.length > 0) {
         await Promise.race(processingPromises.map(p => p.promise));
       }
 
-      // ISSUE #1: Removed artificial delay - RPC pool manages rate limiting
+      // Небольшая задержка для избежания перегрузки
+      if (this.tokenQueue.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
     }
 
     // Ждем завершения всех оставшихся обработчиков
     await Promise.all(processingPromises.map(p => p.promise));
 
-    const totalDuration = Date.now() - queueStartTime;
     this.isProcessingQueue = false;
 
-    // Логируем только если обработано много или при завершении большой очереди
-    if (processedCount > 0 && (processedCount > 10 || totalDuration > 1000)) {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        message: `Queue3 processed: ${processedCount} notifications in ${totalDuration}ms, avg ${(totalDuration / processedCount).toFixed(0)}ms, remaining: ${this.notificationQueue.length}`,
-      });
+    // Продолжаем обработку очереди
+    if (!this.isShuttingDown) {
+      setTimeout(() => this.processTokenQueue(), 100);
     }
-    */
   }
 
-  private async processLogNotification(notification: any, isPriority: boolean = false): Promise<void> {
+  private async processLogNotification(notification: any): Promise<void> {
     const processStartTime = Date.now();
-    const notificationTime = Date.now(); // Время получения уведомления для точного расчета возраста
     try {
       const signature = notification.result.value.signature;
       const logs = notification.result.value.logs || [];
 
-      // ISSUE #2: Check if signature was already processed recently (deduplication)
+      // Deduplication
       const now = Date.now();
       const lastProcessed = this.processedSignatures.get(signature);
       if (lastProcessed && (now - lastProcessed) < this.DEDUP_TTL_MS) {
         return; // Skip - already processed recently
       }
 
-      // Уже проверили наличие событий создания токена до добавления в очередь
-      // Но проверяем еще раз для надежности (более строгая проверка)
       const hasTokenCreation = logs.some((log: string) => {
         const lowerLog = log.toLowerCase();
         return (
@@ -400,96 +338,63 @@ export class TokenScanner {
       });
 
       if (!hasTokenCreation) {
-        // Не создание токена - пропускаем
         return;
       }
 
-      // ISSUE #1: REMOVED artificial delays from hot-path
-      // RPC pool already manages rate limiting, no need for additional sleeps
-      // For priority queues, we want immediate processing
-      
       const rpcStartTime = Date.now();
       try {
-        const connection = this.rpcPool.getConnection(); // Используем пул соединений
+        const connection = this.rpcPool.getConnection();
         const tx = await connection.getTransaction(signature, {
           commitment: 'confirmed',
           maxSupportedTransactionVersion: 0,
         });
 
         if (!tx) {
-          // Транзакция не найдена - не логируем для скорости
           return;
         }
 
-        // Ищем mint адрес в инструкциях
         const mintAddress = this.extractMintFromTransaction(tx);
         
         if (mintAddress) {
-          // ISSUE #2: Check if mint was already processed recently (deduplication)
+          // Deduplication по mint
           const lastMintProcessed = this.processedMints.get(mintAddress);
           if (lastMintProcessed && (now - lastMintProcessed) < this.DEDUP_TTL_MS) {
-            return; // Skip - mint already processed recently
+            return;
           }
 
           // Mark as processed
           this.processedSignatures.set(signature, now);
           this.processedMints.set(mintAddress, now);
 
-          // Cleanup old entries periodically (every 1000 entries to avoid memory leak)
+          // Cleanup old entries periodically
           if (this.processedSignatures.size > 1000) {
             this.cleanupDedupCache();
           }
 
-          // Start early activity observation for this token
+          // Start early activity observation
           earlyActivityTracker.startObservation(mintAddress);
           
-          // Используем время транзакции как время создания токена (более точно)
-          // Но для приоритетных очередей используем время уведомления минус задержка обработки
-          const txTime = tx.blockTime ? tx.blockTime * 1000 : notificationTime;
-          // Для более точного расчета возраста используем время уведомления минус небольшая задержка
-          const estimatedCreationTime = isPriority 
-            ? notificationTime - 1000 // Для приоритетных: уведомление приходит почти сразу после создания
-            : txTime;
+          // Используем время транзакции как время создания токена
+          const txTime = tx.blockTime ? tx.blockTime * 1000 : Date.now();
           
           const candidate: TokenCandidate = {
             mint: mintAddress,
-            createdAt: estimatedCreationTime,
+            createdAt: txTime,
             signature: signature,
           };
 
-          const age = (Date.now() - candidate.createdAt) / 1000;
-
-          // ⚡ КРИТИЧНО: Фильтр по возрасту на входе - токены младше 3 секунд не обрабатываем
-          // К моменту проверки и входа токену будет ~4-5 секунд (гарантированная инициализация + не упускаем импульс)
-          const MIN_TOKEN_AGE_FOR_PROCESSING = 3;
-          if (age < MIN_TOKEN_AGE_FOR_PROCESSING) {
-            // Токен слишком молодой - пропускаем (не засоряем очередь)
-            return;
-          }
-
-          // ISSUE #4: Simplified routing - only queue1 is used, process directly
-          const isQueue1 = age >= config.queue1MinDelaySeconds && age <= config.queue1MaxDelaySeconds;
-
-          if (isQueue1) {
-            // Очередь 1: 5-15 сек (ранний вход после инициализации) - рискованные токены
-            candidate.isRisky = true; // Помечаем как рискованный
-            this.queue1.push(candidate);
-            // ISSUE #5: Reduced logging in hot-path - only log errors, not every token
-            // Приоритетная обработка - запускаем немедленно
-            this.processQueue1();
-          } else {
-            // Токен вне queue1 - пропускаем (эксперимент: обрабатываем только queue1)
-            return;
+          // ✅ УБРАНА ЛОГИКА ПО ВОЗРАСТУ: Добавляем токен в единую очередь без фильтрации по возрасту
+          this.tokenQueue.push(candidate);
+          
+          // Запускаем обработку очереди если она еще не запущена
+          if (!this.isProcessingQueue) {
+            this.processTokenQueue();
           }
         }
-        // Mint не найден - не логируем для скорости
       } catch (error: any) {
-        // Если получили 429 - просто пропускаем это уведомление, не обрабатываем
         if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
-          // Не логируем rate limit для скорости
           return;
         }
-        // Для других ошибок логируем только важные
         if (!error?.message?.includes('not found')) {
           logger.log({
             timestamp: getCurrentTimestamp(),
@@ -500,14 +405,13 @@ export class TokenScanner {
       }
     } catch (error: any) {
       const totalDuration = Date.now() - processStartTime;
-      // Если получили 429 на верхнем уровне - тоже просто пропускаем
       if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
           message: `Rate limited at top level, skipping notification, processing time: ${totalDuration}ms`,
         });
-        return; // Просто пропускаем, не обрабатываем
+        return;
       }
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -519,33 +423,31 @@ export class TokenScanner {
   }
 
   /**
-   * ISSUE #3: Make mint extraction deterministic
-   * Prefer postTokenBalances when available, fallback to instruction accounts only if needed
+   * Извлекает mint address из транзакции
    */
   private extractMintFromTransaction(tx: any): string | null {
     try {
-      // ISSUE #3: Prefer postTokenBalances (most reliable for new tokens)
+      // Приоритет 1: postTokenBalances
       const tokenBalances = tx.meta?.postTokenBalances || [];
       for (const balance of tokenBalances) {
         if (balance.mint) {
-          return balance.mint; // Return first mint from postTokenBalances (deterministic)
+          return balance.mint;
         }
       }
 
-      // Fallback: preTokenBalances
+      // Приоритет 2: preTokenBalances
       const preTokenBalances = tx.meta?.preTokenBalances || [];
       for (const balance of preTokenBalances) {
         if (balance.mint) {
-          return balance.mint; // Return first mint from preTokenBalances
+          return balance.mint;
         }
       }
 
-      // Fallback: Analyze pump.fun instructions (only if post/preTokenBalances failed)
+      // Приоритет 3: instruction accounts
       const accountKeys = tx.transaction?.message?.accountKeys || [];
       const accountKeysArray = accountKeys.map((acc: any) => 
         typeof acc === 'string' ? acc : acc.pubkey
       );
-
       const instructions = tx.transaction?.message?.instructions || [];
       for (const instruction of instructions) {
         const programId = typeof instruction.programId === 'string' 
@@ -557,26 +459,23 @@ export class TokenScanner {
           for (const accountIndex of accounts) {
             if (typeof accountIndex === 'number' && accountKeysArray[accountIndex]) {
               const potentialMint = accountKeysArray[accountIndex];
-              // Проверяем, что это не системные аккаунты
               if (potentialMint && 
                   potentialMint !== '11111111111111111111111111111111' &&
                   potentialMint !== 'So11111111111111111111111111111111111111112') {
-                return potentialMint; // Return first valid mint from instructions
+                return potentialMint;
               }
             }
           }
         }
       }
-
       return null;
     } catch (error) {
-      // ISSUE #5: Only log errors, not in hot-path
       return null;
     }
   }
 
   /**
-   * ISSUE #2: Cleanup old deduplication cache entries
+   * Очистка старых записей deduplication cache
    */
   private cleanupDedupCache(): void {
     const now = Date.now();
@@ -593,142 +492,6 @@ export class TokenScanner {
         this.processedMints.delete(key);
       }
     }
-  }
-
-  private async processQueue1(): Promise<void> {
-    // Обрабатываем очередь 1 (0-5 сек) параллельно другим
-    if (this.isProcessingQueue1 || this.queue1.length === 0) {
-      return;
-    }
-
-    this.isProcessingQueue1 = true;
-
-    // Параллельная обработка до 8 токенов одновременно (увеличено для скорости для приоритетной очереди)
-    const maxConcurrent = 8;
-    const processingPromises: Array<{ promise: Promise<void>; index: number }> = [];
-    let promiseIndex = 0;
-
-    while (this.queue1.length > 0 && !this.isShuttingDown) {
-      // Запускаем до maxConcurrent параллельных обработчиков
-      while (processingPromises.length < maxConcurrent && this.queue1.length > 0) {
-        const candidate = this.queue1.shift();
-        if (!candidate) continue;
-
-        const age = (Date.now() - candidate.createdAt) / 1000;
-        
-        // Проверяем, что токен все еще в диапазоне 0-5 секунд
-        if (age < config.queue1MinDelaySeconds || age > config.queue1MaxDelaySeconds) {
-          // Токен вышел из диапазона - убираем из обработки
-          this.processingTokens.delete(candidate.mint);
-          continue;
-        }
-
-        // Обрабатываем токен параллельно
-        const currentIndex = promiseIndex++;
-        const promise = (async () => {
-          try {
-            await this.onNewTokenCallback(candidate);
-          } catch (error) {
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'error',
-              token: candidate.mint,
-              message: `Error processing queue1 token: ${error instanceof Error ? error.message : String(error)}`,
-            });
-          } finally {
-            // Убираем из обработки после завершения
-            this.processingTokens.delete(candidate.mint);
-            // Удаляем завершенный промис из массива
-            const idx = processingPromises.findIndex(p => p.index === currentIndex);
-            if (idx >= 0) {
-              processingPromises.splice(idx, 1);
-            }
-          }
-        })();
-        
-        processingPromises.push({ promise, index: currentIndex });
-      }
-
-      // Ждем завершения хотя бы одного обработчика
-      if (processingPromises.length >= maxConcurrent && processingPromises.length > 0) {
-        await Promise.race(processingPromises.map(p => p.promise));
-      }
-
-      // ISSUE #1: Removed artificial delay - no sleep needed
-    }
-
-    // Ждем завершения всех оставшихся обработчиков
-    await Promise.all(processingPromises.map(p => p.promise));
-
-    this.isProcessingQueue1 = false;
-  }
-
-  private async processQueue2(): Promise<void> {
-    // Обрабатываем очередь 2 (5-15 сек) параллельно другим
-    if (this.isProcessingQueue2 || this.queue2.length === 0) {
-      return;
-    }
-
-    this.isProcessingQueue2 = true;
-
-    // Параллельная обработка до 8 токенов одновременно (увеличено для скорости для приоритетной очереди)
-    const maxConcurrent = 8;
-    const processingPromises: Array<{ promise: Promise<void>; index: number }> = [];
-    let promiseIndex = 0;
-
-    while (this.queue2.length > 0 && !this.isShuttingDown) {
-      // Запускаем до maxConcurrent параллельных обработчиков
-      while (processingPromises.length < maxConcurrent && this.queue2.length > 0) {
-        const candidate = this.queue2.shift();
-        if (!candidate) continue;
-
-        const age = (Date.now() - candidate.createdAt) / 1000;
-        
-        // Проверяем, что токен все еще в диапазоне 5-15 секунд
-        if (age < config.queue2MinDelaySeconds || age > config.queue2MaxDelaySeconds) {
-          // Токен вышел из диапазона - убираем из обработки
-          this.processingTokens.delete(candidate.mint);
-          continue;
-        }
-
-        // Обрабатываем токен параллельно
-        const currentIndex = promiseIndex++;
-        const promise = (async () => {
-          try {
-            await this.onNewTokenCallback(candidate);
-          } catch (error) {
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'error',
-              token: candidate.mint,
-              message: `Error processing queue2 token: ${error instanceof Error ? error.message : String(error)}`,
-            });
-          } finally {
-            // Убираем из обработки после завершения
-            this.processingTokens.delete(candidate.mint);
-            // Удаляем завершенный промис из массива
-            const idx = processingPromises.findIndex(p => p.index === currentIndex);
-            if (idx >= 0) {
-              processingPromises.splice(idx, 1);
-            }
-          }
-        })();
-        
-        processingPromises.push({ promise, index: currentIndex });
-      }
-
-      // Ждем завершения хотя бы одного обработчика
-      if (processingPromises.length >= maxConcurrent && processingPromises.length > 0) {
-        await Promise.race(processingPromises.map(p => p.promise));
-      }
-
-      // ISSUE #1: Removed artificial delay - no sleep needed
-    }
-
-    // Ждем завершения всех оставшихся обработчиков
-    await Promise.all(processingPromises.map(p => p.promise));
-
-    this.isProcessingQueue2 = false;
   }
 
   async stop(): Promise<void> {
@@ -754,4 +517,3 @@ export class TokenScanner {
     }
   }
 }
-
