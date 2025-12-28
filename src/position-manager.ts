@@ -331,8 +331,36 @@ export class PositionManager {
       return false;
     }
 
-    // ✅ УБРАНА ЗАДЕРЖКА: Токены уже фильтруются по возрасту (>=5s) в scanner.ts
-    // К моменту обработки токену будет ~7 секунд (гарантированная инициализация)
+    // ✅ УМНАЯ ЗАДЕРЖКА: Добавляем задержку для молодых токенов, чтобы вход был на 5.5 секунде
+    // КРИТИЧНО: Не проспать импульс! Если токену уже 4.9+ секунд - вход сразу
+    const tokenAge = (Date.now() - candidate.createdAt) / 1000;
+    const TARGET_ENTRY_AGE = 5.5; // Целевой возраст входа (секунды)
+    const ESTIMATED_OPEN_TIME = 0.6; // Оценка времени на открытие позиции (security check + price fetch + tx)
+    
+    // Если токену еще рано (< 4.9 сек) - добавляем задержку до 5.5 сек
+    // Если токену уже 4.9+ секунд - вход сразу (не теряем импульс!)
+    if (tokenAge < TARGET_ENTRY_AGE - ESTIMATED_OPEN_TIME) {
+      const delay = (TARGET_ENTRY_AGE - ESTIMATED_OPEN_TIME) - tokenAge;
+      const delayMs = Math.max(0, Math.min(delay * 1000, 2000)); // max 2 сек задержки
+      
+      if (delayMs > 100) { // Только если задержка > 100ms (избегаем микро-задержек)
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `⏳ Smart delay: token age ${tokenAge.toFixed(2)}s, adding ${delayMs.toFixed(0)}ms delay to enter at ~5.5s`,
+        });
+        await sleep(delayMs);
+      }
+    } else {
+      // Токену уже 4.9+ секунд - вход сразу (не теряем импульс!)
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `⚡ Fast entry: token age ${tokenAge.toFixed(2)}s, entering immediately (no delay to preserve momentum)`,
+      });
+    }
 
     // 1. Проверка: есть ли свободные слоты?
     if (this.positions.size >= config.maxOpenPositions) {

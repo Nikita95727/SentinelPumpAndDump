@@ -77,11 +77,12 @@ export class TokenScanner {
       });
 
       this.ws.on('open', () => {
-        console.log('WebSocket connected to Helius');
+        const networkMode = config.testnetMode ? 'Testnet' : 'Mainnet';
+        console.log(`WebSocket connected to Pump.fun ${networkMode}`);
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
-          message: `WebSocket connected to Helius (attempt ${this.reconnectAttempts + 1})`,
+          message: `WebSocket connected to Pump.fun ${networkMode} (attempt ${this.reconnectAttempts + 1})`,
         });
         this.reconnectAttempts = 0;
         this.subscribe();

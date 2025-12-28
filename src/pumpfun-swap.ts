@@ -11,8 +11,6 @@ import { AnchorProvider } from '@coral-xyz/anchor';
 import NodeWallet from '@coral-xyz/anchor/dist/cjs/nodewallet';
 import { logger } from './logger';
 import { getCurrentTimestamp } from './utils';
-import { buildCreateAtaIfMissingIx } from './solana/ata';
-import { ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
@@ -39,7 +37,11 @@ export class PumpFunSwap {
     amountSol: number // в SOL
   ): Promise<{ success: boolean; signature?: string; error?: string; outAmount?: number }> {
     const MAX_RETRIES = 3;
-    const RETRY_DELAY_MS = 200; // 200ms между попытками
+    // ✅ УМНАЯ RETRY СТРАТЕГИЯ: Экспоненциальная задержка для 3012
+    // Попытка 1: сразу (или после задержки из position-manager)
+    // Попытка 2: +300ms (токену нужно еще немного времени)
+    // Попытка 3: +500ms (последний шанс)
+    const RETRY_DELAYS = [0, 300, 500]; // ms
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       const result = await this.executeBuy(wallet, tokenMint, amountSol, attempt);
@@ -63,15 +65,16 @@ export class PumpFunSwap {
         return result;
       }
 
-      // Ретрай для 3012 (токен ещё не готов)
+      // Ретрай для 3012 (токен ещё не готов) с экспоненциальной задержкой
+      const retryDelay = RETRY_DELAYS[attempt - 1] || 500; // attempt начинается с 1, массив с 0
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: tokenMint,
-        message: `🔁 Custom:3012 (token not ready), retry ${attempt}/${MAX_RETRIES} after ${RETRY_DELAY_MS}ms...`,
+        message: `🔁 Custom:3012 (token not ready), retry ${attempt}/${MAX_RETRIES} after ${retryDelay}ms...`,
       });
 
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
     }
 
     // Не должно сюда попасть, но на всякий случай
@@ -100,14 +103,6 @@ export class PumpFunSwap {
         message: `🔄 Pump.fun BUY (SDK) attempt ${attempt}: ${amountSol} SOL → ${tokenMint}`,
       });
 
-      // ✅ FIX: Используем хелпер для создания ATA (правильный programId гарантирован)
-      const { ata, ix: ataIx } = await buildCreateAtaIfMissingIx({
-        connection: this.connection,
-        payer: wallet.publicKey,
-        owner: wallet.publicKey,
-        mint: mintPubkey,
-      });
-
       // Получаем инструкции через SDK
       const buyInstructions = await this.sdk.getBuyInstructionsBySolAmount(
         wallet.publicKey,
@@ -117,78 +112,30 @@ export class PumpFunSwap {
         'processed'
       );
 
-      // ✅ FIX: Находим ATA инструкцию от SDK и проверяем/исправляем ее programId
-      let sdkAtaInstruction: any = null;
-      const filteredInstructions = buyInstructions.instructions.filter((ix, idx) => {
-        const programIdStr = ix.programId.toString();
-        const isAtaProgram = programIdStr === ASSOCIATED_TOKEN_PROGRAM_ID.toString();
-        
-        if (isAtaProgram) {
-          sdkAtaInstruction = ix;
-          // Сохраняем ATA инструкцию от SDK, но не добавляем ее в filteredInstructions
-          // Мы создадим свою правильную ATA инструкцию
-          return false; // Удаляем из filteredInstructions
-        }
-        
-        return true; // Оставляем все не-ATA инструкции
-      });
-      
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        message: `🔍 DEBUG: After filtering: ${filteredInstructions.length} instructions remain`,
-      });
-
       // Создаем транзакцию
       const transaction = new Transaction();
+      
+      // Compute budget
       transaction.add(
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 })
-      );
-      transaction.add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 })
       );
 
-      // ✅ FIX: Добавляем ATA creation ПЕРЕД Pump.fun BUY инструкцией (только если нужно)
-      // Порядок: ComputeBudget -> ATA creation (if needed) -> BUY instruction
-      if (ataIx) {
-        transaction.add(ataIx);
-      }
-
-      // Добавляем отфильтрованные SDK инструкции (Pump.fun BUY и другие, БЕЗ ATA)
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        message: `🔍 DEBUG: Adding ${filteredInstructions.length} filtered SDK instructions`,
-      });
-      
-      for (let i = 0; i < filteredInstructions.length; i++) {
-        const ix = filteredInstructions[i];
-        const programIdStr = ix.programId.toString();
-        
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          message: `🔍 DEBUG: SDK instruction #${i}: programId=${programIdStr}, keys=${ix.keys.length}`,
-        });
-      }
-      
-      transaction.add(...filteredInstructions);
-      
-      // ✅ КРИТИЧЕСКАЯ ПРОВЕРКА: Логируем ВСЕ инструкции перед отправкой
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        message: `🔍 DEBUG: Transaction has ${transaction.instructions.length} total instructions`,
-      });
+      // ✅ ИСПОЛЬЗУЕМ ИНСТРУКЦИИ SDK КАК ЕСТЬ - НЕ ФИЛЬТРУЕМ!
+      transaction.add(...buyInstructions.instructions);
       
 
-      // Отправляем с skipPreflight
-      const signature = await sendAndConfirmTransaction(this.connection, transaction, [wallet], {
-        commitment: 'processed',
-        skipPreflight: true,
-        preflightCommitment: 'processed',
-        maxRetries: 5,
-      });
+      // Отправляем
+      const signature = await sendAndConfirmTransaction(
+        this.connection, 
+        transaction, 
+        [wallet],
+        {
+          commitment: 'processed',
+          skipPreflight: true,
+          maxRetries: 5,
+        }
+      );
 
       const buyEndTime = Date.now();
       const buyDuration = buyEndTime - buyStartTime;
@@ -323,15 +270,6 @@ export class PumpFunSwap {
         message: `🔄 Pump.fun SELL (SDK) attempt ${attempt}: ${amountTokens} tokens → ${tokenMint}`,
       });
 
-      // ✅ FIX: Используем хелпер для создания ATA (правильный programId гарантирован)
-      // НИКОГДА не предполагаем что ATA существует - токены могли быть получены, но ATA creation могло фейлиться
-      const { ata, ix: ataIx } = await buildCreateAtaIfMissingIx({
-        connection: this.connection,
-        payer: wallet.publicKey,
-        owner: wallet.publicKey,
-        mint: mintPubkey,
-      });
-
       // Получаем инструкции через SDK
       const sellInstructions = await this.sdk.getSellInstructionsByTokenAmount(
         wallet.publicKey,
@@ -341,38 +279,27 @@ export class PumpFunSwap {
         'processed'
       );
 
-      // ✅ FIX: Удаляем ВСЕ ATA creation инструкции из SDK (они могут быть с неправильным programId)
-      // Фильтруем по programId - удаляем все инструкции Associated Token Program
-      const filteredInstructions = sellInstructions.instructions.filter(ix => {
-        const programIdStr = ix.programId.toString();
-        // Удаляем инструкции Associated Token Program (SDK может создавать их неправильно)
-        return programIdStr !== ASSOCIATED_TOKEN_PROGRAM_ID.toString();
-      });
-
       // Создаем транзакцию
       const transaction = new Transaction();
+      
       transaction.add(
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 })
-      );
-      transaction.add(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 150_000 })
       );
 
-      // ✅ FIX: Добавляем ATA creation ПЕРЕД Pump.fun SELL инструкцией (только если нужно)
-      // Порядок: ComputeBudget -> ATA creation (if needed) -> SELL instruction
-      if (ataIx) {
-        transaction.add(ataIx);
-      }
+      // ✅ ИСПОЛЬЗУЕМ КАК ЕСТЬ - НЕ ФИЛЬТРУЕМ!
+      transaction.add(...sellInstructions.instructions);
 
-      // Добавляем отфильтрованные SDK инструкции (Pump.fun SELL и другие, БЕЗ ATA)
-      transaction.add(...filteredInstructions);
-
-      const signature = await sendAndConfirmTransaction(this.connection, transaction, [wallet], {
-        commitment: 'processed',
-        skipPreflight: true,
-        preflightCommitment: 'processed',
-        maxRetries: 5,
-      });
+      const signature = await sendAndConfirmTransaction(
+        this.connection,
+        transaction,
+        [wallet],
+        {
+          commitment: 'processed',
+          skipPreflight: true,
+          maxRetries: 5,
+        }
+      );
 
       const sellEndTime = Date.now();
       const sellDuration = sellEndTime - sellStartTime;

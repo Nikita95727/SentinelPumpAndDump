@@ -133,5 +133,7 @@ export interface Config {
   // Real trading configuration
   realTradingEnabled: boolean;
   walletMnemonic: string;
+  // Network configuration
+  testnetMode: boolean;
 }
 

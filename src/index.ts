@@ -19,7 +19,14 @@ class PumpFunSniper {
 
   async start(): Promise<void> {
     console.log('🚀 Starting Pump.fun Sniper Bot (Optimized)...');
-    console.log(`Helius WS URL: ${config.heliusWsUrl.substring(0, 50)}...`);
+    
+    // Показываем информацию о режиме сети
+    const { getNetworkInfo } = await import('./config');
+    const networkInfo = getNetworkInfo();
+    console.log(`\n🌐 Network Mode: ${networkInfo.mode.toUpperCase()}`);
+    console.log(`   Program ID: ${networkInfo.programId}`);
+    console.log(`   WS URL: ${networkInfo.wsUrl.substring(0, 60)}...`);
+    console.log(`   HTTP URL: ${networkInfo.httpUrl.substring(0, 60)}...\n`);
 
     try {
       // Инициализируем соединение

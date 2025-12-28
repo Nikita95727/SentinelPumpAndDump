@@ -8,6 +8,7 @@ import {
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountInstruction,
   getAssociatedTokenAddress,
+  getAccount,
 } from "@solana/spl-token";
 import { Connection, PublicKey, TransactionInstruction } from "@solana/web3.js";
 
@@ -34,9 +35,24 @@ export async function buildCreateAtaIfMissingIx(params: {
 
   const ata = await getAtaAddress(mint, owner);
 
-  const info = await connection.getAccountInfo(ata, "processed");
-  if (info) {
-    return { ata, ix: null };
+  // ✅ IMPROVEMENT: Используем confirmed commitment для более надежной проверки
+  // ✅ IMPROVEMENT: Дополнительно проверяем через SPL Token getAccount для валидации
+  try {
+    const account = await getAccount(connection, ata, "confirmed");
+    // Дополнительная проверка: убеждаемся что это правильный ATA
+    if (account.owner.equals(owner) && account.mint.equals(mint)) {
+      return { ata, ix: null };
+    }
+  } catch (error: any) {
+    // Account не существует или ошибка - нужно создать
+    // Игнорируем ожидаемые ошибки (account not found)
+    const errorMsg = error?.message || String(error);
+    if (!errorMsg.includes('InvalidAccountData') && 
+        !errorMsg.includes('could not find account') &&
+        !errorMsg.includes('AccountNotFound')) {
+      // Неожиданная ошибка - логируем, но продолжаем создание
+      console.warn(`[ATA] Unexpected error checking ATA ${ata.toString()}: ${errorMsg}`);
+    }
   }
 
   const ix = createAssociatedTokenAccountInstruction(
