@@ -6,4 +6,7 @@ logs/
 .DS_Store
 *.tsbuildinfo
 
+# Personal diagnostic scripts
+check-balance.ts
+
 
