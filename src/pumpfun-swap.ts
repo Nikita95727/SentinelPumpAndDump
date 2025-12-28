@@ -157,6 +157,20 @@ export class PumpFunSwap {
         amount: solAmountBN,
       });
 
+      // 🔴 FIX: Проверяем, не завершена ли bonding curve (миграция на Raydium)
+      if (bondingCurve && bondingCurve.complete) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          token: tokenMint,
+          message: `❌ SKIP BUY: Token has completed bonding curve and migrated to Raydium/PumpSwap. Cannot buy on bonding curve.`,
+        });
+        return {
+          success: false,
+          error: 'Token migrated (bonding curve complete)'
+        };
+      }
+
       // Получаем инструкции для покупки
       const buyInstructions = await this.offlineSdk.buyInstructions({
         global,
