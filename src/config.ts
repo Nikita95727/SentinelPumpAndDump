@@ -6,7 +6,7 @@ dotenv.config();
 export const config: Config = {
   initialDeposit: parseFloat(process.env.INITIAL_DEPOSIT || '0.03'),
   solUsdRate: parseFloat(process.env.SOL_USD_RATE || '170'),
-  maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || '100', 10),
+  maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || '15', 10),
   maxDrawdownPct: parseFloat(process.env.MAX_DRAWDOWN_PCT || '25'),
       batchSize: 10,
       minDelaySeconds: 10,
