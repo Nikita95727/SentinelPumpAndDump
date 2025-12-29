@@ -78,7 +78,7 @@ export const config: Config = {
       // Фильтрация и readiness check определяют момент входа
   minPurchases: 5,
   minVolumeUsd: 2000,
-      takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '2.5'), // Оптимизировано: 2.5x для гарантированного выхода до дампа
+      takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '2.0'), // Снижено до 2.0x для безубыточности с учетом комиссий
   exitTimerSeconds: 90,
   trailingStopPct: 25,
   priorityFee: 0.001,
@@ -102,7 +102,7 @@ export const config: Config = {
   // Safety mechanisms
   maxSolPerTrade: parseFloat(process.env.MAX_SOL_PER_TRADE || '0.05'), // Hard cap per trade (stealth) - безопасный размер, не влияет на цену
   maxTradingBalance: parseFloat(process.env.MAX_TRADING_BALANCE || '0.3'), // Максимальный торговый баланс (излишек выводится)
-  maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.0035'), // Максимальный размер позиции
+  maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.004'), // Увеличен до 0.004 SOL для безубыточности при 1.77x с учетом slippage
   personalWalletAddress: process.env.PERSONAL_WALLET_ADDRESS || '', // Адрес личного кошелька для вывода излишка
   maxReservePercent: parseFloat(process.env.MAX_RESERVE_PERCENT || '1.0'), // Max % of reserves per trade (if data available)
   // Real trading configuration

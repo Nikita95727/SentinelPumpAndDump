@@ -151,9 +151,9 @@ class Account {
    * Minimum position size ensures fees never eat profit:
    * - Entry fees: 0.001005 SOL
    * - Exit fees: 0.001005 SOL
-   * - For 2.5x profit: investedAmount * 1.5 > totalFees
-   * - Minimum invested: ~0.00134 SOL
-   * - Minimum positionSize: настраивается через MAX_POSITION_SIZE (по умолчанию 0.0035 SOL)
+   * - For 1.77x break-even: positionSize >= 0.003688 SOL (с учетом slippage)
+   * - Minimum positionSize: настраивается через MAX_POSITION_SIZE (по умолчанию 0.004 SOL)
+   * - Это обеспечивает безубыточность при 1.77x и прибыль при 2.0x+
    */
   getPositionSize(maxPositions: number, minPositionSize: number = config.maxPositionSize, workingBalance?: number, currentOpenPositions: number = 0, entryFees: number = 0.001005): number {
     const free = workingBalance !== undefined ? workingBalance - this.lockedBalance : this.getFreeBalance();
