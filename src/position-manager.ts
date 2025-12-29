@@ -2004,9 +2004,21 @@ export class PositionManager {
       // Пересчитываем multiplier для логирования (используем реальную цену или безопасную)
       // ⭐ FIX FOR PAPER TRADING: Используем realExitPrice если он был установлен
       const finalExitPrice = (this.adapter.getMode() === 'paper' && realExitPrice !== exitPrice) ? realExitPrice : safeExitPrice;
-      const finalMultiplier = actualProceeds !== null 
-        ? (actualProceeds + exitFeeCheck) / positionInvestedAmount
-        : finalExitPrice / position.entryPrice;
+      
+      // ⭐ CRITICAL FIX: Multiplier должен рассчитываться на основе ЦЕНЫ, а не proceeds
+      // actualProceeds уже включает slippage и fees, поэтому не подходит для multiplier
+      // Используем actualExitPrice (который берется из markPrice в paper mode) для расчета multiplier
+      let finalMultiplier: number;
+      if (actualProceeds !== null && actualExitPrice !== exitPrice && actualExitPrice > 0) {
+        // Используем actualExitPrice (реальная цена из executeSell в paper mode)
+        finalMultiplier = actualExitPrice / position.entryPrice;
+      } else if (actualProceeds !== null) {
+        // Fallback: если нет actualExitPrice, рассчитываем из proceeds (менее точно)
+        finalMultiplier = (actualProceeds + exitFeeCheck) / positionInvestedAmount;
+      } else {
+        // Используем finalExitPrice (безопасная цена)
+        finalMultiplier = finalExitPrice / position.entryPrice;
+      }
       
       // Non-blocking trade logging
       // ⭐ FIX FOR PAPER TRADING: Используем realExitPrice для логирования
