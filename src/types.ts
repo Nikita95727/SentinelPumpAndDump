@@ -1,3 +1,14 @@
+export type Tier = 1 | 2 | 3 | null; // Tier 1 = безопасный, Tier 2 = умеренный риск, Tier 3 = высокий риск, null = не допущен
+
+export interface TierInfo {
+  tier: Tier;
+  liquidity: number;
+  holders: number;
+  positionSizeMultiplier: number; // Множитель для размера позиции (1.0 для Tier 1, 0.5 для Tier 2, etc.)
+  allowsPartialSells: boolean;
+  minEffectiveMultiplier?: number; // Минимальный эффективный multiplier для входа (для Tier 2/3)
+}
+
 export interface TokenCandidate {
   mint: string;
   createdAt: number; // timestamp в миллисекундах
@@ -24,6 +35,7 @@ export interface Position {
   exitTimer?: number; // timestamp когда нужно закрыть (90 сек) (опционально)
   slippage?: number; // использованный slippage (опционально)
   estimatedImpact?: number; // Оценка impact при входе
+  tier?: Tier; // Tier токена при входе (1, 2, 3 или null)
   status: 'active' | 'closing' | 'closed' | 'abandoned'; // abandoned = write-off
   errorCount?: number;
   // Price history for momentum calculation

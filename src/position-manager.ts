@@ -1,5 +1,5 @@
 import { Connection } from '@solana/web3.js';
-import { Position, PositionStats, TokenCandidate } from './types';
+import { Position, PositionStats, TokenCandidate, TierInfo } from './types';
 import { config } from './config';
 import { logger } from './logger';
 import { tradeLogger } from './trade-logger';
@@ -186,6 +186,7 @@ class Account {
 
 export class PositionManager {
   private positions = new Map<string, Position>();
+  private pendingTierInfo = new Map<string, TierInfo | null>(); // Сохраняем tierInfo для токенов, прошедших фильтры;
   private connection: Connection;
   private filters: TokenFilters;
   private account: Account; // Single source of truth for balance
@@ -543,8 +544,13 @@ export class PositionManager {
         const preBuyDelay = 50 + Math.random() * 100; // 50-150ms
         await sleep(preBuyDelay);
         
-        // Выполняем BUY
-        const position = await this.openPositionWithReadinessCheck(candidate);
+        // Выполняем BUY с tierInfo
+        const tierInfo = this.pendingTierInfo.get(candidate.mint) || null;
+        const position = await this.openPositionWithReadinessCheck(candidate, tierInfo);
+        // Очищаем tierInfo после использования
+        if (tierInfo) {
+          this.pendingTierInfo.delete(candidate.mint);
+        }
         
         if (position) {
           // Позиция открыта успешно
@@ -644,15 +650,29 @@ export class PositionManager {
             return false;
           }
           
-          // Фильтр прошел
+          // Фильтр прошел - сохраняем tierInfo
+          const tierInfo = result.value.tierInfo;
+          if (tierInfo) {
+            this.pendingTierInfo.set(candidate.mint, tierInfo);
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: candidate.mint,
+              message: `✅ Simplified filters passed: Tier ${tierInfo.tier}, liquidity=$${result.value.details?.volumeUsd?.toFixed(2) || 'N/A'}, holders=${result.value.details?.uniqueBuyers || 'N/A'}, waiting for token readiness`,
+            });
+          } else {
+            // Tier не определен - отбрасываем токен
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: candidate.mint,
+              message: `❌ Filter passed but no Tier assigned, discarding`,
+            });
+            return false;
+          }
+          
           filterStage = 2;
           allFiltersPassed = true; // ✅ Все фильтры пройдены - ждем готовности неограниченно
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            token: candidate.mint,
-            message: `✅ Simplified filters passed (honeypot check, liquidity ${result.value.details?.volumeUsd?.toFixed(2) || 'N/A'}, distribution OK), waiting for token readiness`,
-          });
         } catch (error) {
           // Ошибка фильтра - отбрасываем токен
           logger.log({
@@ -672,9 +692,55 @@ export class PositionManager {
   }
 
   /**
-   * Открывает позицию с readiness check и правильной retry логикой для 3012/3031
+   * Симулирует выход из позиции для проверки эффективного multiplier
+   * Используется для Tier 2 и Tier 3 перед входом
    */
-  private async openPositionWithReadinessCheck(candidate: TokenCandidate): Promise<Position | null> {
+  private async simulateExit(
+    entryPrice: number,
+    positionSize: number,
+    tierInfo: TierInfo
+  ): Promise<{ effectiveMultiplier: number; predictedProceeds: number; predictedSlippage: number }> {
+    const entryFees = config.priorityFee + config.signatureFee;
+    const exitFees = config.priorityFee + config.signatureFee;
+    const investedAmount = positionSize - entryFees;
+    
+    // Оцениваем slippage при выходе (зависит от tier)
+    let estimatedExitSlippage: number;
+    if (tierInfo.tier === 1) {
+      estimatedExitSlippage = config.exitSlippageMin; // 20% для Tier 1
+    } else if (tierInfo.tier === 2) {
+      estimatedExitSlippage = (config.exitSlippageMin + config.exitSlippageMax) / 2; // 27.5% для Tier 2
+    } else {
+      estimatedExitSlippage = config.exitSlippageMax; // 35% для Tier 3
+    }
+    
+    // Предполагаем, что выходим на текущей цене (или на multiplier 2.0x)
+    const assumedExitMultiplier = config.takeProfitMultiplier; // 2.0x
+    const assumedExitPrice = entryPrice * assumedExitMultiplier;
+    
+    // Рассчитываем количество токенов, полученных при покупке
+    const tokensReceived = investedAmount / entryPrice;
+    
+    // Рассчитываем SOL, полученные при продаже (с учетом slippage)
+    const grossProceeds = tokensReceived * assumedExitPrice;
+    const slippageAmount = grossProceeds * estimatedExitSlippage;
+    const predictedProceeds = grossProceeds - slippageAmount - exitFees;
+    
+    // Эффективный multiplier = (proceeds - entryFees) / investedAmount
+    const effectiveMultiplier = predictedProceeds / investedAmount;
+    
+    return {
+      effectiveMultiplier,
+      predictedProceeds,
+      predictedSlippage: estimatedExitSlippage,
+    };
+  }
+
+  /**
+   * Открывает позицию с readiness check и правильной retry логикой для 3012/3031
+   * @param tierInfo - Информация о Tier токена (для адаптации размера позиции и проверок)
+   */
+  private async openPositionWithReadinessCheck(candidate: TokenCandidate, tierInfo: TierInfo | null): Promise<Position | null> {
     try {
       // Получаем цену входа (isPriority больше не используется, всегда false)
       const entryPrice = await this.filters.getEntryPrice(candidate.mint, false);
@@ -694,6 +760,30 @@ export class PositionManager {
       );
       
       positionSize = this.safetyManager.applySafetyCaps(positionSize);
+
+      // ⭐ TIER-BASED SIZING: Адаптируем размер позиции в зависимости от Tier
+      if (tierInfo) {
+        if (tierInfo.tier === 2) {
+          // Tier 2: уменьшаем размер позиции в 2 раза
+          positionSize = positionSize * tierInfo.positionSizeMultiplier;
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: candidate.mint,
+            message: `🟡 Tier 2: Position size reduced to ${positionSize.toFixed(6)} SOL (multiplier: ${tierInfo.positionSizeMultiplier})`,
+          });
+        } else if (tierInfo.tier === 3) {
+          // Tier 3: максимальный размер 0.0025 SOL
+          const maxTier3Size = 0.0025;
+          positionSize = Math.min(positionSize, maxTier3Size);
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: candidate.mint,
+            message: `🔴 Tier 3: Position size capped at ${positionSize.toFixed(6)} SOL (max: ${maxTier3Size} SOL)`,
+          });
+        }
+      }
       
       // ⭐ ADAPTIVE SIZING: Оцениваем impact и корректируем размер позиции
       const estimatedImpact = this.adapter.estimateImpact(positionSize);
@@ -713,12 +803,33 @@ export class PositionManager {
         }
       }
       
-      const MIN_POSITION_SIZE = config.minPositionSize;
+      // ⭐ TIER-BASED MIN SIZE: Для Tier 3 минимальный размер может быть меньше
+      const MIN_POSITION_SIZE = tierInfo?.tier === 3 ? 0.002 : config.minPositionSize; // Tier 3: минимум 0.002 SOL
       if (positionSize < MIN_POSITION_SIZE) {
         if (this.account.getFreeBalance() < MIN_POSITION_SIZE) {
           throw new Error(`Position size too small: ${positionSize} < ${MIN_POSITION_SIZE}, insufficient balance`);
         }
         positionSize = MIN_POSITION_SIZE;
+      }
+
+      // ⭐ EXIT SIMULATION для Tier 2 и Tier 3
+      if (tierInfo && (tierInfo.tier === 2 || tierInfo.tier === 3)) {
+        const exitSimulation = await this.simulateExit(entryPrice, positionSize, tierInfo);
+        
+        // Проверяем минимальный эффективный multiplier
+        const minEffectiveMultiplier = tierInfo.minEffectiveMultiplier || 1.15;
+        if (exitSimulation.effectiveMultiplier < minEffectiveMultiplier) {
+          throw new Error(
+            `Exit simulation failed: effectiveMultiplier=${exitSimulation.effectiveMultiplier.toFixed(3)} < ${minEffectiveMultiplier} (Tier ${tierInfo.tier})`
+          );
+        }
+        
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `✅ Exit simulation passed (Tier ${tierInfo.tier}): effectiveMultiplier=${exitSimulation.effectiveMultiplier.toFixed(3)}, predictedProceeds=${exitSimulation.predictedProceeds.toFixed(6)} SOL, predictedSlippage=${(exitSimulation.predictedSlippage * 100).toFixed(1)}%`,
+        });
       }
       
       const exitFees = config.priorityFee + config.signatureFee;
@@ -759,7 +870,7 @@ export class PositionManager {
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: candidate.mint,
-        message: `${this.adapter.getMode() === 'real' ? '🔴' : '📄'} Executing ${this.adapter.getMode().toUpperCase()} BUY: ${positionSize.toFixed(6)} SOL → ${candidate.mint}`,
+        message: `${this.adapter.getMode() === 'real' ? '🔴' : '📄'} Executing ${this.adapter.getMode().toUpperCase()} BUY: ${positionSize.toFixed(6)} SOL → ${candidate.mint}${tierInfo ? ` | Tier ${tierInfo.tier}` : ''}`,
         });
 
       // ✅ BUY с правильной retry логикой для 3012/3031 (только для real)
@@ -786,6 +897,9 @@ export class PositionManager {
       const markPrice = buyResult.markPrice || entryPrice;
       const actualEntryPrice = executionPrice; // Используем реальную цену исполнения
 
+      // ⭐ Сохраняем tier в позиции
+      const positionTier = tierInfo?.tier || null;
+
       const position: Position = {
         token: candidate.mint,
         entryPrice: actualEntryPrice,
@@ -801,6 +915,7 @@ export class PositionManager {
         errorCount: 0,
         reservedAmount: totalReservedAmount,
         estimatedImpact: buyResult.estimatedImpact,
+        tier: positionTier, // ⭐ Сохраняем tier в позиции
       };
 
       this.positions.set(candidate.mint, position);
@@ -830,7 +945,7 @@ export class PositionManager {
         token: candidate.mint,
         investedSol: investedAmount,
         entryPrice: actualEntryPrice,
-        message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)} ${this.adapter.getMode() === 'real' ? '🔴 REAL' : '📄 PAPER'}`,
+        message: `Position opened: ${candidate.mint.substring(0, 8)}..., Tier ${positionTier || 'N/A'}, invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)} ${this.adapter.getMode() === 'real' ? '🔴 REAL' : '📄 PAPER'}`,
       });
 
       return position;
@@ -1642,7 +1757,26 @@ export class PositionManager {
       // Получаем количество токенов для продажи
       const tokensToSell = (position as any).tokensReceived || (positionInvestedAmount / position.entryPrice);
       
+      // ⭐ TIER 3: Запрет partial sells (слишком тонкий рынок)
+      // Временно переопределяем sellStrategy для Tier 3
+      const originalSellStrategy = config.sellStrategy;
+      if (position.tier === 3 && config.sellStrategy === 'partial_50_50') {
+        // Временно устанавливаем 'single' для Tier 3
+        (config as any).sellStrategy = 'single';
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: position.token,
+          message: `🔴 Tier 3: Partial sells disabled (too thin market), using single sell`,
+        });
+      }
+      
       const sellResult = await this.adapter.executeSell(position.token, tokensToSell);
+      
+      // Восстанавливаем оригинальный sellStrategy
+      if (position.tier === 3 && originalSellStrategy === 'partial_50_50') {
+        (config as any).sellStrategy = originalSellStrategy;
+      }
 
         if (!sellResult.success) {
           logger.log({

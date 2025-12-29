@@ -1,7 +1,7 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { getMint, getAccount, unpackAccount } from '@solana/spl-token';
 import { config } from './config';
-import { TokenCandidate } from './types';
+import { TokenCandidate, Tier, TierInfo } from './types';
 import { logger } from './logger';
 import { getCurrentTimestamp, formatSol, formatUsd, sleep } from './utils';
 import { getRpcPool } from './rpc-pool';
@@ -1080,12 +1080,65 @@ export class TokenFilters {
   }
 
   /**
+   * Классифицирует токен по Tier системе (1, 2, 3 или null)
+   * Tier 1: liquidity >= 5000, holders >= 25
+   * Tier 2: liquidity >= 2000 && < 5000, holders >= 40
+   * Tier 3: liquidity >= 1000 && < 2000, holders >= 70
+   * null: liquidity < 1000 или не проходит условия
+   */
+  async classifyTier(mint: string, liquidity: number, holders: number): Promise<TierInfo | null> {
+    // ❌ ЖЕСТКИЙ ЗАПРЕТ: liquidity < 1000 - НИКОГДА НЕ ВХОДИТЬ
+    if (liquidity < 1000) {
+      return null;
+    }
+
+    // 🟢 TIER 1 — БЕЗОПАСНЫЙ ВХОД
+    if (liquidity >= 5000 && holders >= 25) {
+      return {
+        tier: 1,
+        liquidity,
+        holders,
+        positionSizeMultiplier: 1.0,
+        allowsPartialSells: true,
+      };
+    }
+
+    // 🟡 TIER 2 — УМЕРЕННЫЙ РИСК
+    if (liquidity >= 2000 && liquidity < 5000 && holders >= 40) {
+      return {
+        tier: 2,
+        liquidity,
+        holders,
+        positionSizeMultiplier: 0.5,
+        allowsPartialSells: true,
+        minEffectiveMultiplier: 1.15, // ОБЯЗАТЕЛЬНО выполнить exit simulation
+      };
+    }
+
+    // 🔴 TIER 3 — ТОЛЬКО САМЫЕ СИЛЬНЫЕ
+    if (liquidity >= 1000 && liquidity < 2000 && holders >= 70) {
+      return {
+        tier: 3,
+        liquidity,
+        holders,
+        positionSizeMultiplier: 0.0, // Будет установлен в position-manager (max 0.0025 SOL)
+        allowsPartialSells: false, // ❌ partial sells запрещены
+        minEffectiveMultiplier: 1.2, // Более строгий multiplier для Tier 3
+      };
+    }
+
+    // Не проходит ни один Tier
+    return null;
+  }
+
+  /**
    * ⭐ УПРОЩЕННЫЙ ФИЛЬТР: Только критичные проверки
    * 1. Защита от honeypot (uniqueBuyers > 1)
    * 2. Минимальная базовая ликвидность (config.minLiquidityUsd)
    * 3. Распределение ликвидности (нет одного держателя с >maxSingleHolderPct%)
+   * 4. Классификация по Tier системе
    */
-  async simplifiedFilter(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any }> {
+  async simplifiedFilter(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any; tierInfo?: TierInfo | null }> {
     const details: any = {};
     
     try {
@@ -1115,23 +1168,37 @@ export class TokenFilters {
         return { passed: false, reason, details };
       }
 
-      // 2. Проверка минимальной базовой ликвидности
+      // 2. Проверка минимальной базовой ликвидности и классификация по Tier
       await sleep(50); // Минимальная задержка
       const volumeUsd = await this.getTradingVolume(candidate.mint, true);
       details.volumeUsd = volumeUsd;
+      details.uniqueBuyers = honeypotCheck.uniqueBuyers;
 
-      if (volumeUsd < config.minLiquidityUsd) {
-        const reason = `Insufficient liquidity: $${volumeUsd.toFixed(2)} < $${config.minLiquidityUsd}`;
+      // ⭐ КЛАССИФИКАЦИЯ ПО TIER СИСТЕМЕ
+      const tierInfo = await this.classifyTier(candidate.mint, volumeUsd, honeypotCheck.uniqueBuyers);
+      details.tier = tierInfo?.tier || null;
+
+      // ❌ ЖЕСТКИЙ ЗАПРЕТ: liquidity < 1000 - НИКОГДА НЕ ВХОДИТЬ
+      if (!tierInfo) {
+        const reason = `Token does not meet any Tier requirements: liquidity=$${volumeUsd.toFixed(2)}, holders=${honeypotCheck.uniqueBuyers}`;
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'filter_failed',
           token: candidate.mint,
-          filterStage: 'simplified_liquidity',
+          filterStage: 'simplified_tier',
           filterDetails: { ...details, rejectionReason: reason },
           message: `Token rejected: ${reason}`,
         });
-        return { passed: false, reason, details };
+        return { passed: false, reason, details, tierInfo: null };
       }
+
+      // Логируем классификацию по Tier
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `🔄 Tier ${tierInfo.tier} classified: liquidity=$${volumeUsd.toFixed(2)}, holders=${honeypotCheck.uniqueBuyers}, positionSizeMultiplier=${tierInfo.positionSizeMultiplier}`,
+      });
 
       // 3. Проверка распределения ликвидности (нет одного держателя с >maxSingleHolderPct%)
       const hasConcentratedLiquidity = await this.hasSnipers(candidate.mint);
@@ -1156,10 +1223,10 @@ export class TokenFilters {
         token: candidate.mint,
         filterStage: 'simplified',
         filterDetails: { ...details },
-        message: `Token passed simplified filters: ${candidate.mint.substring(0, 8)}..., uniqueBuyers=${honeypotCheck.uniqueBuyers}, volume=$${volumeUsd.toFixed(2)}`,
+        message: `Token passed simplified filters: ${candidate.mint.substring(0, 8)}..., Tier ${tierInfo.tier}, uniqueBuyers=${honeypotCheck.uniqueBuyers}, volume=$${volumeUsd.toFixed(2)}`,
       });
 
-      return { passed: true, details };
+      return { passed: true, details, tierInfo };
     } catch (error: any) {
       const reason = `Filter error: ${error?.message || String(error)}`;
       logger.log({

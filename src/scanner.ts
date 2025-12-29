@@ -41,12 +41,48 @@ export class TokenScanner {
     this.processingTokens.delete(mint);
   }
 
+  /**
+   * Жесткий сброс очереди при перезапуске
+   * Очищает все структуры данных в памяти для предотвращения дубликатов
+   */
+  private resetQueue(): void {
+    const queueSize = this.tokenQueue.length;
+    const processingSize = this.processingTokens.size;
+    const processedMintsSize = this.processedMints.size;
+    const processedSignaturesSize = this.processedSignatures.size;
+
+    // Останавливаем обработку очереди
+    this.isProcessingQueue = false;
+
+    // Очищаем очередь токенов
+    this.tokenQueue = [];
+
+    // Очищаем Set обрабатываемых токенов
+    this.processingTokens.clear();
+
+    // Очищаем Map обработанных токенов (дедупликация)
+    this.processedMints.clear();
+
+    // Очищаем Map обработанных сигнатур (дедупликация)
+    this.processedSignatures.clear();
+
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `🔄 Queue hard reset: cleared ${queueSize} queued tokens, ${processingSize} processing tokens, ${processedMintsSize} processed mints, ${processedSignaturesSize} processed signatures`,
+    });
+  }
+
   async start(): Promise<void> {
     logger.log({
       timestamp: getCurrentTimestamp(),
       type: 'info',
       message: 'Token scanner starting...',
     });
+
+    // ⭐ ЖЕСТКИЙ СБРОС ОЧЕРЕДИ ПРИ ПЕРЕЗАПУСКЕ
+    this.resetQueue();
+
     await this.connect();
     // Запускаем обработку единой очереди
     this.processTokenQueue();
