@@ -671,7 +671,11 @@ export class TokenFilters {
     }
   }
 
-  private async getTradingVolume(mint: string, isPriority: boolean = false): Promise<number> {
+  /**
+   * Получает объем торгов токена в USD
+   * Публичный метод для использования в gem-tracker
+   */
+  async getTradingVolume(mint: string, isPriority: boolean = false): Promise<number> {
     const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
