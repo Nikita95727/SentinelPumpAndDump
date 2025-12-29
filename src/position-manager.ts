@@ -1322,8 +1322,13 @@ export class PositionManager {
 
       // Accounting (paper or real)
       const exitFee = config.priorityFee + config.signatureFee;
+      const entryFee = config.priorityFee + config.signatureFee;
       const investedAmount = position.investedSol; // Amount actually invested (after entry fees)
       const reservedAmount = position.reservedAmount || investedAmount; // Amount that was locked
+      
+      // ✅ FIX: Рассчитываем реальные затраты на позицию (без завышенного slippage)
+      // positionSize = investedAmount + entryFees (это реально потрачено при покупке)
+      const positionSize = investedAmount + entryFee;
       
       // 🔴 FIX: Используем реальную цену из SELL транзакции вместо bonding curve цены
       // Это исправляет ошибки bonding curve, которые дают неправильные цены
@@ -1429,8 +1434,8 @@ export class PositionManager {
         proceeds = 0;
       }
       
-      // ISSUE #1 FIX: Release funds and add back (grossReturn - exitFees) to deposit
-      // proceeds already has exitFees deducted
+      // ✅ FIX: Release funds and add back proceeds to deposit
+      // Используем reservedAmount для освобождения заблокированных средств
       this.account.release(reservedAmount, proceeds);
       
       // ✅ Проверка баланса и вывод излишка (только для реальной торговли)
@@ -1446,8 +1451,12 @@ export class PositionManager {
         });
       }
       
-      // Calculate profit for logging
-      const profit = proceeds - reservedAmount;
+      // ✅ FIX: Calculate profit correctly using actual costs (not reservedAmount with max slippage)
+      // profit = proceeds - positionSize - exitFees
+      // где positionSize = investedAmount + entryFees (реально потрачено при покупке)
+      // proceeds уже включает все комиссии и slippage от продажи
+      const totalCost = positionSize + exitFee; // Реальные затраты: покупка + комиссии входа + комиссии выхода
+      const profit = proceeds - totalCost;
       
       // TIMING ANALYSIS: Extract timing data for hypothesis validation
       const timingData = (position as any).timingData || {};
