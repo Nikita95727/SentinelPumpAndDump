@@ -6,7 +6,9 @@ import { tradeLogger } from './trade-logger';
 import { getCurrentTimestamp, sleep, calculateDrawdown } from './utils';
 import { config } from './config';
 import { TokenCandidate } from './types';
-import { RealTradingAdapter } from './real-trading-adapter';
+import { createTradingAdapter } from './trading/adapter-factory';
+import { ITradingAdapter } from './trading/trading-adapter.interface';
+import { RealTradingAdapter } from './trading/real-trading-adapter';
 import { GemTracker } from './gem-tracker';
 import { TokenFilters } from './filters';
 
@@ -17,7 +19,7 @@ class PumpFunSniper {
   private statsInterval: NodeJS.Timeout | null = null;
   private isShuttingDown = false;
   private lastBalanceLogTime: number = 0;
-  private realTradingAdapter?: RealTradingAdapter;
+  private adapter?: ITradingAdapter;
   private initialDeposit: number = 0; // Сохраняем реальный начальный баланс
   private gemTracker: GemTracker | null = null; // ⭐ Система выявления самородков
   private filters: TokenFilters | null = null; // Для honeypot check
@@ -40,30 +42,32 @@ class PumpFunSniper {
 
       let initialDeposit = config.initialDeposit;
 
-      // 🔴 REAL TRADING MODE
-      if (config.realTradingEnabled) {
+      // Создаем торговый адаптер (real или paper)
+      this.adapter = createTradingAdapter(this.connection, config.initialDeposit);
+
+      if (config.tradingMode === 'real') {
         console.log('\n🔴 ===============================================');
         console.log('🔴 REAL TRADING MODE ENABLED');
         console.log('🔴 ===============================================\n');
 
         if (!config.walletMnemonic) {
-          throw new Error('❌ WALLET_MNEMONIC not set in .env, but REAL_TRADING_ENABLED=true');
+          throw new Error('❌ WALLET_MNEMONIC not set in .env, but TRADING_MODE=real');
         }
 
-        this.realTradingAdapter = new RealTradingAdapter(this.connection);
-        const success = await this.realTradingAdapter.initialize(config.walletMnemonic);
+        const realAdapter = this.adapter as RealTradingAdapter;
+        const success = await realAdapter.initialize(config.walletMnemonic);
 
         if (!success) {
           throw new Error('❌ Failed to initialize real trading wallet');
         }
 
         // Получаем реальный баланс из кошелька
-        initialDeposit = await this.realTradingAdapter.getBalance();
+        initialDeposit = await realAdapter.getBalance();
         this.initialDeposit = initialDeposit; // Сохраняем для финальной статистики
         console.log(`✅ Real wallet balance: ${initialDeposit.toFixed(6)} SOL ($${(initialDeposit * config.solUsdRate).toFixed(2)})`);
 
         // Health check
-        const health = await this.realTradingAdapter.healthCheck();
+        const health = await realAdapter.healthCheck();
         if (!health.healthy) {
           console.warn(`⚠️ Wallet health warning: ${health.error}`);
         }
@@ -74,11 +78,11 @@ class PumpFunSniper {
         this.initialDeposit = initialDeposit; // Сохраняем для финальной статистики
       }
 
-      // Инициализируем PositionManager с optional real trading adapter
+      // Инициализируем PositionManager с адаптером
       this.positionManager = new PositionManager(
         this.connection,
         initialDeposit,
-        this.realTradingAdapter
+        this.adapter
       );
       console.log(`✅ Position Manager initialized with ${initialDeposit.toFixed(6)} SOL`);
 
@@ -243,9 +247,10 @@ class PumpFunSniper {
         let finalDeposit: number;
         let peakDeposit: number;
         
-        if (this.realTradingAdapter) {
+        if (this.adapter && this.adapter.getMode() === 'real') {
           // 🔴 РЕАЛЬНАЯ ТОРГОВЛЯ: Используем реальный баланс кошелька
-          finalDeposit = await this.realTradingAdapter.getBalance();
+          const realAdapter = this.adapter as RealTradingAdapter;
+          finalDeposit = await realAdapter.getBalance();
           peakDeposit = this.positionManager.getPeakDeposit(); // Peak из PositionManager (может быть выше реального)
           
           console.log('\n=== Final Statistics (REAL TRADING) ===');

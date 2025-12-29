@@ -8,7 +8,8 @@ import { priceFetcher } from './price-fetcher';
 import { TokenFilters } from './filters';
 import { earlyActivityTracker } from './early-activity-tracker';
 import { SafetyManager } from './safety-manager';
-import { RealTradingAdapter } from './real-trading-adapter';
+import { ITradingAdapter } from './trading/trading-adapter.interface';
+import { RealTradingAdapter } from './trading/real-trading-adapter';
 import { checkTokenReadiness } from './readiness-checker';
 import { BalanceManager } from './balance-manager';
 
@@ -190,38 +191,31 @@ export class PositionManager {
   private account: Account; // Single source of truth for balance
   private safetyManager: SafetyManager;
   private tradeIdCounter: number = 0;
-  private realTradingAdapter?: RealTradingAdapter; // Optional real trading adapter
+  private adapter: ITradingAdapter; // Trading adapter (real or paper)
   private balanceManager: BalanceManager; // Управление балансом и вывод излишка
 
-  constructor(connection: Connection, initialDeposit: number, realTradingAdapter?: RealTradingAdapter) {
+  constructor(connection: Connection, initialDeposit: number, adapter: ITradingAdapter) {
     this.connection = connection;
     this.filters = new TokenFilters(connection);
     this.account = new Account(initialDeposit);
     this.safetyManager = new SafetyManager(initialDeposit);
-    this.realTradingAdapter = realTradingAdapter;
+    this.adapter = adapter;
     this.balanceManager = new BalanceManager(connection);
     
-    // Устанавливаем кошелек в BalanceManager если есть realTradingAdapter
-    if (realTradingAdapter) {
-      const walletKeypair = realTradingAdapter.getWalletManager()?.getKeypair();
+    // Устанавливаем кошелек в BalanceManager если есть real trading adapter
+    if (adapter.getMode() === 'real') {
+      const realAdapter = adapter as RealTradingAdapter;
+      const walletKeypair = realAdapter.getWalletManager()?.getKeypair();
       if (walletKeypair) {
         this.balanceManager.setWallet(walletKeypair);
       }
     }
 
-    if (realTradingAdapter) {
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: '🔴 REAL TRADING MODE ENABLED IN POSITION MANAGER',
-      });
-    } else {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        message: '📄 Paper trading mode (simulation)',
-      });
-    }
+      message: `${adapter.getMode() === 'real' ? '🔴 REAL' : '📄 PAPER'} TRADING MODE ENABLED IN POSITION MANAGER`,
+    });
 
     // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем и исправляем баланс при старте
     this.fixBalanceDesync();
@@ -254,7 +248,7 @@ export class PositionManager {
     }, 60000); // Каждые 60 секунд
 
     // ✅ ПРОВЕРКА БАЛАНСА И ВЫВОД ИЗЛИШКА: Каждые 30 секунд (только для реальной торговли)
-    if (this.realTradingAdapter) {
+    if (this.adapter.getMode() === 'real') {
       setInterval(async () => {
         try {
           // Получаем реальный баланс кошелька
@@ -312,7 +306,7 @@ export class PositionManager {
    * Вызывается после каждой сделки для немедленной синхронизации
    */
   private async forceBalanceSync(): Promise<void> {
-    if (!this.realTradingAdapter) {
+    if (this.adapter.getMode() !== 'real') {
       return; // Только для реальной торговли
     }
 
@@ -701,6 +695,24 @@ export class PositionManager {
       
       positionSize = this.safetyManager.applySafetyCaps(positionSize);
       
+      // ⭐ ADAPTIVE SIZING: Оцениваем impact и корректируем размер позиции
+      const estimatedImpact = this.adapter.estimateImpact(positionSize);
+      if (estimatedImpact > config.maxExpectedImpact) {
+        // Impact слишком высокий - уменьшаем размер позиции
+        const maxSafeSize = this.findMaxSafePositionSize(entryPrice, entryFees);
+        if (maxSafeSize >= config.minPositionSize) {
+          positionSize = maxSafeSize;
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: candidate.mint,
+            message: `📊 Adaptive sizing: Reduced position size from ${positionSize.toFixed(6)} to ${maxSafeSize.toFixed(6)} SOL due to high impact (${(estimatedImpact * 100).toFixed(2)}% > ${(config.maxExpectedImpact * 100).toFixed(2)}%)`,
+          });
+        } else if (config.skipIfImpactTooHigh) {
+          throw new Error(`Impact too high (${(estimatedImpact * 100).toFixed(2)}%) and cannot reduce to safe size, skipping token`);
+        }
+      }
+      
       const MIN_POSITION_SIZE = config.minPositionSize;
       if (positionSize < MIN_POSITION_SIZE) {
         if (this.account.getFreeBalance() < MIN_POSITION_SIZE) {
@@ -742,12 +754,43 @@ export class PositionManager {
         throw new Error(`Failed to reserve ${totalReservedAmount} SOL after deducting positionSize`);
       }
 
-      const slippage = calculateSlippage();
-      const actualEntryPrice = entryPrice * (1 + slippage);
+      // ⭐ Выполняем покупку через адаптер (real или paper)
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+        message: `${this.adapter.getMode() === 'real' ? '🔴' : '📄'} Executing ${this.adapter.getMode().toUpperCase()} BUY: ${positionSize.toFixed(6)} SOL → ${candidate.mint}`,
+        });
+
+      // ✅ BUY с правильной retry логикой для 3012/3031 (только для real)
+        const buyResult = await this.executeBuyWithRetry(candidate.mint, positionSize);
+
+        if (!buyResult.success) {
+        // Rollback: Trade failed
+          this.positions.delete(candidate.mint);
+          this.account.reserve(-totalReservedAmount);
+          this.account.deductFromDeposit(-positionSize);
+
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: candidate.mint,
+          message: `❌ BUY FAILED: ${buyResult.error}`,
+          });
+
+          return null;
+        }
+
+      // Используем execution price из результата (с учетом реального slippage)
+      const executionPrice = buyResult.executionPrice || entryPrice;
+      const markPrice = buyResult.markPrice || entryPrice;
+      const actualEntryPrice = executionPrice; // Используем реальную цену исполнения
 
       const position: Position = {
         token: candidate.mint,
         entryPrice: actualEntryPrice,
+        executionPrice,
+        markPrice,
         investedSol: investedAmount,
         investedUsd: formatUsd(investedAmount),
         entryTime: Date.now(),
@@ -757,41 +800,13 @@ export class PositionManager {
         status: 'active',
         errorCount: 0,
         reservedAmount: totalReservedAmount,
+        estimatedImpact: buyResult.estimatedImpact,
       };
 
       this.positions.set(candidate.mint, position);
 
       const tradeId = this.generateTradeId();
       (position as any).tradeId = tradeId;
-
-      // 🔴 REAL TRADING: Execute real buy if enabled
-      if (this.realTradingAdapter) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          token: candidate.mint,
-          message: `🔴 Executing REAL BUY: ${positionSize.toFixed(6)} SOL → ${candidate.mint}`,
-        });
-
-        // ✅ BUY с правильной retry логикой для 3012/3031
-        const buyResult = await this.executeBuyWithRetry(candidate.mint, positionSize);
-
-        if (!buyResult.success) {
-          // Rollback: Real trade failed
-          this.positions.delete(candidate.mint);
-          this.account.reserve(-totalReservedAmount);
-          this.account.deductFromDeposit(-positionSize);
-
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'error',
-            token: candidate.mint,
-            message: `❌ REAL BUY FAILED: ${buyResult.error}`,
-          });
-
-          return null;
-        }
-
         (position as any).buySignature = buyResult.signature;
         (position as any).tokensReceived = buyResult.tokensReceived;
 
@@ -799,9 +814,8 @@ export class PositionManager {
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: candidate.mint,
-          message: `✅ REAL BUY SUCCESS: signature=${buyResult.signature}, received=${buyResult.tokensReceived} tokens`,
+        message: `✅ BUY SUCCESS: signature=${buyResult.signature}, received=${buyResult.tokensReceived} tokens, markPrice=${markPrice.toFixed(10)}, executionPrice=${executionPrice.toFixed(10)}, impact=${buyResult.estimatedImpact ? (buyResult.estimatedImpact * 100).toFixed(2) + '%' : 'N/A'}`,
         });
-      }
 
       tradeLogger.logTradeOpen({
         tradeId,
@@ -816,7 +830,7 @@ export class PositionManager {
         token: candidate.mint,
         investedSol: investedAmount,
         entryPrice: actualEntryPrice,
-        message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)}${this.realTradingAdapter ? ' 🔴 REAL' : ' 📄 SIM'}`,
+        message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)} ${this.adapter.getMode() === 'real' ? '🔴 REAL' : '📄 PAPER'}`,
       });
 
       return position;
@@ -844,13 +858,15 @@ export class PositionManager {
   private async executeBuyWithRetry(
     tokenMint: string,
     amountSol: number
-  ): Promise<{ success: boolean; signature?: string; error?: string; tokensReceived?: number }> {
-    if (!this.realTradingAdapter) {
-      return { success: true }; // Paper trading
+  ): Promise<{ success: boolean; signature?: string; error?: string; tokensReceived?: number; executionPrice?: number; markPrice?: number; estimatedImpact?: number }> {
+    // Для paper trading просто вызываем адаптер
+    if (this.adapter.getMode() === 'paper') {
+      return await this.adapter.executeBuy(tokenMint, amountSol);
     }
 
+    // Для real trading - retry логика
     // Попытка 1: сразу
-    const firstAttempt = await this.realTradingAdapter.executeBuy(tokenMint, amountSol);
+    const firstAttempt = await this.adapter.executeBuy(tokenMint, amountSol);
     
     if (firstAttempt.success) {
       return firstAttempt;
@@ -878,7 +894,7 @@ export class PositionManager {
     await sleep(retryDelay);
 
     // Попытка 2: одна повторная попытка
-    const secondAttempt = await this.realTradingAdapter.executeBuy(tokenMint, amountSol);
+    const secondAttempt = await this.adapter.executeBuy(tokenMint, amountSol);
     
     if (secondAttempt.success) {
       return secondAttempt;
@@ -902,6 +918,32 @@ export class PositionManager {
 
     // Другая ошибка на повторной попытке
     return secondAttempt;
+  }
+
+  /**
+   * Находит максимальный безопасный размер позиции с учетом impact
+   */
+  private findMaxSafePositionSize(entryPrice: number, entryFees: number): number {
+    // Бинарный поиск максимального размера с impact <= maxExpectedImpact
+    let min = config.minPositionSize;
+    let max = config.maxPositionSize;
+    let best = min;
+
+    for (let i = 0; i < 20; i++) {
+      const testSize = (min + max) / 2;
+      const impact = this.adapter.estimateImpact(testSize);
+      
+      if (impact <= config.maxExpectedImpact) {
+        best = testSize;
+        min = testSize;
+      } else {
+        max = testSize;
+      }
+      
+      if (max - min < 0.0001) break;
+    }
+
+    return Math.max(config.minPositionSize, Math.min(best, config.maxPositionSize));
   }
 
   /**
@@ -1030,32 +1072,39 @@ export class PositionManager {
     const tradeId = this.generateTradeId();
     (position as any).tradeId = tradeId;
 
-    // 🔴 REAL TRADING: Execute real buy if enabled
-    if (this.realTradingAdapter) {
+    // ⭐ Выполняем покупку через адаптер (real или paper)
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: candidate.mint,
-        message: `🔴 Executing REAL BUY: ${positionSize.toFixed(6)} SOL → ${candidate.mint}`,
+      message: `${this.adapter.getMode() === 'real' ? '🔴' : '📄'} Executing ${this.adapter.getMode().toUpperCase()} BUY: ${positionSize.toFixed(6)} SOL → ${candidate.mint}`,
       });
 
-      const buyResult = await this.realTradingAdapter.executeBuy(candidate.mint, positionSize);
+    const buyResult = await this.executeBuyWithRetry(candidate.mint, positionSize);
 
       if (!buyResult.success) {
-        // Rollback: Real trade failed
+      // Rollback: Trade failed
         this.positions.delete(candidate.mint);
-        this.account.reserve(-totalReservedAmount); // Release reserved funds
-        this.account.deductFromDeposit(-positionSize); // Add back deducted amount
+      this.account.reserve(-totalReservedAmount);
+      this.account.deductFromDeposit(-positionSize);
 
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'error',
           token: candidate.mint,
-          message: `❌ REAL BUY FAILED: ${buyResult.error}`,
-        });
+        message: `❌ BUY FAILED: ${buyResult.error}`,
+      });
 
-        throw new Error(`Real trade failed: ${buyResult.error}`);
-      }
+      throw new Error(`Trade failed: ${buyResult.error}`);
+    }
+
+    // Используем execution price из результата
+    const executionPrice = buyResult.executionPrice || actualEntryPrice;
+    const markPrice = buyResult.markPrice || entryPrice;
+    position.entryPrice = executionPrice;
+    position.executionPrice = executionPrice;
+    position.markPrice = markPrice;
+    position.estimatedImpact = buyResult.estimatedImpact;
 
       // Store transaction signature for tracking
       (position as any).buySignature = buyResult.signature;
@@ -1065,10 +1114,11 @@ export class PositionManager {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: candidate.mint,
-        message: `✅ REAL BUY SUCCESS: signature=${buyResult.signature}, received=${buyResult.tokensReceived} tokens`,
+      message: `✅ BUY SUCCESS: signature=${buyResult.signature}, received=${buyResult.tokensReceived} tokens, markPrice=${markPrice.toFixed(10)}, executionPrice=${executionPrice.toFixed(10)}, impact=${buyResult.estimatedImpact ? (buyResult.estimatedImpact * 100).toFixed(2) + '%' : 'N/A'}`,
       });
 
-      // 🔄 Принудительная синхронизация баланса после успешной покупки
+    // 🔄 Принудительная синхронизация баланса после успешной покупки (только для real)
+    if (this.adapter.getMode() === 'real') {
       await this.forceBalanceSync();
     }
 
@@ -1087,7 +1137,7 @@ export class PositionManager {
       token: candidate.mint,
       investedSol: investedAmount,
       entryPrice: actualEntryPrice,
-      message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)}${this.realTradingAdapter ? ' 🔴 REAL' : ' 📄 SIM'}`,
+      message: `Position opened: ${candidate.mint.substring(0, 8)}..., invested=${investedAmount.toFixed(6)} SOL, entry=${actualEntryPrice.toFixed(8)} ${this.adapter.getMode() === 'real' ? '🔴 REAL' : '📄 PAPER'}`,
     });
 
     // CRITICAL: Start monitoring immediately after position is created
@@ -1389,7 +1439,7 @@ export class PositionManager {
                 message: `✅ TAKE PROFIT EXIT: multiplier=${currentMultiplier.toFixed(3)}x >= ${config.takeProfitMultiplier}x, expectedProceeds=${expectedProceeds.toFixed(6)} SOL, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, netAfterFees=${netAfterFees.toFixed(6)} SOL`,
               });
               await this.closePosition(position, 'take_profit', currentPrice);
-              return;
+            return;
             }
           }
 
@@ -1410,7 +1460,7 @@ export class PositionManager {
                   message: `📉 TRAILING STOP EXIT (medium): multiplier=${currentMultiplier.toFixed(3)}x, drop=${(dropFromPeak * 100).toFixed(1)}%, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, netAfterFees=${netAfterFees.toFixed(6)} SOL`,
                 });
                 await this.closePosition(position, 'trailing_stop', currentPrice);
-                return;
+              return;
               }
             }
             
@@ -1422,7 +1472,7 @@ export class PositionManager {
               
               if (netAfterFees >= positionSize * 0.95) { // Допускаем 5% убыток для раннего выхода
                 await this.closePosition(position, 'late_exit', currentPrice);
-                return;
+              return;
               }
             }
           }
@@ -1443,7 +1493,7 @@ export class PositionManager {
                   message: `📉 TRAILING STOP EXIT (large): multiplier=${currentMultiplier.toFixed(3)}x, drop=${(dropFromPeak * 100).toFixed(1)}%, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, netAfterFees=${netAfterFees.toFixed(6)} SOL`,
                 });
                 await this.closePosition(position, 'trailing_stop', currentPrice);
-                return;
+              return;
               }
             }
             
@@ -1455,7 +1505,7 @@ export class PositionManager {
               
               if (netAfterFees >= positionSize * 0.95) {
                 await this.closePosition(position, 'late_exit', currentPrice);
-                return;
+              return;
               }
             }
           }
@@ -1476,7 +1526,7 @@ export class PositionManager {
                   message: `📉 TRAILING STOP EXIT (huge): multiplier=${currentMultiplier.toFixed(3)}x, drop=${(dropFromPeak * 100).toFixed(1)}%, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, netAfterFees=${netAfterFees.toFixed(6)} SOL`,
                 });
                 await this.closePosition(position, 'trailing_stop', currentPrice);
-                return;
+              return;
               }
             }
             
@@ -1488,7 +1538,7 @@ export class PositionManager {
               
               if (netAfterFees >= positionSize * 0.95) {
                 await this.closePosition(position, 'late_exit', currentPrice);
-                return;
+              return;
               }
             }
           }
@@ -1527,6 +1577,7 @@ export class PositionManager {
 
   /**
    * Закрывает позицию
+   * Поддерживает write-off для позиций с низкими ожидаемыми proceeds
    */
   private async closePosition(position: Position, reason: string, exitPrice: number): Promise<void> {
     if (position.status !== 'active') {
@@ -1536,26 +1587,69 @@ export class PositionManager {
     position.status = 'closing';
 
     try {
-      // 🔴 REAL TRADING: Execute real sell if enabled
-      if (this.realTradingAdapter) {
+      // ⭐ WRITE-OFF CHECK: Проверяем, стоит ли продавать
+      const exitFeeCheck = config.priorityFee + config.signatureFee;
+      const positionInvestedAmount = position.investedSol;
+      const currentMultiplier = exitPrice / position.entryPrice;
+      const expectedProceeds = positionInvestedAmount * currentMultiplier;
+      
+      // Оцениваем impact для продажи
+      const sellSizeSol = expectedProceeds;
+      const estimatedImpact = this.adapter.estimateImpact(sellSizeSol);
+      const realProceedsAfterSlippage = expectedProceeds * (1 - estimatedImpact);
+      const netAfterFees = realProceedsAfterSlippage - exitFeeCheck;
+      const proceedsPctOfInvested = netAfterFees / positionInvestedAmount;
+
+      // Write-off если ожидаемые proceeds < threshold
+      if (proceedsPctOfInvested < config.writeOffThresholdPct) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'warning',
+          token: position.token,
+          message: `💀 WRITE-OFF: ${position.token} | expectedProceeds=${expectedProceeds.toFixed(6)} SOL, afterImpact=${realProceedsAfterSlippage.toFixed(6)} SOL, afterFees=${netAfterFees.toFixed(6)} SOL (${(proceedsPctOfInvested * 100).toFixed(1)}% of invested), threshold=${(config.writeOffThresholdPct * 100).toFixed(1)}%. Abandoning position without sell.`,
+        });
+
+        // Write-off: не продаем, просто освобождаем резервы
+        const reservedAmount = position.reservedAmount || position.investedSol;
+        this.account.release(reservedAmount, 0); // 0 proceeds = полная потеря
+
+        // Удаляем из активных
+        this.positions.delete(position.token);
+        position.status = 'abandoned';
+
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'sell',
+          token: position.token,
+          exitPrice: exitPrice,
+          multiplier: currentMultiplier,
+          profitSol: -position.investedSol,
+          reason: 'write_off_low_proceeds',
+          message: `💀 Position written off: ${position.token.substring(0, 8)}..., loss=${position.investedSol.toFixed(6)} SOL, reason=write_off_low_proceeds`,
+        });
+
+        return; // Не продаем, просто списываем
+      }
+
+      // Нормальное закрытие: выполняем продажу
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: position.token,
-          message: `🔴 Executing REAL SELL: ${position.token} → SOL (expected ~${(position.investedSol * (exitPrice / position.entryPrice)).toFixed(6)} SOL)`,
-        });
+        message: `${this.adapter.getMode() === 'real' ? '🔴' : '📄'} Executing ${this.adapter.getMode().toUpperCase()} SELL: ${position.token} → SOL (expected ~${expectedProceeds.toFixed(6)} SOL, estimatedImpact=${(estimatedImpact * 100).toFixed(2)}%)`,
+      });
 
-        const sellResult = await this.realTradingAdapter.executeSell(
-          position.token,
-          position.investedSol * (exitPrice / position.entryPrice) // Expected proceeds
-        );
+      // Получаем количество токенов для продажи
+      const tokensToSell = (position as any).tokensReceived || (positionInvestedAmount / position.entryPrice);
+      
+      const sellResult = await this.adapter.executeSell(position.token, tokensToSell);
 
         if (!sellResult.success) {
           logger.log({
             timestamp: getCurrentTimestamp(),
             type: 'error',
             token: position.token,
-            message: `❌ REAL SELL FAILED: ${sellResult.error}, continuing with accounting...`,
+          message: `❌ SELL FAILED: ${sellResult.error}, continuing with accounting...`,
           });
           // НЕ throw - позиция уже закрыта в памяти, продолжаем с учетом
         } else {
@@ -1567,23 +1661,23 @@ export class PositionManager {
             timestamp: getCurrentTimestamp(),
             type: 'info',
             token: position.token,
-            message: `✅ REAL SELL SUCCESS: signature=${sellResult.signature}, received=${sellResult.solReceived?.toFixed(6)} SOL`,
+          message: `✅ SELL SUCCESS: signature=${sellResult.signature}, received=${sellResult.solReceived?.toFixed(6)} SOL, markPrice=${sellResult.markPrice?.toFixed(10) || 'N/A'}, executionPrice=${sellResult.executionPrice?.toFixed(10) || 'N/A'}, impact=${sellResult.estimatedImpact ? (sellResult.estimatedImpact * 100).toFixed(2) + '%' : 'N/A'}`,
           });
 
-          // 🔄 Принудительная синхронизация баланса после успешной продажи
+        // 🔄 Принудительная синхронизация баланса после успешной продажи (только для real)
+        if (this.adapter.getMode() === 'real') {
           await this.forceBalanceSync();
         }
       }
 
-      // Accounting (paper or real)
-      const exitFee = config.priorityFee + config.signatureFee;
+      // Accounting (paper or real) - используем exitFeeCheck объявленный выше
       const entryFee = config.priorityFee + config.signatureFee;
       const investedAmount = position.investedSol; // Amount actually invested (after entry fees)
       const reservedAmount = position.reservedAmount || investedAmount; // Amount that was locked
       
       // ✅ FIX: Рассчитываем реальные затраты на позицию (без завышенного slippage)
-      // positionSize = investedAmount + entryFees (это реально потрачено при покупке)
-      const positionSize = investedAmount + entryFee;
+      // positionSize = positionInvestedAmount + entryFees (это реально потрачено при покупке)
+      const positionSize = positionInvestedAmount + entryFee;
       
       // 🔴 FIX: Используем реальную цену из SELL транзакции вместо bonding curve цены
       // Это исправляет ошибки bonding curve, которые дают неправильные цены
@@ -1591,13 +1685,13 @@ export class PositionManager {
       let actualProceeds: number | null = null;
       
       // Если есть реальная SELL транзакция, используем solReceived для расчета прибыли
-      if (this.realTradingAdapter && (position as any).solReceived !== undefined) {
+      if ((position as any).solReceived !== undefined) {
         const solReceived = (position as any).solReceived as number;
         if (solReceived > 0 && isFinite(solReceived)) {
           // Используем реальную сумму полученную из транзакции
           actualProceeds = solReceived;
           // Рассчитываем реальную цену выхода на основе полученной суммы
-          actualExitPrice = (solReceived + exitFee) / investedAmount * position.entryPrice;
+          actualExitPrice = (solReceived + exitFeeCheck) / positionInvestedAmount * position.entryPrice;
           
           logger.log({
             timestamp: getCurrentTimestamp(),
@@ -1652,15 +1746,15 @@ export class PositionManager {
         // Пересчитываем multiplier с безопасной ценой
         const safeMultiplier = safeExitPrice / position.entryPrice;
         
-        // Защита от некорректных значений investedAmount
-        let safeInvested = investedAmount;
-        if (investedAmount > 1.0 || investedAmount < 0 || !isFinite(investedAmount)) {
-          console.error(`⚠️ Invalid investedAmount: ${investedAmount}, using fallback`);
+        // Защита от некорректных значений positionInvestedAmount
+        let safeInvested = positionInvestedAmount;
+        if (positionInvestedAmount > 1.0 || positionInvestedAmount < 0 || !isFinite(positionInvestedAmount)) {
+          console.error(`⚠️ Invalid positionInvestedAmount: ${positionInvestedAmount}, using fallback`);
           safeInvested = 0.003;
         }
         
         // ISSUE #1 FIX: Calculate grossReturn first, then deduct exitFees
-        // grossReturn = investedAmount * multiplier
+        // grossReturn = positionInvestedAmount * multiplier
         let grossReturn = safeInvested * safeMultiplier;
         
         // Защита от нереально больших grossReturn
@@ -1681,7 +1775,7 @@ export class PositionManager {
         }
         
         // Deduct exit fees from gross return
-        proceeds = grossReturn - exitFee;
+        proceeds = grossReturn - exitFeeCheck;
       }
       
       // Ensure proceeds >= 0
@@ -1694,7 +1788,7 @@ export class PositionManager {
       this.account.release(reservedAmount, proceeds);
       
       // ✅ Проверка баланса и вывод излишка (только для реальной торговли)
-      if (this.realTradingAdapter) {
+      if (this.adapter.getMode() === 'real') {
         // Неблокирующая проверка баланса после закрытия позиции
         void Promise.resolve().then(async () => {
           try {
@@ -1724,7 +1818,7 @@ export class PositionManager {
 
       // Пересчитываем multiplier для логирования (используем реальную цену или безопасную)
       const finalMultiplier = actualProceeds !== null 
-        ? (actualProceeds + exitFee) / investedAmount
+        ? (actualProceeds + exitFeeCheck) / positionInvestedAmount
         : safeExitPrice / position.entryPrice;
       
       // Non-blocking trade logging
@@ -1874,7 +1968,7 @@ export class PositionManager {
    * В реальной торговле возвращает баланс кошелька, в симуляции - баланс из Account
    */
   async getCurrentDeposit(): Promise<number> {
-    if (this.realTradingAdapter) {
+    if (this.adapter.getMode() === 'real') {
       // 🔴 РЕАЛЬНАЯ ТОРГОВЛЯ: Используем реальный баланс кошелька
       try {
         return await this.balanceManager.getCurrentBalance();

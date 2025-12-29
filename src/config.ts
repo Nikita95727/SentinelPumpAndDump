@@ -111,9 +111,28 @@ export const config: Config = {
   maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.004'), // Максимальный размер позиции: 0.004 SOL (равен минимальному)
   personalWalletAddress: process.env.PERSONAL_WALLET_ADDRESS || '', // Адрес личного кошелька для вывода излишка
   maxReservePercent: parseFloat(process.env.MAX_RESERVE_PERCENT || '1.0'), // Max % of reserves per trade (if data available)
-  // Real trading configuration
-  realTradingEnabled: process.env.REAL_TRADING_ENABLED === 'true', // 🔴 IMPORTANT: Must be explicitly enabled
+  // Trading mode configuration
+  tradingMode: (process.env.TRADING_MODE || 'paper') as 'real' | 'paper', // По умолчанию paper mode
+  realTradingEnabled: process.env.REAL_TRADING_ENABLED === 'true', // Legacy, для обратной совместимости (не используется в логике)
   walletMnemonic: process.env.WALLET_MNEMONIC || '', // Seed-фраза для кошелька (опционально, для реальной торговли)
+  
+  // Sell strategy
+  sellStrategy: (process.env.SELL_STRATEGY || 'single') as 'single' | 'partial_50_50',
+  partialSellDelayMs: parseInt(process.env.PARTIAL_SELL_DELAY_MS || '15000', 10),
+  
+  // Impact/Slippage model (для paper и оценки в real)
+  paperImpactThresholdSol: parseFloat(process.env.PAPER_IMPACT_THRESHOLD_SOL || '0.0037'),
+  paperImpactPower: parseFloat(process.env.PAPER_IMPACT_POWER || '2.2'),
+  paperImpactBase: parseFloat(process.env.PAPER_IMPACT_BASE || '0.05'),
+  paperImpactK: parseFloat(process.env.PAPER_IMPACT_K || '0.30'),
+  
+  // Risk-aware sizing
+  maxExpectedImpact: parseFloat(process.env.MAX_EXPECTED_IMPACT || '0.25'), // Максимальный допустимый impact (25%)
+  skipIfImpactTooHigh: process.env.SKIP_IF_IMPACT_TOO_HIGH === 'true',
+  
+  // Write-off threshold
+  writeOffThresholdPct: parseFloat(process.env.WRITE_OFF_THRESHOLD_PCT || '0.3'), // Если ожидаемые proceeds < 30% от invested, write-off
+  
   // Network configuration
   testnetMode: isTestnetMode(),
 };

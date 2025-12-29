@@ -9,6 +9,8 @@ export interface Position {
   token: string;
   batchId?: number; // Опционально для обратной совместимости
   entryPrice: number;
+  executionPrice?: number; // Реальная цена исполнения (с учетом slippage)
+  markPrice?: number; // Mark price при входе
   investedSol: number; // Amount actually invested (after entry fees)
   investedUsd?: number; // Опционально
   reservedAmount?: number; // Amount reserved/locked for this position (for accounting)
@@ -21,7 +23,8 @@ export interface Position {
   stopLossTarget?: number; // для трейлинг-стопа (опционально)
   exitTimer?: number; // timestamp когда нужно закрыть (90 сек) (опционально)
   slippage?: number; // использованный slippage (опционально)
-  status: 'active' | 'closing' | 'closed';
+  estimatedImpact?: number; // Оценка impact при входе
+  status: 'active' | 'closing' | 'closed' | 'abandoned'; // abandoned = write-off
   errorCount?: number;
   // Price history for momentum calculation
   priceHistory?: Array<{ price: number; timestamp: number }>; // Последние 2-3 цены для расчета импульса
@@ -128,9 +131,28 @@ export interface Config {
   maxPositionSize: number;
   personalWalletAddress: string;
   maxReservePercent: number;
-  // Real trading configuration
-  realTradingEnabled: boolean;
+  // Trading mode configuration
+  tradingMode: 'real' | 'paper';
+  realTradingEnabled: boolean; // Legacy
   walletMnemonic: string;
+  
+  // Sell strategy
+  sellStrategy: 'single' | 'partial_50_50';
+  partialSellDelayMs: number;
+  
+  // Impact/Slippage model
+  paperImpactThresholdSol: number;
+  paperImpactPower: number;
+  paperImpactBase: number;
+  paperImpactK: number;
+  
+  // Risk-aware sizing
+  maxExpectedImpact: number;
+  skipIfImpactTooHigh: boolean;
+  
+  // Write-off threshold
+  writeOffThresholdPct: number;
+  
   // Network configuration
   testnetMode: boolean;
 }
