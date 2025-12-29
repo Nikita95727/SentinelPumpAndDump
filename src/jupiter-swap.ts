@@ -197,7 +197,7 @@ export class JupiterSwap {
       });
 
       // Получить quote
-      const quote = await this.getQuote(tokenMint, SOL_MINT, Math.floor(amountTokens), 500); // 5% slippage для sell
+      const quote = await this.getQuote(tokenMint, SOL_MINT, Math.floor(amountTokens), 5000); // 50% slippage для sell (увеличено для токенов с низкой ликвидностью)
 
       const outAmount = parseInt(quote.outAmount);
       const outSol = outAmount / 1e9;

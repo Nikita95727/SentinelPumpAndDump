@@ -474,7 +474,7 @@ export class PumpFunSwap {
       const mintPubkey = new PublicKey(tokenMint);
       const userPubkey = wallet.publicKey;
       const sellTokenAmount = new BN(Math.floor(amountTokens));
-      const slippage = 20; // 20% slippage
+      const slippage = 50; // 50% slippage - увеличен для токенов с низкой ликвидностью
 
       logger.log({
         timestamp: getCurrentTimestamp(),
