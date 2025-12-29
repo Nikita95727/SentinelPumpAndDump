@@ -184,7 +184,7 @@ export class PumpFunSwap {
       }
 
       // Получаем инструкции для покупки
-      const buyInstructions = await this.offlineSdk.buyInstructions({
+      let buyInstructions = await this.offlineSdk.buyInstructions({
         global,
         bondingCurveAccountInfo,
         bondingCurve,
@@ -195,6 +195,32 @@ export class PumpFunSwap {
         solAmount: solAmountBN,
         slippage,
         tokenProgram: TOKEN_PROGRAM_ID,
+      });
+
+      // 🔧 FIX: Исправляем инструкцию ATA Create - убираем data, если она есть
+      // SDK добавляет data: [1] в ATA Create инструкцию, но правильная инструкция не должна иметь data
+      // Это вызывает IncorrectProgramId в симуляции, когда ATA Program вызывает TOKEN_PROGRAM
+      buyInstructions = buyInstructions.map((ix) => {
+        const programId = ix.programId.toString();
+        
+        // Если это ATA Create инструкция и у неё есть data, убираем её
+        if (programId === ASSOCIATED_TOKEN_PROGRAM_ID.toString() && ix.data.length > 0) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'warning',
+            token: tokenMint,
+            message: `🔧 FIX: Removing data from ATA Create instruction (SDK added ${ix.data.length} bytes, should be empty)`,
+          });
+          
+          // Создаем новую инструкцию без data
+          return new TransactionInstruction({
+            programId: ix.programId,
+            keys: ix.keys,
+            data: Buffer.alloc(0), // Пустой data
+          });
+        }
+        
+        return ix;
       });
 
       // 🔍 ДИАГНОСТИКА: Логируем инструкции для отладки IncorrectProgramId
@@ -212,7 +238,7 @@ export class PumpFunSwap {
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: tokenMint,
-          message: `  Instruction ${idx}: ProgramId=${programId.substring(0, 20)}... | Keys: ${keys.substring(0, 100)}...`,
+          message: `  Instruction ${idx}: ProgramId=${programId} | Data length: ${ix.data.length} | Keys: ${keys.substring(0, 100)}...`,
         });
       });
 
