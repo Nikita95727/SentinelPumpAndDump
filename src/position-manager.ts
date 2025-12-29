@@ -16,7 +16,7 @@ import { BalanceManager } from './balance-manager';
 // Используем config.maxOpenPositions вместо хардкода
 const MAX_HOLD_TIME = 90_000; // 90 секунд
 const TRAILING_STOP_PCT = 0.25;
-const CHECK_INTERVAL = 2000; // Проверка каждые 2 секунды (даем импульсу развиться, но не пропускаем падение)
+const CHECK_INTERVAL = 1000; // Проверка каждые 1 секунду (быстрее реагируем на волатильность)
 const PREDICTION_CHECK_INTERVAL = 200; // Проверка прогнозируемой цены каждые 200ms (быстрое обнаружение импульса)
 const MAX_PRICE_HISTORY = 3; // Храним последние 3 цены для расчета импульса
 const PRICE_SILENCE_THRESHOLD = 5_000; // ms — максимум без реальной цены
@@ -227,7 +227,7 @@ export class PositionManager {
     // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем и исправляем баланс при старте
     this.fixBalanceDesync();
 
-    // Централизованное обновление цен каждые 2 секунды
+    // Централизованное обновление цен каждые 1 секунду (уменьшено для лучшей реакции на волатильность)
     setInterval(() => this.updateAllPrices(), CHECK_INTERVAL);
     
     // Safety manager no longer needs balance updates - BalanceManager handles excess withdrawal
@@ -1170,7 +1170,7 @@ export class PositionManager {
           }
         }
 
-        // ОСНОВНАЯ ПРОВЕРКА: Реальная цена (каждые 2 секунды)
+        // ОСНОВНАЯ ПРОВЕРКА: Реальная цена (каждые 1 секунду)
         // Увеличенный интервал дает импульсу развиться, но не пропускаем падение благодаря trailing stop
         if (shouldCheckRealPrice) {
           const currentMultiplier = currentPrice / position.entryPrice;
