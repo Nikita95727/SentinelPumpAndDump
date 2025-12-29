@@ -296,7 +296,7 @@ export class PositionManager {
             });
           });
         }
-      }, 30000); // Каждые 30 секунд
+      }, 10000); // Каждые 10 секунд (уменьшено для более быстрой синхронизации)
     }
   }
 
@@ -306,6 +306,38 @@ export class PositionManager {
   private generateTradeId(): string {
     this.tradeIdCounter++;
     return `trade-${Date.now()}-${this.tradeIdCounter}`;
+  }
+
+  /**
+   * Принудительная синхронизация баланса с реальным кошельком
+   * Вызывается после каждой сделки для немедленной синхронизации
+   */
+  private async forceBalanceSync(): Promise<void> {
+    if (!this.realTradingAdapter) {
+      return; // Только для реальной торговли
+    }
+
+    try {
+      const realBalance = await this.balanceManager.getCurrentBalance();
+      const accountBalance = this.account.getTotalBalance();
+      const balanceDiff = Math.abs(realBalance - accountBalance);
+
+      if (balanceDiff > 0.0001) { // Синхронизируем даже при малых расхождениях
+        this.account.syncTotalBalance(realBalance);
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `🔄 Force balance sync: Account=${accountBalance.toFixed(6)} SOL → ${realBalance.toFixed(6)} SOL (diff=${balanceDiff.toFixed(6)} SOL)`,
+        });
+      }
+    } catch (error) {
+      // Неблокирующее логирование ошибки
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        message: `❌ Force balance sync error: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
   }
 
   /**
@@ -970,6 +1002,9 @@ export class PositionManager {
         token: candidate.mint,
         message: `✅ REAL BUY SUCCESS: signature=${buyResult.signature}, received=${buyResult.tokensReceived} tokens`,
       });
+
+      // 🔄 Принудительная синхронизация баланса после успешной покупки
+      await this.forceBalanceSync();
     }
 
     // Non-blocking trade logging
@@ -1279,6 +1314,9 @@ export class PositionManager {
             token: position.token,
             message: `✅ REAL SELL SUCCESS: signature=${sellResult.signature}, received=${sellResult.solReceived?.toFixed(6)} SOL`,
           });
+
+          // 🔄 Принудительная синхронизация баланса после успешной продажи
+          await this.forceBalanceSync();
         }
       }
 
