@@ -1,4 +1,7 @@
-import { Connection, PublicKey } from '@solana/web3.js';
+/**
+ * Утилиты для Bybit Trading Bot
+ */
+
 import { config } from './config';
 
 export function sleep(ms: number): Promise<void> {
@@ -14,51 +17,21 @@ export function getCurrentTimestamp(): string {
 }
 
 export function calculateSlippage(): number {
-  // Случайный slippage от 1% до 3%
+  // Случайный slippage от min до max
   return config.slippageMin + Math.random() * (config.slippageMax - config.slippageMin);
 }
 
-export function calculateExitPrice(entryPrice: number, multiplier: number, slippage: number): number {
-  const targetPrice = entryPrice * multiplier;
-  return targetPrice * (1 - slippage);
-}
-
-export function calculateProfit(invested: number, entryPrice: number, exitPrice: number, exitFee: number): number {
+export function calculateProfit(invested: number, entryPrice: number, exitPrice: number, exitFee: number = 0): number {
   const multiplier = exitPrice / entryPrice;
   const grossProfit = invested * multiplier;
   return grossProfit - exitFee;
 }
 
-export function isValidSolanaAddress(address: string): boolean {
-  try {
-    new PublicKey(address);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function formatSol(lamports: number): number {
-  return lamports / 1e9;
-}
-
-export function solToLamports(sol: number): number {
-  return Math.floor(sol * 1e9);
-}
-
-export function formatUsd(sol: number): number {
-  return sol * config.solUsdRate;
-}
-
-export async function getConnection(): Promise<Connection> {
-  const connection = new Connection(config.heliusHttpUrl, {
-    commitment: 'confirmed',
-  });
-  return connection;
+export function formatUsd(amount: number): number {
+  return amount; // Уже в USD для Bybit
 }
 
 export function calculateDrawdown(current: number, peak: number): number {
-  if (peak === 0) return 0;
+  if (peak <= 0) return 0;
   return ((peak - current) / peak) * 100;
 }
-

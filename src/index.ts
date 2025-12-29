@@ -1,206 +1,142 @@
-import { getConnection } from './utils';
-import { TokenScanner } from './scanner';
-import { PositionManager } from './position-manager';
+/**
+ * CEX Scalper - Bybit Spot Trading Bot
+ * Машинный скальпер для высоколиквидных пар на Bybit Spot
+ */
+
+import { BybitClient } from './bybit-client';
+import { MarketScanner, TradingPair } from './market-scanner';
+import { PairWatcher, MomentumSignal } from './pair-watcher';
+import { CEXPositionManager } from './cex-position-manager';
 import { logger } from './logger';
-import { tradeLogger } from './trade-logger';
 import { getCurrentTimestamp, sleep, calculateDrawdown } from './utils';
 import { config } from './config';
-import { TokenCandidate } from './types';
-import { RealTradingAdapter } from './real-trading-adapter';
-import { GemTracker } from './gem-tracker';
-import { TokenFilters } from './filters';
 
-class PumpFunSniper {
-  private scanner: TokenScanner | null = null;
-  private positionManager: PositionManager | null = null;
-  private connection: Awaited<ReturnType<typeof getConnection>> | null = null;
+class CEXScalper {
+  private bybitClient: BybitClient | null = null;
+  private marketScanner: MarketScanner | null = null;
+  private pairWatchers: Map<string, PairWatcher> = new Map();
+  private positionManager: CEXPositionManager | null = null;
   private statsInterval: NodeJS.Timeout | null = null;
   private isShuttingDown = false;
-  private lastBalanceLogTime: number = 0;
-  private realTradingAdapter?: RealTradingAdapter;
-  private initialDeposit: number = 0; // Сохраняем реальный начальный баланс
-  private gemTracker: GemTracker | null = null; // ⭐ Система выявления самородков
-  private filters: TokenFilters | null = null; // Для honeypot check
+  private initialDeposit: number = 0;
 
   async start(): Promise<void> {
-    console.log('🚀 Starting Pump.fun Sniper Bot (Optimized)...');
-    
-    // Показываем информацию о режиме сети
-    const { getNetworkInfo } = await import('./config');
-    const networkInfo = getNetworkInfo();
-    console.log(`\n🌐 Network Mode: ${networkInfo.mode.toUpperCase()}`);
-    console.log(`   Program ID: ${networkInfo.programId}`);
-    console.log(`   WS URL: ${networkInfo.wsUrl.substring(0, 60)}...`);
-    console.log(`   HTTP URL: ${networkInfo.httpUrl.substring(0, 60)}...\n`);
+    console.log('🚀 Starting CEX Scalper (Bybit Spot)...');
+    console.log(`📊 Strategy: High liquidity pairs → Momentum detection → Scalp 0.5-2% → Exit on fade`);
 
     try {
-      // Инициализируем соединение
-      this.connection = await getConnection();
-      console.log('✅ Connected to Solana RPC');
+      // Инициализируем Bybit клиент
+      this.bybitClient = new BybitClient();
+      console.log('✅ Bybit client initialized');
 
-      let initialDeposit = config.initialDeposit;
-
-      // 🔴 REAL TRADING MODE
+      // Получаем начальный баланс
       if (config.realTradingEnabled) {
-        console.log('\n🔴 ===============================================');
-        console.log('🔴 REAL TRADING MODE ENABLED');
-        console.log('🔴 ===============================================\n');
-
-        if (!config.walletMnemonic) {
-          throw new Error('❌ WALLET_MNEMONIC not set in .env, but REAL_TRADING_ENABLED=true');
-        }
-
-        this.realTradingAdapter = new RealTradingAdapter(this.connection);
-        const success = await this.realTradingAdapter.initialize(config.walletMnemonic);
-
-        if (!success) {
-          throw new Error('❌ Failed to initialize real trading wallet');
-        }
-
-        // Получаем реальный баланс из кошелька
-        initialDeposit = await this.realTradingAdapter.getBalance();
-        this.initialDeposit = initialDeposit; // Сохраняем для финальной статистики
-        console.log(`✅ Real wallet balance: ${initialDeposit.toFixed(6)} SOL ($${(initialDeposit * config.solUsdRate).toFixed(2)})`);
-
-        // Health check
-        const health = await this.realTradingAdapter.healthCheck();
-        if (!health.healthy) {
-          console.warn(`⚠️ Wallet health warning: ${health.error}`);
-        }
+        this.initialDeposit = await this.bybitClient.getBalance('USDT');
+        console.log(`✅ Real trading enabled, balance: ${this.initialDeposit.toFixed(2)} USDT`);
       } else {
-        console.log('📄 Paper Trading Mode (Simulation)');
-        console.log(`Initial Deposit: ${config.initialDeposit} SOL ($${(config.initialDeposit * config.solUsdRate).toFixed(2)})`);
-        initialDeposit = config.initialDeposit;
-        this.initialDeposit = initialDeposit; // Сохраняем для финальной статистики
+        this.initialDeposit = config.initialDeposit;
+        console.log(`📄 Paper trading mode, initial deposit: ${this.initialDeposit.toFixed(2)} USD`);
       }
 
-      // Инициализируем PositionManager с optional real trading adapter
-      this.positionManager = new PositionManager(
-        this.connection,
-        initialDeposit,
-        this.realTradingAdapter
-      );
-      console.log(`✅ Position Manager initialized with ${initialDeposit.toFixed(6)} SOL`);
+      // Инициализируем Position Manager
+      this.positionManager = new CEXPositionManager(this.bybitClient, this.initialDeposit);
+      this.positionManager.startMonitoring();
+      console.log('✅ Position Manager initialized');
 
-      // ⭐ Инициализируем фильтры для honeypot check
-      this.filters = new TokenFilters(this.connection);
-      
-      // ⭐ Инициализируем Gem Tracker (система выявления самородков)
-      this.gemTracker = new GemTracker(this.connection, this.filters);
-      this.gemTracker.setOnGemDetected(async (candidate: TokenCandidate, observation) => {
-        // Когда самородок обнаружен - открываем позицию
-        if (this.positionManager && !this.isShuttingDown) {
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            token: candidate.mint,
-            message: `💎 GEM TRIGGER: Opening position for detected gem ${candidate.mint.substring(0, 8)}... | multiplier=${(observation.currentPrice / observation.initialPrice).toFixed(3)}x, gemScore=${observation.gemScore.toFixed(3)}`,
-          });
-          await this.positionManager.tryOpenPosition(candidate);
-        }
+      // Инициализируем Market Scanner
+      this.marketScanner = new MarketScanner(this.bybitClient);
+      this.marketScanner.setOnPairsDetected(async (pairs: TradingPair[]) => {
+        await this.handlePairsDetected(pairs);
       });
-      console.log('✅ Gem Tracker initialized (GEM DETECTION STRATEGY enabled)');
+      await this.marketScanner.start(5); // Сканирование каждые 5 минут
+      console.log('✅ Market Scanner started');
 
-      // Инициализируем сканер
-      this.scanner = new TokenScanner(async (candidate: TokenCandidate) => {
-        await this.handleNewToken(candidate);
-      });
-
-      await this.scanner.start();
-      console.log('✅ Token scanner started');
-
-      // Периодическая статистика (каждые 10 секунд)
+      // Периодическая статистика (каждые 60 секунд)
       this.statsInterval = setInterval(() => {
         if (this.positionManager && !this.isShuttingDown) {
           const stats = this.positionManager.getStats();
-          if (stats.activePositions > 0) {
-            console.log('\n📊 === ACTIVE POSITIONS ===');
+          const deposit = this.positionManager.getCurrentDepositSync();
+          const peak = this.positionManager.getPeakDeposit();
+          const riskState = this.positionManager.getRiskManager().getRiskState();
+          
+          console.log('\n📊 === TRADING STATS ===');
+          console.log(`   Active Positions: ${stats.activePositions}/${config.maxOpenPositions}`);
+          console.log(`   Watched Pairs: ${this.pairWatchers.size}`);
+          console.log(`   Deposit: ${deposit.toFixed(2)} USD (${((deposit - this.initialDeposit) / this.initialDeposit * 100).toFixed(2)}%)`);
+          console.log(`   Peak: ${peak.toFixed(2)} USD`);
+          console.log(`   Risk: CanTrade=${riskState.canTrade}, DailyTrades=${riskState.dailyTradesCount}, ConsecutiveLosses=${riskState.consecutiveLosses}, Drawdown=${riskState.currentDrawdown.toFixed(2)}%`);
+          if (stats.positions.length > 0) {
+            console.log(`   Positions:`);
             stats.positions.forEach(p => {
-              console.log(`   ${p.token}: ${p.multiplier} (${p.age})`);
+              console.log(`     ${p.symbol}: ${p.multiplier}x (${p.age})`);
             });
-            console.log(`   Available slots: ${stats.availableSlots}/${config.maxOpenPositions}`);
-            // Используем синхронную версию для периодической статистики (не блокируем)
-            const deposit = this.positionManager.getCurrentDepositSync();
-            console.log(`   Deposit: ${deposit.toFixed(6)} SOL`);
-            console.log(`   Peak: ${this.positionManager.getPeakDeposit().toFixed(6)} SOL\n`);
           }
+          console.log('');
         }
-      }, 10_000);
+      }, 60000);
 
-      console.log('✅ Pump.fun Sniper Bot is running...');
+      console.log('✅ CEX Scalper is running...');
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: 'Sniper bot started (optimized version)',
+        message: 'CEX Scalper started',
       });
 
       // Обработка сигналов для graceful shutdown
       this.setupGracefulShutdown();
     } catch (error) {
-      console.error('❌ Failed to start sniper:', error);
+      console.error('❌ Failed to start bot:', error);
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'error',
-        message: `Failed to start sniper: ${error instanceof Error ? error.message : String(error)}`,
+        message: `Failed to start bot: ${error instanceof Error ? error.message : String(error)}`,
       });
       process.exit(1);
     }
   }
 
-  private async handleNewToken(candidate: TokenCandidate): Promise<void> {
-    if (!this.positionManager || !this.gemTracker || !this.filters || this.isShuttingDown) return;
+  /**
+   * Обрабатывает найденные пары от Market Scanner
+   */
+  private async handlePairsDetected(pairs: TradingPair[]): Promise<void> {
+    if (!this.positionManager || this.isShuttingDown) return;
 
-    // Проверяем баланс перед обработкой токена
-    // Если баланса нет, не обрабатываем токен (не засоряем очередь)
-    if (!this.positionManager.hasEnoughBalanceForTrading()) {
-      // Логируем периодически для диагностики
-      const now = Date.now();
-      if (!this.lastBalanceLogTime || (now - this.lastBalanceLogTime) > 60000) { // Раз в минуту
-        // Получаем детальную информацию о балансе для диагностики (используем синхронную версию)
-        const deposit = this.positionManager.getCurrentDepositSync();
-        const required = 0.004692; // Минимальный требуемый резерв
-        console.log(`[${new Date().toLocaleTimeString()}] INFO | Insufficient balance for trading. Current deposit: ${deposit.toFixed(6)} SOL, Required: ${required.toFixed(6)} SOL, Has enough: ${deposit >= required}`);
-        this.lastBalanceLogTime = now;
-      }
-      return;
-    }
-
-    try {
-      // ⭐ НОВАЯ СТРАТЕГИЯ: Сначала проверяем honeypot, затем мониторим для выявления самородков
-      // 1. Быстрая проверка honeypot (упрощенная)
-      const honeypotCheck = await this.filters.simplifiedFilter(candidate);
-      
-      if (!honeypotCheck.passed) {
+    // Останавливаем watchers для пар, которых больше нет в топе
+    const currentSymbols = new Set(pairs.map(p => p.symbol));
+    for (const [symbol, watcher] of this.pairWatchers.entries()) {
+      if (!currentSymbols.has(symbol)) {
+        watcher.stop();
+        this.pairWatchers.delete(symbol);
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
-          token: candidate.mint,
-          message: `❌ Token rejected (honeypot check): ${honeypotCheck.reason || 'Unknown reason'}`,
+          symbol,
+          message: `👁️ Stopped watching ${symbol} (removed from top pairs)`,
         });
-        return;
       }
+    }
 
-      // 2. Honeypot check прошел - начинаем мониторинг для выявления самородков
+    // Запускаем watchers для новых пар
+    for (const pair of pairs) {
+      if (!this.pairWatchers.has(pair.symbol)) {
+        const watcher = new PairWatcher(pair.symbol, this.bybitClient!);
+        watcher.setOnMomentumDetected(async (symbol: string, signal: MomentumSignal) => {
+          if (this.positionManager && !this.isShuttingDown) {
+            await this.positionManager.openPosition(symbol, signal);
+          }
+        });
+        await watcher.start();
+        this.pairWatchers.set(pair.symbol, watcher);
+        
       logger.log({
         timestamp: getCurrentTimestamp(),
-        type: 'info',
-        token: candidate.mint,
-        message: `🔍 Starting gem monitoring for ${candidate.mint.substring(0, 8)}... (passed honeypot check)`,
+          type: 'info',
+          symbol: pair.symbol,
+          message: `👁️ Started watching ${pair.symbol} | score=${pair.score.toFixed(3)}, volume=${(pair.volume24h / 1000000).toFixed(1)}M, spread=${pair.spread.toFixed(3)}%`,
       });
-      
-      await this.gemTracker.startMonitoring(candidate);
-      
-      // НЕ открываем позицию сразу - ждем сигнала от gem-tracker
-    } catch (error) {
-      console.error(`[${new Date().toLocaleTimeString()}] ERROR | Error handling new token ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`);
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'error',
-        message: `Error handling new token ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`,
-      });
+      }
     }
   }
-
 
   private setupGracefulShutdown(): void {
     const shutdown = async (signal: string) => {
@@ -210,10 +146,16 @@ class PumpFunSniper {
       console.log(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
 
       // Останавливаем сканер
-      if (this.scanner) {
-        await this.scanner.stop();
-        console.log('✅ Scanner stopped');
+      if (this.marketScanner) {
+        this.marketScanner.stop();
+        console.log('✅ Market Scanner stopped');
       }
+
+      // Останавливаем watchers
+      for (const [symbol, watcher] of this.pairWatchers.entries()) {
+        watcher.stop();
+      }
+      console.log(`✅ Stopped ${this.pairWatchers.size} pair watchers`);
 
       // Останавливаем статистику
       if (this.statsInterval) {
@@ -221,58 +163,33 @@ class PumpFunSniper {
         this.statsInterval = null;
       }
 
-      // Ждем закрытия всех позиций
+      // Останавливаем мониторинг позиций
       if (this.positionManager) {
-        let stats = this.positionManager.getStats();
-        while (stats.activePositions > 0) {
-          console.log(`⏳ Waiting for ${stats.activePositions} positions to close...`);
-          await sleep(2000);
-          stats = this.positionManager.getStats();
-        }
+        this.positionManager.stopMonitoring();
         
-        console.log('Closing all remaining positions...');
+        // Закрываем все позиции
+        console.log('Closing all positions...');
         await this.positionManager.closeAllPositions();
         console.log('✅ All positions closed');
       }
 
       // Сохраняем финальную статистику
       await logger.saveStats();
-      const stats = logger.getDailyStats();
-      if (stats && this.positionManager) {
-        // В реальной торговле получаем баланс из кошелька, в симуляции - из PositionManager
-        let finalDeposit: number;
-        let peakDeposit: number;
+      
+      if (this.positionManager) {
+        const finalDeposit = this.positionManager.getCurrentDepositSync();
+        const peakDeposit = this.positionManager.getPeakDeposit();
         
-        if (this.realTradingAdapter) {
-          // 🔴 РЕАЛЬНАЯ ТОРГОВЛЯ: Используем реальный баланс кошелька
-          finalDeposit = await this.realTradingAdapter.getBalance();
-          peakDeposit = this.positionManager.getPeakDeposit(); // Peak из PositionManager (может быть выше реального)
-          
-          console.log('\n=== Final Statistics (REAL TRADING) ===');
-          console.log(`Date: ${stats.date}`);
-          console.log(`Initial Deposit (Real Wallet): ${this.initialDeposit.toFixed(6)} SOL`);
-          console.log(`Final Deposit (Real Wallet): ${finalDeposit.toFixed(6)} SOL`);
-          console.log(`Peak Deposit (Tracked): ${peakDeposit.toFixed(6)} SOL`);
-        } else {
-          // 📄 СИМУЛЯЦИЯ: Используем баланс из PositionManager
-          finalDeposit = await this.positionManager.getCurrentDeposit();
-          peakDeposit = this.positionManager.getPeakDeposit();
-          
-          console.log('\n=== Final Statistics (SIMULATION) ===');
-          console.log(`Date: ${stats.date}`);
-          console.log(`Initial Deposit: ${this.initialDeposit.toFixed(6)} SOL`);
-          console.log(`Final Deposit: ${finalDeposit.toFixed(6)} SOL`);
-          console.log(`Peak Deposit: ${peakDeposit.toFixed(6)} SOL`);
-        }
-        
-        console.log(`Total Trades: ${stats.totalTrades}`);
-        console.log(`Hits Above 3x: ${stats.hitsAbove3x}`);
+        console.log('\n=== Final Statistics ===');
+        console.log(`Initial Deposit: ${this.initialDeposit.toFixed(2)} USD`);
+        console.log(`Final Deposit: ${finalDeposit.toFixed(2)} USD`);
+        console.log(`Peak Deposit: ${peakDeposit.toFixed(2)} USD`);
+        console.log(`Total Return: ${((finalDeposit - this.initialDeposit) / this.initialDeposit * 100).toFixed(2)}%`);
         console.log(`Max Drawdown: ${calculateDrawdown(finalDeposit, peakDeposit).toFixed(2)}%`);
       }
 
       // Закрываем loggers
       await logger.close();
-      await tradeLogger.close();
       console.log('✅ Graceful shutdown complete');
 
       process.exit(0);
@@ -284,9 +201,8 @@ class PumpFunSniper {
 }
 
 // Запуск приложения
-const app = new PumpFunSniper();
+const app = new CEXScalper();
 app.start().catch((error) => {
   console.error('Fatal error:', error);
   process.exit(1);
 });
-

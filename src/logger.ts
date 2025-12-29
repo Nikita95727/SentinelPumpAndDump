@@ -28,13 +28,11 @@ class Logger {
       initialDeposit: config.initialDeposit,
       finalDeposit: config.initialDeposit,
       peakDeposit: config.initialDeposit,
-      totalBatches: 0,
-      winBatches: 0,
-      avgBatchProfitPct: 0,
       totalTrades: 0,
-      hitsAbove3x: 0,
+      profitableTrades: 0,
+      losingTrades: 0,
+      avgProfitPct: 0,
       maxDrawdownPct: 0,
-      totalProfitSol: 0,
       totalProfitUsd: 0,
     };
 
@@ -97,16 +95,19 @@ class Logger {
 
     switch (logEntry.type) {
       case 'buy':
-        console.log(`[${time}] BUY | Batch #${logEntry.batchId} | Token: ${logEntry.token?.substring(0, 8)}... | Invested: ${logEntry.investedSol?.toFixed(6)} SOL | Entry: $${logEntry.entryPrice?.toFixed(8)}`);
+        console.log(`[${time}] BUY | Symbol: ${logEntry.symbol} | Invested: ${logEntry.investedUsd?.toFixed(2)} USD | Entry: $${logEntry.entryPrice?.toFixed(8)}`);
         break;
       case 'sell':
-        console.log(`[${time}] SELL | Batch #${logEntry.batchId} | Token: ${logEntry.token?.substring(0, 8)}... | Exit: $${logEntry.exitPrice?.toFixed(8)} | ${logEntry.multiplier?.toFixed(2)}x | Profit: ${logEntry.profitSol?.toFixed(6)} SOL | Reason: ${logEntry.reason}`);
+        console.log(`[${time}] SELL | Symbol: ${logEntry.symbol} | Exit: $${logEntry.exitPrice?.toFixed(8)} | ${logEntry.multiplier?.toFixed(2)}x | Profit: ${logEntry.profitUsd?.toFixed(2)} USD (${logEntry.profitPct?.toFixed(2)}%) | Reason: ${logEntry.reason}`);
         break;
-      case 'batch_start':
-        console.log(`[${time}] BATCH START | Batch #${logEntry.batchId} | Deposit: ${logEntry.depositBefore?.toFixed(6)} SOL`);
+      case 'asset_detected':
+        console.log(`[${time}] ASSET DETECTED | Symbol: ${logEntry.symbol} | ${logEntry.message}`);
         break;
-      case 'batch_complete':
-        console.log(`[${time}] BATCH COMPLETE | Batch #${logEntry.batchId} | Net Profit: ${logEntry.netProfitPct?.toFixed(2)}% | Deposit: ${logEntry.depositBefore?.toFixed(6)} → ${logEntry.depositAfter?.toFixed(6)} SOL`);
+      case 'position_opened':
+        console.log(`[${time}] POSITION OPENED | Symbol: ${logEntry.symbol} | ${logEntry.message}`);
+        break;
+      case 'position_closed':
+        console.log(`[${time}] POSITION CLOSED | Symbol: ${logEntry.symbol} | ${logEntry.message}`);
         break;
       case 'error':
         console.error(`[${time}] ERROR | ${logEntry.message}`);
@@ -124,14 +125,7 @@ class Logger {
 
   updateStats(update: Partial<DailyStats>): void {
     if (!this.dailyStats) return;
-    
     Object.assign(this.dailyStats, update);
-    
-    // Пересчитываем средний профит батчей
-    if (this.dailyStats.totalBatches > 0) {
-      // Это упрощенный расчет, реальный будет из логов
-      // В реальной реализации можно хранить массив профитов батчей
-    }
   }
 
   async saveStats(): Promise<void> {
@@ -152,7 +146,11 @@ class Logger {
     }
 
     if (this.logFileHandle) {
-      await this.logFileHandle.close();
+      try {
+        await this.logFileHandle.close();
+      } catch (error) {
+        console.error('Error closing log file:', error);
+      }
       this.logFileHandle = null;
     }
 
@@ -166,22 +164,12 @@ class Logger {
   async loadStatsFromFile(): Promise<DailyStats | null> {
     try {
       const statsFilePath = path.join(config.logDir, `stats-daily-${this.currentDate}.json`);
-      const statsContent = await fs.readFile(statsFilePath, 'utf-8');
-      const stats = JSON.parse(statsContent) as DailyStats;
-      
-      // Валидация данных
-      if (stats && typeof stats.finalDeposit === 'number' && stats.finalDeposit > 0) {
-        return stats;
-      }
+      const data = await fs.readFile(statsFilePath, 'utf-8');
+      return JSON.parse(data) as DailyStats;
     } catch (error) {
-      // Файл не существует или поврежден - это нормально для первого запуска
-      if ((error as any).code !== 'ENOENT') {
-        console.warn('Failed to load stats from file:', error);
-      }
+      return null;
     }
-    return null;
   }
 }
 
 export const logger = new Logger();
-
