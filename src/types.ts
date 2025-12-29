@@ -1,64 +1,80 @@
-/**
- * TypeScript типы для Bybit Spot Trading Bot
- */
-
-export interface VolatileAsset {
-  symbol: string;
-  ticker: {
-    symbol: string;
-    lastPrice: number;
-    volume24h: number;
-    priceChange24h: number;
-    volatility24h: number;
-    high24h: number;
-    low24h: number;
-  };
-  volatility24h: number;
-  priceChange5m: number;
-  volume24h: number;
-  score: number;
-  detectedAt: number;
+export interface TokenCandidate {
+  mint: string;
+  createdAt: number; // timestamp в миллисекундах
+  signature: string; // signature создания токена
+  isRisky?: boolean; // Флаг для рискованных токенов (не honeypot, но требуют осторожности)
 }
 
 export interface Position {
-  symbol: string;
+  token: string;
+  batchId?: number; // Опционально для обратной совместимости
   entryPrice: number;
-  investedUsd: number; // Сумма инвестиций в USD
-  quantity: number; // Количество купленных активов
+  executionPrice?: number; // Реальная цена исполнения (с учетом slippage)
+  markPrice?: number; // Mark price при входе
+  investedSol: number; // Amount actually invested (after entry fees)
+  investedUsd?: number; // Опционально
+  reservedAmount?: number; // Amount reserved/locked for this position (for accounting)
   entryTime: number;
-  peakPrice: number; // Пиковая цена для трейлинг-стопа
-  currentPrice?: number;
-  lastPriceUpdate: number;
-  priceHistory?: Array<{ price: number; timestamp: number }>; // История цен для расчета импульса
-  takeProfitTarget?: number;
-  stopLossTarget?: number;
-  exitTimer?: number; // Timestamp когда нужно закрыть
-  status: 'active' | 'closing' | 'closed';
+  localHigh?: number; // локальный максимум для трейлинг-стопа (опционально)
+  peakPrice: number; // пиковая цена для трейлинг-стопа
+  currentPrice?: number; // кэш текущей цены
+  lastRealPriceUpdate: number; // timestamp последнего обновления реальной цены
+  takeProfitTarget?: number; // entryPrice * multiplier (опционально)
+  stopLossTarget?: number; // для трейлинг-стопа (опционально)
+  exitTimer?: number; // timestamp когда нужно закрыть (90 сек) (опционально)
+  slippage?: number; // использованный slippage (опционально)
+  estimatedImpact?: number; // Оценка impact при входе
+  status: 'active' | 'closing' | 'closed' | 'abandoned'; // abandoned = write-off
   errorCount?: number;
+  // Price history for momentum calculation
+  priceHistory?: Array<{ price: number; timestamp: number }>; // Последние 2-3 цены для расчета импульса
 }
 
 export interface PositionStats {
   activePositions: number;
   availableSlots: number;
   positions: Array<{
-    symbol: string;
+    token: string;
     multiplier: string;
     age: string;
   }>;
 }
 
+export interface Batch {
+  id: number;
+  candidates: TokenCandidate[];
+  positions: Map<string, Position>;
+  startTime: number;
+  depositBefore: number;
+}
+
 export interface TradeLog {
   timestamp: string;
-  type: 'buy' | 'sell' | 'error' | 'warning' | 'info' | 'asset_detected' | 'position_opened' | 'position_closed';
-  symbol?: string;
-  investedUsd?: number;
+  type: 'buy' | 'sell' | 'batch_complete' | 'batch_start' | 'error' | 'warning' | 'info' | 'token_received' | 'filter_check' | 'filter_passed' | 'filter_failed' | 'token_added' | 'token_rejected';
+  batchId?: number;
+  token?: string;
+  investedSol?: number;
   entryPrice?: number;
   exitPrice?: number;
   multiplier?: number;
-  profitUsd?: number;
+  profitSol?: number;
   profitPct?: number;
   reason?: string;
+  netProfitPct?: number;
+  depositBefore?: number;
+  depositAfter?: number;
   message?: string;
+  filterStage?: string;
+  filterResult?: boolean;
+  filterDetails?: {
+    age?: number;
+    purchaseCount?: number;
+    volumeUsd?: number;
+    isLpBurned?: boolean;
+    isMintRenounced?: boolean;
+    hasSnipers?: boolean;
+    rejectionReason?: string;
+  };
 }
 
 export interface DailyStats {
@@ -66,21 +82,17 @@ export interface DailyStats {
   initialDeposit: number;
   finalDeposit: number;
   peakDeposit: number;
+  totalBatches: number;
+  winBatches: number;
+  avgBatchProfitPct: number;
   totalTrades: number;
-  profitableTrades: number;
-  losingTrades: number;
-  avgProfitPct: number;
+  hitsAbove3x: number;
   maxDrawdownPct: number;
+  totalProfitSol: number;
   totalProfitUsd: number;
 }
 
 export interface Config {
-  // Bybit API
-  bybitApiKey: string;
-  bybitApiSecret: string;
-  bybitTestnet: boolean;
-  
-  // Trading parameters
   initialDeposit: number;
   solUsdRate: number;
   maxOpenPositions: number;
@@ -90,9 +102,9 @@ export interface Config {
   maxDelaySeconds: number;
   minPurchases: number;
   minVolumeUsd: number;
-  minLiquidityUsd: number;
-  maxSingleHolderPct: number;
-  minEntryMultiplier: number;
+  minLiquidityUsd: number; // ⭐ Минимальная базовая ликвидность для входа
+  maxSingleHolderPct: number; // ⭐ Максимальный % токенов у одного держателя
+  minEntryMultiplier: number; // ⭐ КРИТИЧНО: Минимальный multiplier для входа
   takeProfitMultiplier: number;
   exitTimerSeconds: number;
   trailingStopPct: number;
@@ -100,15 +112,8 @@ export interface Config {
   signatureFee: number;
   slippageMin: number;
   slippageMax: number;
-  exitSlippageMin: number;
-  exitSlippageMax: number;
-  
-  // Volatility filters
-  minVolatility24h: number;
-  minPriceChange5m: number;
-  minVolume24h: number;
-  
-  // Network configuration
+  exitSlippageMin: number; // ⭐ Минимальный slippage при выходе
+  exitSlippageMax: number; // ⭐ Максимальный slippage при выходе
   rpcRequestDelay: number;
   filterCheckDelay: number;
   rateLimitRetryDelay: number;
@@ -119,7 +124,6 @@ export interface Config {
   redisPort?: number;
   redisPassword?: string;
   logDir: string;
-  
   // Safety mechanisms
   maxSolPerTrade: number;
   maxTradingBalance: number;
@@ -127,11 +131,29 @@ export interface Config {
   maxPositionSize: number;
   personalWalletAddress: string;
   maxReservePercent: number;
-  
-  // Real trading configuration
-  realTradingEnabled: boolean;
+  // Trading mode configuration
+  tradingMode: 'real' | 'paper';
+  realTradingEnabled: boolean; // Legacy
   walletMnemonic: string;
   
-  // Network configuration (legacy)
+  // Sell strategy
+  sellStrategy: 'single' | 'partial_50_50';
+  partialSellDelayMs: number;
+  
+  // Impact/Slippage model
+  paperImpactThresholdSol: number;
+  paperImpactPower: number;
+  paperImpactBase: number;
+  paperImpactK: number;
+  
+  // Risk-aware sizing
+  maxExpectedImpact: number;
+  skipIfImpactTooHigh: boolean;
+  
+  // Write-off threshold
+  writeOffThresholdPct: number;
+  
+  // Network configuration
   testnetMode: boolean;
 }
+
