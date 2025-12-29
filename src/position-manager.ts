@@ -62,6 +62,27 @@ class Account {
   }
 
   /**
+   * Синхронизирует totalBalance с реальным балансом кошелька
+   * Используется для исправления рассинхронизации в реальной торговле
+   */
+  syncTotalBalance(realBalance: number): void {
+    if (realBalance < 0) {
+      console.error(`⚠️ Invalid realBalance: ${realBalance}, ignoring sync`);
+      return;
+    }
+    this.totalBalance = realBalance;
+    // Обновляем peak если новый баланс больше
+    if (this.totalBalance > this.peakBalance) {
+      this.peakBalance = this.totalBalance;
+    }
+    // Защита: если lockedBalance больше totalBalance, исправляем
+    if (this.lockedBalance > this.totalBalance) {
+      console.error(`⚠️ syncTotalBalance: lockedBalance=${this.lockedBalance} > totalBalance=${this.totalBalance}, fixing...`);
+      this.lockedBalance = Math.max(0, this.totalBalance);
+    }
+  }
+
+  /**
    * Reserve funds for a position
    * Returns true if successful, false if insufficient funds
    */
@@ -253,15 +274,8 @@ export class PositionManager {
             });
             
             // Синхронизируем: устанавливаем Account баланс равным реальному
-            // Вычисляем разницу и добавляем/вычитаем из Account
-            const adjustment = realBalance - accountBalance;
-            if (adjustment > 0) {
-              // Реальный баланс больше - добавляем в Account
-              this.account.deductFromDeposit(-adjustment);
-            } else {
-              // Реальный баланс меньше - вычитаем из Account
-              this.account.deductFromDeposit(adjustment);
-            }
+            // Используем прямой метод синхронизации вместо deductFromDeposit
+            this.account.syncTotalBalance(realBalance);
             
             logger.log({
               timestamp: getCurrentTimestamp(),
