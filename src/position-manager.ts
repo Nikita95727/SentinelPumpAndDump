@@ -152,10 +152,10 @@ class Account {
    * - Entry fees: 0.001005 SOL
    * - Exit fees: 0.001005 SOL
    * - For 1.77x break-even: positionSize >= 0.003688 SOL (с учетом slippage)
-   * - Minimum positionSize: настраивается через MAX_POSITION_SIZE (по умолчанию 0.004 SOL)
+   * - Minimum positionSize: настраивается через MIN_POSITION_SIZE (по умолчанию 0.004 SOL)
    * - Это обеспечивает безубыточность при 1.77x и прибыль при 2.0x+
    */
-  getPositionSize(maxPositions: number, minPositionSize: number = config.maxPositionSize, workingBalance?: number, currentOpenPositions: number = 0, entryFees: number = 0.001005): number {
+  getPositionSize(maxPositions: number, minPositionSize: number = config.minPositionSize, workingBalance?: number, currentOpenPositions: number = 0, entryFees: number = 0.001005): number {
     const free = workingBalance !== undefined ? workingBalance - this.lockedBalance : this.getFreeBalance();
     if (free <= 0) {
       return minPositionSize;
@@ -396,7 +396,7 @@ export class PositionManager {
   hasEnoughBalanceForTrading(): boolean {
     const entryFees = config.priorityFee + config.signatureFee;
     const exitFees = config.priorityFee + config.signatureFee;
-    const minPositionSize = config.maxPositionSize; // Максимальный размер позиции из конфига
+    const minPositionSize = config.minPositionSize; // Минимальный размер позиции из конфига
     const investedAmount = minPositionSize - entryFees; // После вычета entry fees
     
     // Рассчитываем резерв для выхода (exit fees + slippage)
@@ -441,7 +441,7 @@ export class PositionManager {
     // 2. Проверка: достаточно ли средств для открытия позиции?
     const entryFees = config.priorityFee + config.signatureFee;
     const exitFees = config.priorityFee + config.signatureFee;
-    const MIN_POSITION_SIZE = config.maxPositionSize;
+    const MIN_POSITION_SIZE = config.minPositionSize;
     const minInvestedAmount = MIN_POSITION_SIZE - entryFees;
     const minExpectedProceeds = minInvestedAmount * config.takeProfitMultiplier;
     const minExitSlippage = minExpectedProceeds * config.slippageMax;
@@ -628,7 +628,7 @@ export class PositionManager {
       const entryFees = config.priorityFee + config.signatureFee;
       let positionSize = this.account.getPositionSize(
         config.maxOpenPositions,
-        config.maxPositionSize,
+        config.minPositionSize,
         this.account.getTotalBalance(),
         this.positions.size,
         entryFees
@@ -636,7 +636,7 @@ export class PositionManager {
       
       positionSize = this.safetyManager.applySafetyCaps(positionSize);
       
-      const MIN_POSITION_SIZE = config.maxPositionSize;
+      const MIN_POSITION_SIZE = config.minPositionSize;
       if (positionSize < MIN_POSITION_SIZE) {
         if (this.account.getFreeBalance() < MIN_POSITION_SIZE) {
           throw new Error(`Position size too small: ${positionSize} < ${MIN_POSITION_SIZE}, insufficient balance`);
@@ -870,17 +870,17 @@ export class PositionManager {
     // Получаем размер позиции из Account с учетом working balance
     const entryFees = config.priorityFee + config.signatureFee;
     // Calculate position size: distribute evenly, reserve for fees, min from config
-    let positionSize = this.account.getPositionSize(config.maxOpenPositions, config.maxPositionSize, this.account.getTotalBalance(), this.positions.size, entryFees);
+    let positionSize = this.account.getPositionSize(config.maxOpenPositions, config.minPositionSize, this.account.getTotalBalance(), this.positions.size, entryFees);
     
     // Apply safety caps (maxSolPerTrade = 0.05 SOL) - ограничение для избежания влияния на цену
     positionSize = this.safetyManager.applySafetyCaps(positionSize);
     
     // Ensure position size is at least minimum
-    const MIN_POSITION_SIZE = config.maxPositionSize;
+    const MIN_POSITION_SIZE = config.minPositionSize;
     if (positionSize < MIN_POSITION_SIZE) {
       if (this.account.getFreeBalance() >= MIN_POSITION_SIZE) {
         // Use minimum if we have enough balance
-        // This shouldn't happen with new logic, but keep as safety
+        positionSize = MIN_POSITION_SIZE;
       } else {
         throw new Error(`Position size too small: ${positionSize} < ${MIN_POSITION_SIZE}, insufficient balance`);
       }

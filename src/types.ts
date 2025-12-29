@@ -119,6 +119,7 @@ export interface Config {
   // Safety mechanisms
   maxSolPerTrade: number;
   maxTradingBalance: number;
+  minPositionSize: number;
   maxPositionSize: number;
   personalWalletAddress: string;
   maxReservePercent: number;
