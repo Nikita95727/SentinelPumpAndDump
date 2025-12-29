@@ -240,6 +240,36 @@ export class PositionManager {
           // Получаем реальный баланс кошелька
           const realBalance = await this.balanceManager.getCurrentBalance();
           
+          // 🔴 КРИТИЧНО: Синхронизируем Account баланс с реальным балансом кошелька
+          // Account баланс может быть несинхронизирован после реальных сделок
+          const accountBalance = this.account.getTotalBalance();
+          const balanceDiff = Math.abs(realBalance - accountBalance);
+          
+          if (balanceDiff > 0.001) { // Если разница больше 0.001 SOL
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'warning',
+              message: `⚠️ Balance desync detected: Account=${accountBalance.toFixed(6)} SOL, Real=${realBalance.toFixed(6)} SOL, diff=${balanceDiff.toFixed(6)} SOL. Syncing...`,
+            });
+            
+            // Синхронизируем: устанавливаем Account баланс равным реальному
+            // Вычисляем разницу и добавляем/вычитаем из Account
+            const adjustment = realBalance - accountBalance;
+            if (adjustment > 0) {
+              // Реальный баланс больше - добавляем в Account
+              this.account.deductFromDeposit(-adjustment);
+            } else {
+              // Реальный баланс меньше - вычитаем из Account
+              this.account.deductFromDeposit(adjustment);
+            }
+            
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              message: `✅ Balance synced: Account balance updated to ${realBalance.toFixed(6)} SOL`,
+            });
+          }
+          
           // Проверяем и выводим излишек
           await this.balanceManager.checkAndWithdrawExcess(realBalance);
         } catch (error) {
@@ -314,6 +344,7 @@ export class PositionManager {
   /**
    * Проверяет, есть ли достаточно баланса для открытия хотя бы одной позиции
    * Учитывает резервы для входа, выхода и slippage
+   * Использует Account баланс (синхронизируется с реальным балансом каждые 30 секунд в реальной торговле)
    * @returns true если есть баланс, false если нет
    */
   hasEnoughBalanceForTrading(): boolean {
