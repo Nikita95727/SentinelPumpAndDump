@@ -1746,12 +1746,37 @@ export class PositionManager {
         return; // Не продаем, просто списываем
       }
 
+      // ⭐ FIX FOR PAPER TRADING: Получаем реальную цену в момент закрытия
+      // Для paper mode используем реальную цену из priceFetcher, а не переданный exitPrice
+      let realExitPrice = exitPrice;
+      if (this.adapter.getMode() === 'paper') {
+        try {
+          const freshPrice = await priceFetcher.getPrice(position.token);
+          if (freshPrice > 0 && isFinite(freshPrice)) {
+            realExitPrice = freshPrice;
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: position.token,
+              message: `📄 PAPER MODE: Using fresh price from priceFetcher: ${freshPrice.toFixed(10)} (instead of passed exitPrice: ${exitPrice.toFixed(10)})`,
+            });
+          }
+        } catch (error) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'warning',
+            token: position.token,
+            message: `⚠️ Failed to get fresh price for paper mode, using passed exitPrice: ${exitPrice.toFixed(10)}`,
+          });
+        }
+      }
+
       // Нормальное закрытие: выполняем продажу
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: position.token,
-        message: `${this.adapter.getMode() === 'real' ? '🔴' : '📄'} Executing ${this.adapter.getMode().toUpperCase()} SELL: ${position.token} → SOL (expected ~${expectedProceeds.toFixed(6)} SOL, estimatedImpact=${(estimatedImpact * 100).toFixed(2)}%)`,
+        message: `${this.adapter.getMode() === 'real' ? '🔴' : '📄'} Executing ${this.adapter.getMode().toUpperCase()} SELL: ${position.token} → SOL (expected ~${expectedProceeds.toFixed(6)} SOL, estimatedImpact=${(estimatedImpact * 100).toFixed(2)}%, exitPrice=${realExitPrice.toFixed(10)})`,
       });
 
       // Получаем количество токенов для продажи
@@ -1787,9 +1812,22 @@ export class PositionManager {
           });
           // НЕ throw - позиция уже закрыта в памяти, продолжаем с учетом
         } else {
-          // Store transaction signature
+          // Store transaction signature and result
           (position as any).sellSignature = sellResult.signature;
           (position as any).solReceived = sellResult.solReceived;
+          (position as any).sellResult = sellResult; // Store full result for later use
+          
+          // ⭐ FIX FOR PAPER TRADING: Используем реальную цену из executeSell для расчета multiplier
+          // В paper mode executeSell возвращает markPrice и executionPrice из реального priceFetcher
+          if (this.adapter.getMode() === 'paper' && sellResult.markPrice && sellResult.markPrice > 0) {
+            realExitPrice = sellResult.markPrice;
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: position.token,
+              message: `📄 PAPER MODE: Using markPrice from executeSell: ${sellResult.markPrice.toFixed(10)}, executionPrice: ${sellResult.executionPrice?.toFixed(10) || 'N/A'}, impact: ${((sellResult.estimatedImpact || 0) * 100).toFixed(2)}%`,
+            });
+          }
 
           logger.log({
             timestamp: getCurrentTimestamp(),
@@ -1815,7 +1853,8 @@ export class PositionManager {
       
       // 🔴 FIX: Используем реальную цену из SELL транзакции вместо bonding curve цены
       // Это исправляет ошибки bonding curve, которые дают неправильные цены
-      let actualExitPrice = exitPrice;
+      // ⭐ FIX FOR PAPER TRADING: realExitPrice уже установлен выше из priceFetcher или executeSell
+      let actualExitPrice = (this.adapter.getMode() === 'paper' && realExitPrice !== exitPrice) ? realExitPrice : exitPrice;
       let actualProceeds: number | null = null;
       
       // Если есть реальная SELL транзакция, используем solReceived для расчета прибыли
@@ -1824,15 +1863,27 @@ export class PositionManager {
         if (solReceived > 0 && isFinite(solReceived)) {
           // Используем реальную сумму полученную из транзакции
           actualProceeds = solReceived;
-          // Рассчитываем реальную цену выхода на основе полученной суммы
-          actualExitPrice = (solReceived + exitFeeCheck) / positionInvestedAmount * position.entryPrice;
           
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            token: position.token,
-            message: `✅ Using real SELL price: solReceived=${solReceived.toFixed(6)} SOL, calculated exitPrice=${actualExitPrice.toFixed(8)} (instead of bonding curve price ${exitPrice.toFixed(8)})`,
-          });
+          // ⭐ FIX FOR PAPER TRADING: Используем markPrice из executeSell для расчета exitPrice
+          // В paper mode executeSell возвращает реальную цену из priceFetcher
+          if (this.adapter.getMode() === 'paper' && (position as any).sellResult?.markPrice) {
+            actualExitPrice = (position as any).sellResult.markPrice;
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: position.token,
+              message: `📄 PAPER MODE: Using markPrice from executeSell: ${actualExitPrice.toFixed(10)}, solReceived=${solReceived.toFixed(6)} SOL`,
+            });
+          } else {
+            // Для real mode рассчитываем exitPrice из solReceived
+            actualExitPrice = (solReceived + exitFeeCheck) / positionInvestedAmount * position.entryPrice;
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: position.token,
+              message: `✅ Using real SELL price: solReceived=${solReceived.toFixed(6)} SOL, calculated exitPrice=${actualExitPrice.toFixed(8)} (instead of bonding curve price ${exitPrice.toFixed(8)})`,
+            });
+          }
         }
       }
       
@@ -1951,16 +2002,20 @@ export class PositionManager {
       position.status = 'closed';
 
       // Пересчитываем multiplier для логирования (используем реальную цену или безопасную)
+      // ⭐ FIX FOR PAPER TRADING: Используем realExitPrice если он был установлен
+      const finalExitPrice = (this.adapter.getMode() === 'paper' && realExitPrice !== exitPrice) ? realExitPrice : safeExitPrice;
       const finalMultiplier = actualProceeds !== null 
         ? (actualProceeds + exitFeeCheck) / positionInvestedAmount
-        : safeExitPrice / position.entryPrice;
+        : finalExitPrice / position.entryPrice;
       
       // Non-blocking trade logging
+      // ⭐ FIX FOR PAPER TRADING: Используем realExitPrice для логирования
+      const logExitPrice = (this.adapter.getMode() === 'paper' && realExitPrice !== exitPrice) ? realExitPrice : safeExitPrice;
       const tradeId = (position as any).tradeId || `unknown-${position.token}`;
       tradeLogger.logTradeClose({
         tradeId,
         token: position.token,
-        exitPrice: safeExitPrice,
+        exitPrice: logExitPrice,
         multiplier: finalMultiplier,
         profitSol: profit,
         reason,
@@ -1971,11 +2026,11 @@ export class PositionManager {
         timestamp: getCurrentTimestamp(),
         type: 'sell',
         token: position.token,
-        exitPrice: safeExitPrice,
+        exitPrice: logExitPrice,
         multiplier: finalMultiplier,
         profitSol: profit,
         reason,
-        message: `Position closed: ${position.token.substring(0, 8)}..., ${finalMultiplier.toFixed(2)}x, profit=${profit.toFixed(6)} SOL, reason=${reason}${actualProceeds !== null ? ' (real SELL price used)' : ''} | TIMING ANALYSIS: Entry age: ${tokenAgeAtEntry.toFixed(2)}s, Exit age: ${tokenAgeAtExit.toFixed(2)}s, Hold: ${holdDuration.toFixed(2)}s, Entry price: ${position.entryPrice.toFixed(8)}, Exit price: ${safeExitPrice.toFixed(8)}`,
+        message: `Position closed: ${position.token.substring(0, 8)}..., ${finalMultiplier.toFixed(2)}x, profit=${profit.toFixed(6)} SOL, reason=${reason}${actualProceeds !== null ? ' (real SELL price used)' : (this.adapter.getMode() === 'paper' && realExitPrice !== exitPrice ? ' (paper: fresh price from priceFetcher)' : '')} | TIMING ANALYSIS: Entry age: ${tokenAgeAtEntry.toFixed(2)}s, Exit age: ${tokenAgeAtExit.toFixed(2)}s, Hold: ${holdDuration.toFixed(2)}s, Entry price: ${position.entryPrice.toFixed(8)}, Exit price: ${logExitPrice.toFixed(8)}`,
       });
 
     } catch (error) {
