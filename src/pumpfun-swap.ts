@@ -16,7 +16,7 @@ import {
   getSellSolAmountFromTokenAmount,
   PUMP_PROGRAM_ID,
 } from '@pump-fun/pump-sdk';
-import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import BN from 'bn.js';
 import { logger } from './logger';
 import { getCurrentTimestamp } from './utils';
