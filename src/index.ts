@@ -170,31 +170,32 @@ class PumpFunSniper {
     }
 
     try {
-      // ⭐ НОВАЯ СТРАТЕГИЯ: Сначала проверяем honeypot, затем мониторим для выявления самородков
-      // 1. Быстрая проверка honeypot (упрощенная)
-      const honeypotCheck = await this.filters.simplifiedFilter(candidate);
+      // ⭐ ФИЛЬТРАЦИЯ: Проверяем токен через simplifiedFilter (включая Tier классификацию)
+      // Фильтр уже выполнен в positionManager.tryOpenPosition, но для gem-tracker нужна отдельная проверка
+      // Если токен прошел фильтры - отправляем в tryOpenPosition для входа
+      const filterResult = await this.filters.simplifiedFilter(candidate);
       
-      if (!honeypotCheck.passed) {
+      if (!filterResult.passed) {
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: candidate.mint,
-          message: `❌ Token rejected (honeypot check): ${honeypotCheck.reason || 'Unknown reason'}`,
+          message: `❌ Token rejected: ${filterResult.reason || 'Unknown reason'}`,
         });
         return;
       }
 
-      // 2. Honeypot check прошел - начинаем мониторинг для выявления самородков
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        token: candidate.mint,
-        message: `🔍 Starting gem monitoring for ${candidate.mint.substring(0, 8)}... (passed honeypot check)`,
-      });
-      
-      await this.gemTracker.startMonitoring(candidate);
-      
-      // НЕ открываем позицию сразу - ждем сигнала от gem-tracker
+      // Фильтр прошел - отправляем токен в tryOpenPosition для входа
+      // tryOpenPosition сам выполнит readiness check, multiplier check и откроет позицию
+      if (this.positionManager && !this.isShuttingDown) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `✅ Token passed filters (Tier ${filterResult.tierInfo?.tier || 'N/A'}), sending to position manager for entry`,
+        });
+        await this.positionManager.tryOpenPosition(candidate);
+      }
     } catch (error) {
       console.error(`[${new Date().toLocaleTimeString()}] ERROR | Error handling new token ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`);
       logger.log({
