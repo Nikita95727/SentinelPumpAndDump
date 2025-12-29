@@ -1058,8 +1058,34 @@ export class PositionManager {
           token: position.token,
           message: `⏰ [DEBUG] TIMEOUT triggered after ${(elapsed/1000).toFixed(1)}s`,
         });
+        
+        // 🔴 FIX: Используем минимальный multiplier для безубыточности при timeout
+        // Рассчитываем минимальный multiplier для покрытия комиссий
+        const entryFees = config.priorityFee + config.signatureFee;
+        const exitFees = config.priorityFee + config.signatureFee;
+        const totalFees = entryFees + exitFees;
+        const investedAmount = position.investedSol;
+        // Для безубыточности: investedAmount * minMultiplier >= investedAmount + totalFees
+        // minMultiplier = 1 + (totalFees / investedAmount)
+        const minBreakEvenMultiplier = 1 + (totalFees / investedAmount);
+        
         const currentPrice = position.currentPrice || position.entryPrice;
-        await this.closePosition(position, 'timeout', currentPrice);
+        const currentMultiplier = currentPrice / position.entryPrice;
+        
+        // Используем максимальное значение: текущая цена или минимальная для безубыточности
+        // Это защищает от убытков из-за комиссий при timeout
+        const safeExitPrice = currentMultiplier >= minBreakEvenMultiplier 
+          ? currentPrice 
+          : position.entryPrice * minBreakEvenMultiplier;
+        
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: position.token,
+          message: `⏰ Timeout exit: currentMultiplier=${currentMultiplier.toFixed(3)}x, minBreakEven=${minBreakEvenMultiplier.toFixed(3)}x, using ${(safeExitPrice / position.entryPrice).toFixed(3)}x`,
+        });
+        
+        await this.closePosition(position, 'timeout', safeExitPrice);
         return;
       }
       
@@ -1244,12 +1270,34 @@ export class PositionManager {
 
       // Accounting (paper or real)
       const exitFee = config.priorityFee + config.signatureFee;
-      const multiplier = exitPrice / position.entryPrice;
       const investedAmount = position.investedSol; // Amount actually invested (after entry fees)
       const reservedAmount = position.reservedAmount || investedAmount; // Amount that was locked
       
+      // 🔴 FIX: Используем реальную цену из SELL транзакции вместо bonding curve цены
+      // Это исправляет ошибки bonding curve, которые дают неправильные цены
+      let actualExitPrice = exitPrice;
+      let actualProceeds: number | null = null;
+      
+      // Если есть реальная SELL транзакция, используем solReceived для расчета прибыли
+      if (this.realTradingAdapter && (position as any).solReceived !== undefined) {
+        const solReceived = (position as any).solReceived as number;
+        if (solReceived > 0 && isFinite(solReceived)) {
+          // Используем реальную сумму полученную из транзакции
+          actualProceeds = solReceived;
+          // Рассчитываем реальную цену выхода на основе полученной суммы
+          actualExitPrice = (solReceived + exitFee) / investedAmount * position.entryPrice;
+          
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: position.token,
+            message: `✅ Using real SELL price: solReceived=${solReceived.toFixed(6)} SOL, calculated exitPrice=${actualExitPrice.toFixed(8)} (instead of bonding curve price ${exitPrice.toFixed(8)})`,
+          });
+        }
+      }
+      
       // Защита от некорректных значений exitPrice (может быть огромным из-за bonding curve ошибок)
-      let safeExitPrice = exitPrice;
+      let safeExitPrice = actualExitPrice;
       
       // Проверяем валидность exitPrice
       if (exitPrice <= 0 || !isFinite(exitPrice)) {
@@ -1275,39 +1323,54 @@ export class PositionManager {
         }
       }
       
-      // Пересчитываем multiplier с безопасной ценой
-      const safeMultiplier = safeExitPrice / position.entryPrice;
+      // 🔴 FIX: Если есть реальная сумма из SELL транзакции, используем её напрямую
+      let proceeds: number;
       
-      // Защита от некорректных значений investedAmount
-      let safeInvested = investedAmount;
-      if (investedAmount > 1.0 || investedAmount < 0 || !isFinite(investedAmount)) {
-        console.error(`⚠️ Invalid investedAmount: ${investedAmount}, using fallback`);
-        safeInvested = 0.003;
-      }
-      
-      // ISSUE #1 FIX: Calculate grossReturn first, then deduct exitFees
-      // grossReturn = investedAmount * multiplier
-      let grossReturn = safeInvested * safeMultiplier;
-      
-      // Защита от нереально больших grossReturn
-      // Максимальный разумный multiplier для pump.fun токенов: 1000x (очень редкий случай)
-      // Но если multiplier > 1000, это скорее всего ошибка bonding curve
-      if (safeMultiplier > 1000) {
-        // Подозрительно большой multiplier - используем peakPrice если он разумный
-        const peakMultiplier = position.peakPrice / position.entryPrice;
-        if (peakMultiplier > 0 && peakMultiplier <= 1000 && position.peakPrice > 0) {
-          // Используем peakPrice для расчета
-          grossReturn = safeInvested * peakMultiplier;
-          console.error(`⚠️ Multiplier ${safeMultiplier.toFixed(2)}x too high, using peakMultiplier ${peakMultiplier.toFixed(2)}x`);
-        } else {
-          // Cap at 1000x (максимальный разумный multiplier)
-          grossReturn = safeInvested * 1000;
-          console.error(`⚠️ Multiplier ${safeMultiplier.toFixed(2)}x too high, capping at 1000x`);
+      if (actualProceeds !== null) {
+        // Используем реальную сумму из транзакции (уже включает все комиссии и slippage)
+        proceeds = actualProceeds;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: position.token,
+          message: `✅ Using real proceeds from SELL transaction: ${proceeds.toFixed(6)} SOL`,
+        });
+      } else {
+        // Paper trading или нет реальной транзакции - рассчитываем из цены
+        // Пересчитываем multiplier с безопасной ценой
+        const safeMultiplier = safeExitPrice / position.entryPrice;
+        
+        // Защита от некорректных значений investedAmount
+        let safeInvested = investedAmount;
+        if (investedAmount > 1.0 || investedAmount < 0 || !isFinite(investedAmount)) {
+          console.error(`⚠️ Invalid investedAmount: ${investedAmount}, using fallback`);
+          safeInvested = 0.003;
         }
+        
+        // ISSUE #1 FIX: Calculate grossReturn first, then deduct exitFees
+        // grossReturn = investedAmount * multiplier
+        let grossReturn = safeInvested * safeMultiplier;
+        
+        // Защита от нереально больших grossReturn
+        // Максимальный разумный multiplier для pump.fun токенов: 1000x (очень редкий случай)
+        // Но если multiplier > 1000, это скорее всего ошибка bonding curve
+        if (safeMultiplier > 1000) {
+          // Подозрительно большой multiplier - используем peakPrice если он разумный
+          const peakMultiplier = position.peakPrice / position.entryPrice;
+          if (peakMultiplier > 0 && peakMultiplier <= 1000 && position.peakPrice > 0) {
+            // Используем peakPrice для расчета
+            grossReturn = safeInvested * peakMultiplier;
+            console.error(`⚠️ Multiplier ${safeMultiplier.toFixed(2)}x too high, using peakMultiplier ${peakMultiplier.toFixed(2)}x`);
+          } else {
+            // Cap at 1000x (максимальный разумный multiplier)
+            grossReturn = safeInvested * 1000;
+            console.error(`⚠️ Multiplier ${safeMultiplier.toFixed(2)}x too high, capping at 1000x`);
+          }
+        }
+        
+        // Deduct exit fees from gross return
+        proceeds = grossReturn - exitFee;
       }
-      
-      // Deduct exit fees from gross return
-      let proceeds = grossReturn - exitFee;
       
       // Ensure proceeds >= 0
       if (proceeds < 0) {
@@ -1344,13 +1407,18 @@ export class PositionManager {
       this.positions.delete(position.token);
       position.status = 'closed';
 
+      // Пересчитываем multiplier для логирования (используем реальную цену или безопасную)
+      const finalMultiplier = actualProceeds !== null 
+        ? (actualProceeds + exitFee) / investedAmount
+        : safeExitPrice / position.entryPrice;
+      
       // Non-blocking trade logging
       const tradeId = (position as any).tradeId || `unknown-${position.token}`;
       tradeLogger.logTradeClose({
         tradeId,
         token: position.token,
-        exitPrice,
-        multiplier,
+        exitPrice: safeExitPrice,
+        multiplier: finalMultiplier,
         profitSol: profit,
         reason,
       });
@@ -1360,11 +1428,11 @@ export class PositionManager {
         timestamp: getCurrentTimestamp(),
         type: 'sell',
         token: position.token,
-        exitPrice,
-        multiplier,
+        exitPrice: safeExitPrice,
+        multiplier: finalMultiplier,
         profitSol: profit,
         reason,
-        message: `Position closed: ${position.token.substring(0, 8)}..., ${safeMultiplier.toFixed(2)}x, profit=${profit.toFixed(6)} SOL, reason=${reason} | TIMING ANALYSIS: Entry age: ${tokenAgeAtEntry.toFixed(2)}s, Exit age: ${tokenAgeAtExit.toFixed(2)}s, Hold: ${holdDuration.toFixed(2)}s, Entry price: ${position.entryPrice.toFixed(8)}, Exit price: ${exitPrice.toFixed(8)}`,
+        message: `Position closed: ${position.token.substring(0, 8)}..., ${finalMultiplier.toFixed(2)}x, profit=${profit.toFixed(6)} SOL, reason=${reason}${actualProceeds !== null ? ' (real SELL price used)' : ''} | TIMING ANALYSIS: Entry age: ${tokenAgeAtEntry.toFixed(2)}s, Exit age: ${tokenAgeAtExit.toFixed(2)}s, Hold: ${holdDuration.toFixed(2)}s, Entry price: ${position.entryPrice.toFixed(8)}, Exit price: ${safeExitPrice.toFixed(8)}`,
       });
 
     } catch (error) {
