@@ -40,6 +40,18 @@ export class PumpFunSwap {
       type: 'info',
       message: `✅ PumpFunSwap initialized with official @pump-fun/pump-sdk`,
     });
+    
+    // 🔍 ДИАГНОСТИКА: Проверяем programId из SDK
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `🔍 SDK PUMP_PROGRAM_ID: ${PUMP_PROGRAM_ID.toString()}`,
+    });
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `🔍 SDK TOKEN_PROGRAM_ID: ${TOKEN_PROGRAM_ID.toString()}`,
+    });
   }
 
   /**
@@ -185,6 +197,25 @@ export class PumpFunSwap {
         tokenProgram: TOKEN_PROGRAM_ID,
       });
 
+      // 🔍 ДИАГНОСТИКА: Логируем инструкции для отладки IncorrectProgramId
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: tokenMint,
+        message: `🔍 BUY Instructions Debug: ${buyInstructions.length} instructions`,
+      });
+      
+      buyInstructions.forEach((ix, idx) => {
+        const programId = ix.programId.toString();
+        const keys = ix.keys.map(k => k.pubkey.toString()).join(', ');
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: tokenMint,
+          message: `  Instruction ${idx}: ProgramId=${programId.substring(0, 20)}... | Keys: ${keys.substring(0, 100)}...`,
+        });
+      });
+
       // Создаем транзакцию
       const transaction = new Transaction();
 
@@ -231,6 +262,7 @@ export class PumpFunSwap {
         // Проверяем тип ошибки
         const is3012 = simError.includes('3012') || simLogs.includes('3012');
         const is3031 = simError.includes('3031') || simLogs.includes('3031');
+        const isIncorrectProgramId = simError.includes('IncorrectProgramId') || simLogs.includes('IncorrectProgramId');
 
         if (is3012 || is3031) {
           // 3012/3031 в симуляции — токен не готов, можно retry без потери комиссии
@@ -244,6 +276,33 @@ export class PumpFunSwap {
             success: false,
             error: `Preflight:${is3012 ? '3012' : '3031'} (simulation, no fee lost)`
           };
+        }
+
+        // 🔍 ДЕТАЛЬНАЯ ДИАГНОСТИКА IncorrectProgramId для BUY
+        if (isIncorrectProgramId) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: tokenMint,
+            message: `🔴 PREFLIGHT BUY FAILED: IncorrectProgramId detected! Full error: ${simError}`,
+          });
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: tokenMint,
+            message: `🔴 Full simulation logs: ${simLogs}`,
+          });
+          
+          // Логируем все инструкции для анализа
+          buyInstructions.forEach((ix, idx) => {
+            const programId = ix.programId.toString();
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'error',
+              token: tokenMint,
+              message: `  🔴 BUY Instruction ${idx} ProgramId: ${programId}`,
+            });
+          });
         }
 
         // Другая ошибка в симуляции
@@ -445,6 +504,25 @@ export class PumpFunSwap {
         mayhemMode: false,
       });
 
+      // 🔍 ДИАГНОСТИКА: Логируем инструкции для отладки IncorrectProgramId
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: tokenMint,
+        message: `🔍 SELL Instructions Debug: ${sellInstructions.length} instructions`,
+      });
+      
+      sellInstructions.forEach((ix, idx) => {
+        const programId = ix.programId.toString();
+        const keys = ix.keys.map(k => k.pubkey.toString()).join(', ');
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: tokenMint,
+          message: `  Instruction ${idx}: ProgramId=${programId.substring(0, 20)}... | Keys: ${keys.substring(0, 100)}...`,
+        });
+      });
+
       // Создаем транзакцию
       const transaction = new Transaction();
 
@@ -486,6 +564,35 @@ export class PumpFunSwap {
         // Симуляция показала ошибку — НЕ отправляем, НЕ платим комиссию
         const simError = JSON.stringify(simulationResult.value.err);
         const simLogs = simulationResult.value.logs?.join('; ') || '';
+
+        const isIncorrectProgramId = simError.includes('IncorrectProgramId') || simLogs.includes('IncorrectProgramId');
+
+        // 🔍 ДЕТАЛЬНАЯ ДИАГНОСТИКА IncorrectProgramId для SELL
+        if (isIncorrectProgramId) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: tokenMint,
+            message: `🔴 PREFLIGHT SELL FAILED: IncorrectProgramId detected! Full error: ${simError}`,
+          });
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: tokenMint,
+            message: `🔴 Full simulation logs: ${simLogs}`,
+          });
+          
+          // Логируем все инструкции для анализа
+          sellInstructions.forEach((ix, idx) => {
+            const programId = ix.programId.toString();
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'error',
+              token: tokenMint,
+              message: `  🔴 SELL Instruction ${idx} ProgramId: ${programId}`,
+            });
+          });
+        }
 
         logger.log({
           timestamp: getCurrentTimestamp(),
