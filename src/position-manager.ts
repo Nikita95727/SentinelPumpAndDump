@@ -1451,12 +1451,11 @@ export class PositionManager {
         });
       }
       
-      // ✅ FIX: Calculate profit correctly using actual costs (not reservedAmount with max slippage)
-      // profit = proceeds - positionSize - exitFees
-      // где positionSize = investedAmount + entryFees (реально потрачено при покупке)
-      // proceeds уже включает все комиссии и slippage от продажи
-      const totalCost = positionSize + exitFee; // Реальные затраты: покупка + комиссии входа + комиссии выхода
-      const profit = proceeds - totalCost;
+      // ✅ FIX: Calculate profit correctly
+      // proceeds (solReceived) уже включает вычет всех комиссий выхода из транзакции
+      // Поэтому profit = proceeds - positionSize (без дополнительного вычета exitFee)
+      // positionSize = investedAmount + entryFee (реально потрачено при покупке)
+      const profit = proceeds - positionSize;
       
       // TIMING ANALYSIS: Extract timing data for hypothesis validation
       const timingData = (position as any).timingData || {};
