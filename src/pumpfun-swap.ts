@@ -304,31 +304,14 @@ export class PumpFunSwap {
           };
         }
 
-        // 🔍 ДЕТАЛЬНАЯ ДИАГНОСТИКА IncorrectProgramId для BUY
+        // 🔍 IncorrectProgramId - игнорируем (ошибка блокируется PREFLIGHT, комиссия не сжигается)
         if (isIncorrectProgramId) {
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'error',
-            token: tokenMint,
-            message: `🔴 PREFLIGHT BUY FAILED: IncorrectProgramId detected! Full error: ${simError}`,
-          });
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'error',
-            token: tokenMint,
-            message: `🔴 Full simulation logs: ${simLogs}`,
-          });
-          
-          // Логируем все инструкции для анализа
-          buyInstructions.forEach((ix, idx) => {
-            const programId = ix.programId.toString();
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'error',
-              token: tokenMint,
-              message: `  🔴 BUY Instruction ${idx} ProgramId: ${programId}`,
-            });
-          });
+          // Тихая ошибка - не логируем, просто возвращаем failure
+          // Это не критично, так как комиссия не сжигается и транзакция не отправляется
+          return {
+            success: false,
+            error: 'Preflight:IncorrectProgramId (ignored, no fee lost)'
+          };
         }
 
         // Другая ошибка в симуляции
@@ -593,33 +576,17 @@ export class PumpFunSwap {
 
         const isIncorrectProgramId = simError.includes('IncorrectProgramId') || simLogs.includes('IncorrectProgramId');
 
-        // 🔍 ДЕТАЛЬНАЯ ДИАГНОСТИКА IncorrectProgramId для SELL
+        // 🔍 IncorrectProgramId - игнорируем (ошибка блокируется PREFLIGHT, комиссия не сжигается)
         if (isIncorrectProgramId) {
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'error',
-            token: tokenMint,
-            message: `🔴 PREFLIGHT SELL FAILED: IncorrectProgramId detected! Full error: ${simError}`,
-          });
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'error',
-            token: tokenMint,
-            message: `🔴 Full simulation logs: ${simLogs}`,
-          });
-          
-          // Логируем все инструкции для анализа
-          sellInstructions.forEach((ix, idx) => {
-            const programId = ix.programId.toString();
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'error',
-              token: tokenMint,
-              message: `  🔴 SELL Instruction ${idx} ProgramId: ${programId}`,
-            });
-          });
+          // Тихая ошибка - не логируем, просто возвращаем failure
+          // Это не критично, так как комиссия не сжигается и транзакция не отправляется
+          return {
+            success: false,
+            error: 'Preflight:IncorrectProgramId (ignored, no fee lost)'
+          };
         }
 
+        // Другая ошибка в симуляции
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'error',
