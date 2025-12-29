@@ -31,7 +31,15 @@ export const isTestnetMode = (): boolean => {
   if (process.env.PUMP_FUN_TESTNET === 'true') {
     return true;
   }
-  // Если реальная торговля отключена, используем testnet для безопасности
+  // Если явно указан mainnet режим
+  if (process.env.PUMP_FUN_TESTNET === 'false') {
+    return false;
+  }
+  // Если TRADING_MODE=paper, используем mainnet (для paper trading на реальных данных)
+  if (process.env.TRADING_MODE === 'paper') {
+    return false; // Paper trading на mainnet для реалистичности
+  }
+  // Если реальная торговля отключена и не указан TRADING_MODE, используем testnet для безопасности
   if (process.env.REAL_TRADING_ENABLED !== 'true') {
     return true;
   }
