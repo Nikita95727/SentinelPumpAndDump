@@ -99,6 +99,9 @@ export interface Config {
   maxDelaySeconds: number;
   minPurchases: number;
   minVolumeUsd: number;
+  minLiquidityUsd: number; // ⭐ Минимальная базовая ликвидность для входа
+  maxSingleHolderPct: number; // ⭐ Максимальный % токенов у одного держателя
+  minEntryMultiplier: number; // ⭐ КРИТИЧНО: Минимальный multiplier для входа
   takeProfitMultiplier: number;
   exitTimerSeconds: number;
   trailingStopPct: number;
@@ -106,6 +109,8 @@ export interface Config {
   signatureFee: number;
   slippageMin: number;
   slippageMax: number;
+  exitSlippageMin: number; // ⭐ Минимальный slippage при выходе
+  exitSlippageMax: number; // ⭐ Максимальный slippage при выходе
   rpcRequestDelay: number;
   filterCheckDelay: number;
   rateLimitRetryDelay: number;

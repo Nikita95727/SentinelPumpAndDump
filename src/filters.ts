@@ -1028,8 +1028,9 @@ export class TokenFilters {
 
           // Исключаем LP аккаунт (обычно это первый или второй по размеру)
           // Для MVP проверяем только процент
-          if (percentage > 20) {
-            // Это может быть LP, но для безопасности считаем снайпером
+          // ⭐ Используем config.maxSingleHolderPct вместо хардкода
+          if (percentage > config.maxSingleHolderPct) {
+            // Это может быть LP, но для безопасности считаем что ликвидность надута
             // В реальности нужно проверять адрес аккаунта
             return true;
           }
@@ -1071,6 +1072,101 @@ export class TokenFilters {
       console.error(`Error checking snipers for ${mint}:`, error);
       // В случае ошибки считаем, что снайперы есть (безопаснее)
       return true;
+    }
+  }
+
+  /**
+   * ⭐ УПРОЩЕННЫЙ ФИЛЬТР: Только критичные проверки
+   * 1. Защита от honeypot (uniqueBuyers > 1)
+   * 2. Минимальная базовая ликвидность (config.minLiquidityUsd)
+   * 3. Распределение ликвидности (нет одного держателя с >maxSingleHolderPct%)
+   */
+  async simplifiedFilter(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any }> {
+    const details: any = {};
+    
+    try {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'simplified_start',
+        message: `Starting simplified filter check for ${candidate.mint.substring(0, 8)}...`,
+      });
+
+      // 1. КРИТИЧНО: Проверка на honeypot - ГЛАВНЫЙ КРИТЕРИЙ
+      const honeypotCheck = await this.checkHoneypotAndScam(candidate.mint, true);
+      details.uniqueBuyers = honeypotCheck.uniqueBuyers;
+      details.hasSells = honeypotCheck.hasSells;
+
+      if (honeypotCheck.uniqueBuyers <= 1) {
+        const reason = `Honeypot detected: only ${honeypotCheck.uniqueBuyers} unique buyer(s)`;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'simplified_honeypot',
+          filterDetails: { ...details, rejectionReason: reason },
+          message: `Token rejected: ${reason}`,
+        });
+        return { passed: false, reason, details };
+      }
+
+      // 2. Проверка минимальной базовой ликвидности
+      await sleep(50); // Минимальная задержка
+      const volumeUsd = await this.getTradingVolume(candidate.mint, true);
+      details.volumeUsd = volumeUsd;
+
+      if (volumeUsd < config.minLiquidityUsd) {
+        const reason = `Insufficient liquidity: $${volumeUsd.toFixed(2)} < $${config.minLiquidityUsd}`;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'simplified_liquidity',
+          filterDetails: { ...details, rejectionReason: reason },
+          message: `Token rejected: ${reason}`,
+        });
+        return { passed: false, reason, details };
+      }
+
+      // 3. Проверка распределения ликвидности (нет одного держателя с >maxSingleHolderPct%)
+      const hasConcentratedLiquidity = await this.hasSnipers(candidate.mint);
+      details.hasConcentratedLiquidity = hasConcentratedLiquidity;
+
+      if (hasConcentratedLiquidity) {
+        const reason = `Liquidity too concentrated: single holder has >${config.maxSingleHolderPct}%`;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'simplified_distribution',
+          filterDetails: { ...details, rejectionReason: reason },
+          message: `Token rejected: ${reason}`,
+        });
+        return { passed: false, reason, details };
+      }
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_passed',
+        token: candidate.mint,
+        filterStage: 'simplified',
+        filterDetails: { ...details },
+        message: `Token passed simplified filters: ${candidate.mint.substring(0, 8)}..., uniqueBuyers=${honeypotCheck.uniqueBuyers}, volume=$${volumeUsd.toFixed(2)}`,
+      });
+
+      return { passed: true, details };
+    } catch (error: any) {
+      const reason = `Filter error: ${error?.message || String(error)}`;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_failed',
+        token: candidate.mint,
+        filterStage: 'simplified_error',
+        filterDetails: { ...details, rejectionReason: reason },
+        message: `Error in simplified filter: ${reason}`,
+      });
+      return { passed: false, reason, details };
     }
   }
 

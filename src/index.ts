@@ -7,6 +7,8 @@ import { getCurrentTimestamp, sleep, calculateDrawdown } from './utils';
 import { config } from './config';
 import { TokenCandidate } from './types';
 import { RealTradingAdapter } from './real-trading-adapter';
+import { GemTracker } from './gem-tracker';
+import { TokenFilters } from './filters';
 
 class PumpFunSniper {
   private scanner: TokenScanner | null = null;
@@ -17,6 +19,8 @@ class PumpFunSniper {
   private lastBalanceLogTime: number = 0;
   private realTradingAdapter?: RealTradingAdapter;
   private initialDeposit: number = 0; // Сохраняем реальный начальный баланс
+  private gemTracker: GemTracker | null = null; // ⭐ Система выявления самородков
+  private filters: TokenFilters | null = null; // Для honeypot check
 
   async start(): Promise<void> {
     console.log('🚀 Starting Pump.fun Sniper Bot (Optimized)...');
@@ -78,6 +82,25 @@ class PumpFunSniper {
       );
       console.log(`✅ Position Manager initialized with ${initialDeposit.toFixed(6)} SOL`);
 
+      // ⭐ Инициализируем фильтры для honeypot check
+      this.filters = new TokenFilters(this.connection);
+      
+      // ⭐ Инициализируем Gem Tracker (система выявления самородков)
+      this.gemTracker = new GemTracker(this.connection, this.filters);
+      this.gemTracker.setOnGemDetected(async (candidate: TokenCandidate, observation) => {
+        // Когда самородок обнаружен - открываем позицию
+        if (this.positionManager && !this.isShuttingDown) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: candidate.mint,
+            message: `💎 GEM TRIGGER: Opening position for detected gem ${candidate.mint.substring(0, 8)}... | multiplier=${(observation.currentPrice / observation.initialPrice).toFixed(3)}x, gemScore=${observation.gemScore.toFixed(3)}`,
+          });
+          await this.positionManager.tryOpenPosition(candidate);
+        }
+      });
+      console.log('✅ Gem Tracker initialized (GEM DETECTION STRATEGY enabled)');
+
       // Инициализируем сканер
       this.scanner = new TokenScanner(async (candidate: TokenCandidate) => {
         await this.handleNewToken(candidate);
@@ -125,7 +148,7 @@ class PumpFunSniper {
   }
 
   private async handleNewToken(candidate: TokenCandidate): Promise<void> {
-    if (!this.positionManager || this.isShuttingDown) return;
+    if (!this.positionManager || !this.gemTracker || !this.filters || this.isShuttingDown) return;
 
     // Проверяем баланс перед обработкой токена
     // Если баланса нет, не обрабатываем токен (не засоряем очередь)
@@ -143,8 +166,31 @@ class PumpFunSniper {
     }
 
     try {
-      // Пытаемся открыть позицию (НЕ ждем батч!)
-      await this.positionManager.tryOpenPosition(candidate);
+      // ⭐ НОВАЯ СТРАТЕГИЯ: Сначала проверяем honeypot, затем мониторим для выявления самородков
+      // 1. Быстрая проверка honeypot (упрощенная)
+      const honeypotCheck = await this.filters.simplifiedFilter(candidate);
+      
+      if (!honeypotCheck.passed) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `❌ Token rejected (honeypot check): ${honeypotCheck.reason || 'Unknown reason'}`,
+        });
+        return;
+      }
+
+      // 2. Honeypot check прошел - начинаем мониторинг для выявления самородков
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `🔍 Starting gem monitoring for ${candidate.mint.substring(0, 8)}... (passed honeypot check)`,
+      });
+      
+      await this.gemTracker.startMonitoring(candidate);
+      
+      // НЕ открываем позицию сразу - ждем сигнала от gem-tracker
     } catch (error) {
       console.error(`[${new Date().toLocaleTimeString()}] ERROR | Error handling new token ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`);
       logger.log({

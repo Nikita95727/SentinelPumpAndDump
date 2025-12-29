@@ -4,7 +4,6 @@ import { config } from './config';
 import { logger } from './logger';
 import { tradeLogger } from './trade-logger';
 import { getCurrentTimestamp, sleep, calculateSlippage, formatUsd } from './utils';
-import { quickSecurityCheck } from './quick-filters';
 import { priceFetcher } from './price-fetcher';
 import { TokenFilters } from './filters';
 import { earlyActivityTracker } from './early-activity-tracker';
@@ -14,7 +13,7 @@ import { checkTokenReadiness } from './readiness-checker';
 import { BalanceManager } from './balance-manager';
 
 // Используем config.maxOpenPositions вместо хардкода
-const MAX_HOLD_TIME = 90_000; // 90 секунд
+const MAX_HOLD_TIME = 45_000; // ⭐ 45 секунд (уменьшено с 90 для уменьшения slippage - SLIPPAGE_SOLUTIONS.md)
 const TRAILING_STOP_PCT = 0.25;
 const CHECK_INTERVAL = 1000; // Проверка каждые 1 секунду (быстрее реагируем на волатильность)
 const PREDICTION_CHECK_INTERVAL = 200; // Проверка прогнозируемой цены каждые 200ms (быстрое обнаружение импульса)
@@ -433,6 +432,19 @@ export class PositionManager {
       return false;
     }
 
+    // ⭐ КРИТИЧНО: Проверка на уже открытую позицию для этого токена
+    if (this.positions.has(candidate.mint)) {
+      const existingPosition = this.positions.get(candidate.mint);
+      const positionStatus = existingPosition?.status || 'unknown';
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'warning',
+        token: candidate.mint,
+        message: `⚠️ DUPLICATE TOKEN: Position already exists for ${candidate.mint.substring(0, 8)}... (status: ${positionStatus}), skipping duplicate buy`,
+      });
+      return false; // Позиция уже открыта - не покупаем повторно
+    }
+
     // 1. Проверка: есть ли свободные слоты?
     if (this.positions.size >= config.maxOpenPositions) {
       return false;
@@ -478,7 +490,62 @@ export class PositionManager {
       const isReady = await checkTokenReadiness(this.connection, candidate.mint);
       
       if (isReady) {
-        // Токен готов - небольшая задержка перед BUY (50-150ms)
+          // ⭐ КРИТИЧНО: Проверка multiplier перед входом (гарантирует прибыльность)
+          // Для pump.fun токенов начальная цена = виртуальные резервы (30 SOL / 1.073e15 токенов)
+          // Проверяем, что текущая цена уже выросла на нужный multiplier от начальной
+          try {
+            const currentPrice = await priceFetcher.getPrice(candidate.mint);
+            if (currentPrice <= 0) {
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'warning',
+                token: candidate.mint,
+                message: `⚠️ Invalid price for multiplier check: ${currentPrice}, skipping entry`,
+              });
+              await sleep(READINESS_CHECK_INTERVAL);
+              continue;
+            }
+
+            // Начальная цена pump.fun токена (из виртуальных резервов)
+            // VIRTUAL_SOL_RESERVES = 30 SOL, VIRTUAL_TOKEN_RESERVES = 1.073e15
+            const INITIAL_PRICE = 30 / (1.073e15 / 1e9); // ~0.000000028 SOL per token (примерно)
+            // Более точный расчет: используем fallback цену из price-fetcher
+            const FALLBACK_INITIAL_PRICE = 30 / (1.073e15 / 1e9); // ~2.8e-8 SOL
+            
+            // Рассчитываем текущий multiplier от начальной цены
+            const currentMultiplier = currentPrice / FALLBACK_INITIAL_PRICE;
+
+            // ⚠️ КРИТИЧНО: Входим только если multiplier >= minEntryMultiplier
+            // Это гарантирует, что токен уже показал рост и есть потенциал для прибыли
+            if (currentMultiplier < config.minEntryMultiplier) {
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'info',
+                token: candidate.mint,
+                message: `⏸️ MULTIPLIER CHECK: currentMultiplier=${currentMultiplier.toFixed(3)}x < ${config.minEntryMultiplier}x (min required), currentPrice=${currentPrice.toFixed(10)} SOL, waiting for growth...`,
+              });
+              await sleep(READINESS_CHECK_INTERVAL);
+              continue; // Ждем пока токен вырастет
+            }
+
+            // Multiplier достаточен - логируем и продолжаем
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: candidate.mint,
+              message: `✅ MULTIPLIER CHECK PASSED: currentMultiplier=${currentMultiplier.toFixed(3)}x >= ${config.minEntryMultiplier}x, currentPrice=${currentPrice.toFixed(10)} SOL, proceeding to buy`,
+            });
+          } catch (error) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'warning',
+              token: candidate.mint,
+              message: `⚠️ Error checking multiplier: ${error instanceof Error ? error.message : String(error)}, skipping check`,
+            });
+            // При ошибке пропускаем проверку (не блокируем вход) - но это рискованно
+          }
+
+        // Токен готов и multiplier достаточен - небольшая задержка перед BUY (50-150ms)
         const preBuyDelay = 50 + Math.random() * 100; // 50-150ms
         await sleep(preBuyDelay);
         
@@ -544,11 +611,11 @@ export class PositionManager {
         }
         filterStage = 1;
       } else if (filterStage === 1) {
-        // Фильтр 2: Security check (может занять время из-за RPC)
+        // ⭐ УПРОЩЕННЫЙ ФИЛЬТР: Только критичные проверки (honeypot, ликвидность, распределение)
         // ✅ ПРЕРЫВАЕМЫЙ: Если фильтр занимает > READINESS_CHECK_INTERVAL, прерываем и проверяем готовность
         try {
           const filterStartTime = Date.now();
-          const filterPromise = quickSecurityCheck(candidate, false);
+          const filterPromise = this.filters.simplifiedFilter(candidate);
           const timeoutPromise = new Promise<'timeout'>((resolve) => {
             setTimeout(() => resolve('timeout'), READINESS_CHECK_INTERVAL);
           });
@@ -561,8 +628,6 @@ export class PositionManager {
           
           if (result.type === 'timeout') {
             // Фильтр был прерван таймаутом - продолжаем проверку готовности
-            // Не переходим к следующему этапу, повторим фильтр в следующей итерации
-            // (фильтр может продолжить выполняться в фоне, но мы не ждем его)
             const filterDuration = Date.now() - filterStartTime;
             logger.log({
               timestamp: getCurrentTimestamp(),
@@ -574,13 +639,13 @@ export class PositionManager {
           }
           
           // Фильтр завершился до таймаута
-          if (result.value === false) {
+          if (!result.value.passed) {
             // Фильтр не прошел
             logger.log({
               timestamp: getCurrentTimestamp(),
               type: 'info',
               token: candidate.mint,
-              message: `❌ Filter failed: Security check failed, discarding`,
+              message: `❌ Filter failed: ${result.value.reason || 'Unknown reason'}, discarding`,
             });
             return false;
           }
@@ -592,7 +657,7 @@ export class PositionManager {
             timestamp: getCurrentTimestamp(),
             type: 'info',
             token: candidate.mint,
-            message: `✅ All filters passed, waiting for token readiness (no timeout)`,
+            message: `✅ Simplified filters passed (honeypot check, liquidity ${result.value.details?.volumeUsd?.toFixed(2) || 'N/A'}, distribution OK), waiting for token readiness`,
           });
         } catch (error) {
           // Ошибка фильтра - отбрасываем токен
@@ -1171,10 +1236,19 @@ export class PositionManager {
         }
 
         // ОСНОВНАЯ ПРОВЕРКА: Реальная цена (каждые 1 секунду)
-        // Увеличенный интервал дает импульсу развиться, но не пропускаем падение благодаря trailing stop
+        // ⭐ НОВАЯ ЛОГИКА: Выход с учетом slippage - выходим при минимальной прибыли или безубыточности
         if (shouldCheckRealPrice) {
           const currentMultiplier = currentPrice / position.entryPrice;
           const timeHeldSeconds = elapsed / 1000;
+
+          // ⭐ Получаем капитализацию для мониторинга
+          let marketCap: number | null = null;
+          try {
+            const marketData = await priceFetcher.getMarketData(position.token);
+            marketCap = marketData?.marketCap || null;
+          } catch (error) {
+            // Игнорируем ошибки получения капитализации
+          }
 
           // Обновляем peak
           if (currentPrice > position.peakPrice) {
@@ -1184,57 +1258,238 @@ export class PositionManager {
           const peakMultiplier = position.peakPrice / position.entryPrice;
           const dropFromPeak = (position.peakPrice - currentPrice) / position.peakPrice;
 
-          // === ГИБРИДНАЯ СТРАТЕГИЯ ВЫХОДА ===
+          // ⭐ РАСЧЕТ ТОЧКИ БЕЗУБЫТОЧНОСТИ С УЧЕТОМ РЕАЛЬНОГО SLIPPAGE
+          // ⚠️ КРИТИЧНО: Используем МАКСИМАЛЬНЫЙ slippage для консервативного расчета
+          // Для токенов с ликвидностью $5000+ реальный slippage: 20-35%
+          // Используем максимальный slippage чтобы гарантировать безубыточность
+          const maxExitSlippage = config.exitSlippageMax; // 35% - максимальный slippage при выходе
+          const entryFees = config.priorityFee + config.signatureFee;
+          const exitFees = config.priorityFee + config.signatureFee;
+          const investedAmount = position.investedSol;
           
-          // СТРАТЕГИЯ 1: Слабый импульс (пик < 3x)
-          // Выходим сразу на 2.5x - токен не показал сильного роста
-          if (peakMultiplier < 3.0 && currentMultiplier >= config.takeProfitMultiplier) {
-            await this.closePosition(position, 'take_profit', currentMultiplier);
+          // ⭐ ФОРМУЛА БЕЗУБЫТОЧНОСТИ С УЧЕТОМ РЕАЛЬНОГО SLIPPAGE:
+          // Реальная выручка = proceeds * (1 - slippage)
+          // Для безубыточности: реальная выручка >= positionSize + exitFees
+          // proceeds = investedAmount * multiplier
+          // multiplier * investedAmount * (1 - slippage) >= positionSize + exitFees
+          // multiplier >= (positionSize + exitFees) / (investedAmount * (1 - slippage))
+          const positionSize = investedAmount + entryFees;
+          
+          // ⚠️ КОНСЕРВАТИВНЫЙ РАСЧЕТ: Используем максимальный slippage
+          const minBreakEvenMultiplier = (positionSize + exitFees) / (investedAmount * (1 - maxExitSlippage));
+          
+          // ⭐ ДОПОЛНИТЕЛЬНАЯ ЗАЩИТА: Добавляем запас 5% для учета возможных отклонений
+          const safetyMargin = 1.05;
+          const minBreakEvenMultiplierWithMargin = minBreakEvenMultiplier * safetyMargin;
+          
+          // Для минимальной прибыли (5% после slippage): multiplier должен быть выше безубыточности
+          const minProfitMultiplier = minBreakEvenMultiplierWithMargin * 1.05;
+          
+          // ⚠️ ЗАЩИТА ОТ УБЫТКОВ: Рассчитываем минимальный multiplier с учетом slippage
+          // Если multiplier < этого значения, то даже с учетом slippage будет убыток
+          const minLossMultiplierWithSlippage = (positionSize + exitFees) / (investedAmount * (1 - maxExitSlippage));
+          const minLossMultiplier = Math.max(1.2, minLossMultiplierWithSlippage * 0.9); // 90% от безубыточности или минимум 1.2x
+          
+          // Логируем расчеты для отладки
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: position.token,
+            message: `📊 EXIT CALCULATION: currentMultiplier=${currentMultiplier.toFixed(3)}x, minBreakEven=${minBreakEvenMultiplierWithMargin.toFixed(3)}x, minProfit=${minProfitMultiplier.toFixed(3)}x, minLoss=${minLossMultiplier.toFixed(3)}x, maxSlippage=${(maxExitSlippage * 100).toFixed(1)}%`,
+          });
+
+          // === НОВАЯ СТРАТЕГИЯ ВЫХОДА С УЧЕТОМ SLIPPAGE ===
+          
+          // ⚠️ ПРИОРИТЕТ 1: Защита от убытков - выходим если multiplier < minLossMultiplier
+          // Это гарантирует минимальные потери даже с учетом максимального slippage
+          if (currentMultiplier < minLossMultiplier) {
+            const expectedProceeds = investedAmount * currentMultiplier;
+            const realProceedsAfterSlippage = expectedProceeds * (1 - maxExitSlippage);
+            const netAfterFees = realProceedsAfterSlippage - exitFees;
+            const loss = positionSize - netAfterFees;
+            
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: position.token,
+              message: `🛡️ MINIMUM LOSS EXIT: multiplier=${currentMultiplier.toFixed(3)}x < ${minLossMultiplier.toFixed(3)}x, expectedProceeds=${expectedProceeds.toFixed(6)} SOL, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, loss=${loss.toFixed(6)} SOL, exiting to minimize losses`,
+            });
+            await this.closePosition(position, 'min_loss_exit', currentPrice);
             return;
           }
 
-          // СТРАТЕГИЯ 2: Средний импульс (3x ≤ пик < 5x)
+          // ⚠️ ПРИОРИТЕТ 2: Минимальная прибыль - выходим если достигли минимальной прибыли
+          // Учитываем реальный slippage при расчете прибыли
+          if (currentMultiplier >= minProfitMultiplier) {
+            const expectedProceeds = investedAmount * currentMultiplier;
+            const realProceedsAfterSlippage = expectedProceeds * (1 - maxExitSlippage);
+            const netAfterFees = realProceedsAfterSlippage - exitFees;
+            const profit = netAfterFees - positionSize;
+            const profitPct = (profit / positionSize) * 100;
+            
+            // Если достигли минимальной прибыли и цена падает → выходим
+            if (dropFromPeak >= 0.10) { // Упало на 10% от пика
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'info',
+                token: position.token,
+                message: `✅ MINIMUM PROFIT EXIT: multiplier=${currentMultiplier.toFixed(3)}x >= ${minProfitMultiplier.toFixed(3)}x, expectedProceeds=${expectedProceeds.toFixed(6)} SOL, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, profit=${profit.toFixed(6)} SOL (${profitPct.toFixed(2)}%), drop=${(dropFromPeak * 100).toFixed(1)}%, marketCap=${marketCap ? `$${(marketCap / 1000).toFixed(1)}k` : 'N/A'}`,
+              });
+              await this.closePosition(position, 'min_profit_exit', currentPrice);
+              return;
+            }
+            
+            // Если достигли минимальной прибыли и держим долго → выходим
+            if (timeHeldSeconds >= 30) {
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'info',
+                token: position.token,
+                message: `✅ MINIMUM PROFIT EXIT (time): multiplier=${currentMultiplier.toFixed(3)}x >= ${minProfitMultiplier.toFixed(3)}x, expectedProceeds=${expectedProceeds.toFixed(6)} SOL, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, profit=${profit.toFixed(6)} SOL (${profitPct.toFixed(2)}%), held=${timeHeldSeconds.toFixed(1)}s, marketCap=${marketCap ? `$${(marketCap / 1000).toFixed(1)}k` : 'N/A'}`,
+              });
+              await this.closePosition(position, 'min_profit_exit_time', currentPrice);
+              return;
+            }
+          }
+
+          // ⚠️ ПРИОРИТЕТ 3: Безубыточность - выходим если достигли безубыточности
+          // Учитываем реальный slippage при расчете безубыточности
+          if (currentMultiplier >= minBreakEvenMultiplierWithMargin && currentMultiplier < minProfitMultiplier) {
+            const expectedProceeds = investedAmount * currentMultiplier;
+            const realProceedsAfterSlippage = expectedProceeds * (1 - maxExitSlippage);
+            const netAfterFees = realProceedsAfterSlippage - exitFees;
+            
+            // Если достигли безубыточности и цена падает → выходим
+            if (dropFromPeak >= 0.05) { // Упало на 5% от пика
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'info',
+                token: position.token,
+                message: `⚖️ BREAKEVEN EXIT: multiplier=${currentMultiplier.toFixed(3)}x >= ${minBreakEvenMultiplierWithMargin.toFixed(3)}x, expectedProceeds=${expectedProceeds.toFixed(6)} SOL, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, netAfterFees=${netAfterFees.toFixed(6)} SOL, drop=${(dropFromPeak * 100).toFixed(1)}%, marketCap=${marketCap ? `$${(marketCap / 1000).toFixed(1)}k` : 'N/A'}`,
+              });
+              await this.closePosition(position, 'breakeven_exit', currentPrice);
+              return;
+            }
+          }
+
+          // ⚠️ ПРИОРИТЕТ 4: Логика для больших импульсов (с учетом slippage)
+          // СТРАТЕГИЯ 1: Слабый импульс (пик < 3x)
+          // Выходим если достигли takeProfitMultiplier И это выше безубыточности с учетом slippage
+          if (peakMultiplier < 3.0 && currentMultiplier >= config.takeProfitMultiplier) {
+            // Проверяем что даже с максимальным slippage будет прибыль
+            const expectedProceeds = investedAmount * currentMultiplier;
+            const realProceedsAfterSlippage = expectedProceeds * (1 - maxExitSlippage);
+            const netAfterFees = realProceedsAfterSlippage - exitFees;
+            
+            if (netAfterFees >= positionSize) {
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'info',
+                token: position.token,
+                message: `✅ TAKE PROFIT EXIT: multiplier=${currentMultiplier.toFixed(3)}x >= ${config.takeProfitMultiplier}x, expectedProceeds=${expectedProceeds.toFixed(6)} SOL, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, netAfterFees=${netAfterFees.toFixed(6)} SOL`,
+              });
+              await this.closePosition(position, 'take_profit', currentPrice);
+              return;
+            }
+          }
+
+          // ⚠️ СТРАТЕГИЯ 2: Средний импульс (3x ≤ пик < 5x) - с учетом slippage
           // Адаптивный trailing stop 20% - баланс между жадностью и безопасностью
           if (peakMultiplier >= 3.0 && peakMultiplier < 5.0) {
             if (dropFromPeak >= 0.20) {
-              await this.closePosition(position, 'trailing_stop', currentMultiplier);
-              return;
+              // Проверяем что даже с максимальным slippage будет прибыль
+              const expectedProceeds = investedAmount * currentMultiplier;
+              const realProceedsAfterSlippage = expectedProceeds * (1 - maxExitSlippage);
+              const netAfterFees = realProceedsAfterSlippage - exitFees;
+              
+              if (netAfterFees >= positionSize) {
+                logger.log({
+                  timestamp: getCurrentTimestamp(),
+                  type: 'info',
+                  token: position.token,
+                  message: `📉 TRAILING STOP EXIT (medium): multiplier=${currentMultiplier.toFixed(3)}x, drop=${(dropFromPeak * 100).toFixed(1)}%, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, netAfterFees=${netAfterFees.toFixed(6)} SOL`,
+                });
+                await this.closePosition(position, 'trailing_stop', currentPrice);
+                return;
+              }
             }
             
             // Защита: держим 70+ секунд и упали на 15% от пика - выходим
             if (timeHeldSeconds >= 70 && dropFromPeak >= 0.15) {
-              await this.closePosition(position, 'late_exit', currentMultiplier);
-              return;
+              const expectedProceeds = investedAmount * currentMultiplier;
+              const realProceedsAfterSlippage = expectedProceeds * (1 - maxExitSlippage);
+              const netAfterFees = realProceedsAfterSlippage - exitFees;
+              
+              if (netAfterFees >= positionSize * 0.95) { // Допускаем 5% убыток для раннего выхода
+                await this.closePosition(position, 'late_exit', currentPrice);
+                return;
+              }
             }
           }
 
-          // СТРАТЕГИЯ 3: Большой импульс (5x ≤ пик < 10x)
+          // ⚠️ СТРАТЕГИЯ 3: Большой импульс (5x ≤ пик < 10x) - с учетом slippage
           // Жадный trailing stop 25% - позволяем импульсу развиться
           if (peakMultiplier >= 5.0 && peakMultiplier < 10.0) {
             if (dropFromPeak >= 0.25) {
-              await this.closePosition(position, 'trailing_stop', currentMultiplier);
-              return;
+              const expectedProceeds = investedAmount * currentMultiplier;
+              const realProceedsAfterSlippage = expectedProceeds * (1 - maxExitSlippage);
+              const netAfterFees = realProceedsAfterSlippage - exitFees;
+              
+              if (netAfterFees >= positionSize) {
+                logger.log({
+                  timestamp: getCurrentTimestamp(),
+                  type: 'info',
+                  token: position.token,
+                  message: `📉 TRAILING STOP EXIT (large): multiplier=${currentMultiplier.toFixed(3)}x, drop=${(dropFromPeak * 100).toFixed(1)}%, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, netAfterFees=${netAfterFees.toFixed(6)} SOL`,
+                });
+                await this.closePosition(position, 'trailing_stop', currentPrice);
+                return;
+              }
             }
             
             // Защита: держим 75+ секунд и упали на 20% от пика - выходим
             if (timeHeldSeconds >= 75 && dropFromPeak >= 0.20) {
-              await this.closePosition(position, 'late_exit', currentMultiplier);
-              return;
+              const expectedProceeds = investedAmount * currentMultiplier;
+              const realProceedsAfterSlippage = expectedProceeds * (1 - maxExitSlippage);
+              const netAfterFees = realProceedsAfterSlippage - exitFees;
+              
+              if (netAfterFees >= positionSize * 0.95) {
+                await this.closePosition(position, 'late_exit', currentPrice);
+                return;
+              }
             }
           }
 
-          // СТРАТЕГИЯ 4: Очень большой импульс (пик ≥ 10x)
+          // ⚠️ СТРАТЕГИЯ 4: Очень большой импульс (пик ≥ 10x) - с учетом slippage
           // Максимально жадный trailing stop 30% - даем пространство для роста
           if (peakMultiplier >= 10.0) {
             if (dropFromPeak >= 0.30) {
-              await this.closePosition(position, 'trailing_stop', currentMultiplier);
-              return;
+              const expectedProceeds = investedAmount * currentMultiplier;
+              const realProceedsAfterSlippage = expectedProceeds * (1 - maxExitSlippage);
+              const netAfterFees = realProceedsAfterSlippage - exitFees;
+              
+              if (netAfterFees >= positionSize) {
+                logger.log({
+                  timestamp: getCurrentTimestamp(),
+                  type: 'info',
+                  token: position.token,
+                  message: `📉 TRAILING STOP EXIT (huge): multiplier=${currentMultiplier.toFixed(3)}x, drop=${(dropFromPeak * 100).toFixed(1)}%, realAfterSlippage=${realProceedsAfterSlippage.toFixed(6)} SOL, netAfterFees=${netAfterFees.toFixed(6)} SOL`,
+                });
+                await this.closePosition(position, 'trailing_stop', currentPrice);
+                return;
+              }
             }
             
             // Защита: держим 80+ секунд и упали на 25% от пика - выходим
             if (timeHeldSeconds >= 80 && dropFromPeak >= 0.25) {
-              await this.closePosition(position, 'late_exit', currentMultiplier);
-              return;
+              const expectedProceeds = investedAmount * currentMultiplier;
+              const realProceedsAfterSlippage = expectedProceeds * (1 - maxExitSlippage);
+              const netAfterFees = realProceedsAfterSlippage - exitFees;
+              
+              if (netAfterFees >= positionSize * 0.95) {
+                await this.closePosition(position, 'late_exit', currentPrice);
+                return;
+              }
             }
           }
 

@@ -23,7 +23,9 @@ export class TokenScanner {
   // Deduplication для getTransaction calls
   private processedSignatures = new Map<string, number>(); // signature -> timestamp
   private processedMints = new Map<string, number>(); // mint -> timestamp
-  private readonly DEDUP_TTL_MS = 60000; // 60 seconds TTL
+  private readonly DEDUP_TTL_MS = 24 * 60 * 60 * 1000; // ⭐ 24 часа TTL (было 60 секунд) - предотвращает повторную покупку старых токенов
+  private readonly QUEUE_CLEANUP_INTERVAL_MS = 60_000; // Очистка очереди каждую минуту
+  private readonly MAX_QUEUE_AGE_MS = 5 * 60 * 1000; // Максимальный возраст токена в очереди: 5 минут
 
   constructor(onNewToken: (candidate: TokenCandidate) => void) {
     this.onNewTokenCallback = onNewToken;
@@ -48,6 +50,45 @@ export class TokenScanner {
     await this.connect();
     // Запускаем обработку единой очереди
     this.processTokenQueue();
+    // Запускаем периодическую очистку очереди от старых токенов
+    this.startQueueCleanup();
+  }
+
+  /**
+   * Периодическая очистка очереди от старых токенов
+   * Предотвращает засорение очереди токенами, которые висят там слишком долго
+   */
+  private startQueueCleanup(): void {
+    setInterval(() => {
+      if (this.isShuttingDown) return;
+      
+      const now = Date.now();
+      const initialLength = this.tokenQueue.length;
+      
+      // Удаляем токены старше MAX_QUEUE_AGE_MS
+      this.tokenQueue = this.tokenQueue.filter(candidate => {
+        const age = now - candidate.createdAt;
+        if (age > this.MAX_QUEUE_AGE_MS) {
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: candidate.mint,
+            message: `Removing stale token from queue: ${candidate.mint.substring(0, 8)}... (age: ${(age / 1000).toFixed(1)}s)`,
+          });
+          return false; // Удаляем токен
+        }
+        return true; // Оставляем токен
+      });
+      
+      const removed = initialLength - this.tokenQueue.length;
+      if (removed > 0) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `Queue cleanup: removed ${removed} stale tokens, remaining: ${this.tokenQueue.length}`,
+        });
+      }
+    }, this.QUEUE_CLEANUP_INTERVAL_MS);
   }
 
   private async connect(): Promise<void> {
@@ -383,8 +424,38 @@ export class TokenScanner {
             signature: signature,
           };
 
+          // ⭐ ПРОВЕРКА: Не добавляем токен в очередь, если он уже там есть
+          const alreadyInQueue = this.tokenQueue.some(t => t.mint === mintAddress);
+          if (alreadyInQueue) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: mintAddress,
+              message: `Token ${mintAddress.substring(0, 8)}... already in queue, skipping duplicate`,
+            });
+            return;
+          }
+
+          // ⭐ ПРОВЕРКА: Не добавляем токен, если он уже обрабатывается
+          if (this.processingTokens.has(mintAddress)) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: mintAddress,
+              message: `Token ${mintAddress.substring(0, 8)}... already being processed, skipping duplicate`,
+            });
+            return;
+          }
+
           // ✅ УБРАНА ЛОГИКА ПО ВОЗРАСТУ: Добавляем токен в единую очередь без фильтрации по возрасту
           this.tokenQueue.push(candidate);
+          
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: mintAddress,
+            message: `Token ${mintAddress.substring(0, 8)}... added to queue (queue size: ${this.tokenQueue.length})`,
+          });
           
           // Запускаем обработку очереди если она еще не запущена
           if (!this.isProcessingQueue) {

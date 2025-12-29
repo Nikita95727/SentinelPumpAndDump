@@ -78,13 +78,18 @@ export const config: Config = {
       // Фильтрация и readiness check определяют момент входа
   minPurchases: 5,
   minVolumeUsd: 2000,
+  minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '5000'), // ⭐ Минимальная базовая ликвидность для входа (увеличено до $5000 для снижения slippage)
+  maxSingleHolderPct: parseFloat(process.env.MAX_SINGLE_HOLDER_PCT || '50'), // ⭐ Максимальный % токенов у одного держателя (защита от надутой ликвидности)
+  minEntryMultiplier: parseFloat(process.env.MIN_ENTRY_MULTIPLIER || '2.5'), // ⭐ КРИТИЧНО: Минимальный multiplier для входа (гарантирует прибыль даже с slippage 35%)
       takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '2.0'), // Снижено до 2.0x для безубыточности с учетом комиссий
-  exitTimerSeconds: 90,
+  exitTimerSeconds: 45, // ⭐ Уменьшено с 90 до 45 секунд для уменьшения slippage (SLIPPAGE_SOLUTIONS.md)
   trailingStopPct: 25,
   priorityFee: 0.001,
   signatureFee: 0.000005,
   slippageMin: 0.01,
   slippageMax: 0.03,
+  exitSlippageMin: 0.20, // ⭐ Минимальный slippage при выходе (20% для токенов с хорошей ликвидностью)
+  exitSlippageMax: 0.35, // ⭐ Максимальный slippage при выходе (35% для токенов с низкой ликвидностью)
   // Rate limiting: Helius free tier ~100-200 req/sec
   // Увеличенные задержки для стабильной работы в пределах лимитов
   // ~3-5 req/sec для безопасной работы с запасом

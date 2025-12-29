@@ -14,6 +14,12 @@ interface TokenPrice {
   timestamp: number;
 }
 
+interface TokenMarketData {
+  price: number;
+  marketCap: number; // в USD
+  totalSupply: number;
+}
+
 /**
  * Получает цены pump.fun токенов напрямую из bonding curve контракта
  * НЕ использует Jupiter API (новые токены не индексируются сразу)
@@ -186,6 +192,39 @@ export class PumpFunPriceFetcher {
     } catch (error) {
       // При ошибке используем значение по умолчанию
       console.warn('Error updating SOL price, using default:', error);
+    }
+  }
+
+  /**
+   * Получает рыночные данные токена (цена + капитализация)
+   * ⭐ НОВОЕ: Получает капитализацию для мониторинга
+   */
+  async getMarketData(tokenMint: string): Promise<TokenMarketData | null> {
+    try {
+      const price = await this.getPrice(tokenMint);
+      if (price <= 0) {
+        return null;
+      }
+
+      // Получаем totalSupply из mint account
+      const { getMint } = await import('@solana/spl-token');
+      const mintPubkey = new PublicKey(tokenMint);
+      const connection = this.rpcPool.getConnection();
+      
+      const mintInfo = await getMint(connection, mintPubkey);
+      const totalSupply = Number(mintInfo.supply) / Math.pow(10, mintInfo.decimals);
+      
+      // Капитализация = цена * totalSupply
+      const marketCap = price * totalSupply * this.solUsdPrice;
+
+      return {
+        price,
+        marketCap,
+        totalSupply,
+      };
+    } catch (error) {
+      // При ошибке возвращаем null
+      return null;
     }
   }
 
