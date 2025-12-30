@@ -44,6 +44,7 @@ export class TokenScanner {
   /**
    * Жесткий сброс очереди при перезапуске
    * Очищает все структуры данных в памяти для предотвращения дубликатов
+   * ⭐ КРИТИЧНО: Вызывается ПЕРЕД каждым запуском для полной очистки состояния
    */
   private resetQueue(): void {
     const queueSize = this.tokenQueue.length;
@@ -60,16 +61,18 @@ export class TokenScanner {
     // Очищаем Set обрабатываемых токенов
     this.processingTokens.clear();
 
-    // Очищаем Map обработанных токенов (дедупликация)
+    // ⭐ КРИТИЧНО: Очищаем Map обработанных токенов (дедупликация)
+    // Это предотвращает повторную обработку токенов между запусками
     this.processedMints.clear();
 
-    // Очищаем Map обработанных сигнатур (дедупликация)
+    // ⭐ КРИТИЧНО: Очищаем Map обработанных сигнатур (дедупликация)
+    // Это предотвращает повторную обработку транзакций между запусками
     this.processedSignatures.clear();
 
     logger.log({
       timestamp: getCurrentTimestamp(),
       type: 'info',
-      message: `🔄 Queue hard reset: cleared ${queueSize} queued tokens, ${processingSize} processing tokens, ${processedMintsSize} processed mints, ${processedSignaturesSize} processed signatures`,
+      message: `🔄 Queue HARD RESET: cleared ${queueSize} queued tokens, ${processingSize} processing tokens, ${processedMintsSize} processed mints, ${processedSignaturesSize} processed signatures. All deduplication caches cleared.`,
     });
   }
 

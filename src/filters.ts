@@ -1182,7 +1182,12 @@ export class TokenFilters {
    * 3. Распределение ликвидности (нет одного держателя с >maxSingleHolderPct%)
    * 4. Классификация по Tier системе
    */
-  async simplifiedFilter(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any; tierInfo?: TierInfo | null }> {
+  /**
+   * ⭐ НОВАЯ ЛОГИКА: Упрощенный фильтр для поиска МАНИПУЛЯТОРОВ и ГЕМОВ
+   * Минимальная фильтрация - только защита от honeypot и базовые проверки
+   * Манипуляторы и гемы НЕ отбрасываются, а помечаются для торговли
+   */
+  async simplifiedFilter(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any; tierInfo?: TierInfo | null; tokenType?: 'MANIPULATOR' | 'GEM' | 'REGULAR' }> {
     const details: any = {};
     
     try {
@@ -1191,10 +1196,10 @@ export class TokenFilters {
         type: 'filter_check',
         token: candidate.mint,
         filterStage: 'simplified_start',
-        message: `Starting simplified filter check for ${candidate.mint.substring(0, 8)}...`,
+        message: `🔍 Starting simplified filter (MANIPULATOR/GEM search) for ${candidate.mint.substring(0, 8)}...`,
       });
 
-      // 1. КРИТИЧНО: Проверка на honeypot - ГЛАВНЫЙ КРИТЕРИЙ
+      // 1. КРИТИЧНО: Проверка на honeypot - ЕДИНСТВЕННЫЙ ЖЕСТКИЙ ФИЛЬТР
       const honeypotCheck = await this.checkHoneypotAndScam(candidate.mint, true);
       details.uniqueBuyers = honeypotCheck.uniqueBuyers;
       details.hasSells = honeypotCheck.hasSells;
@@ -1207,70 +1212,124 @@ export class TokenFilters {
           token: candidate.mint,
           filterStage: 'simplified_honeypot',
           filterDetails: { ...details, rejectionReason: reason },
-          message: `Token rejected: ${reason}`,
+          message: `❌ Token rejected: ${reason}`,
         });
         return { passed: false, reason, details };
       }
 
-      // 2. Проверка минимальной базовой ликвидности и классификация по Tier
+      // 2. Получаем базовые данные для определения типа токена
       await sleep(50); // Минимальная задержка
       const volumeUsd = await this.getTradingVolume(candidate.mint, true);
       details.volumeUsd = volumeUsd;
       details.uniqueBuyers = honeypotCheck.uniqueBuyers;
 
-      // ⭐ КЛАССИФИКАЦИЯ ПО TIER СИСТЕМЕ
-      const tierInfo = await this.classifyTier(candidate.mint, volumeUsd, honeypotCheck.uniqueBuyers);
-      details.tier = tierInfo?.tier || null;
+      // 3. ⭐ ОПРЕДЕЛЕНИЕ ТИПА ТОКЕНА: МАНИПУЛЯТОР / ГЕМ / ОБЫЧНЫЙ
+      const hasConcentratedLiquidity = await this.hasSnipers(candidate.mint);
+      details.hasConcentratedLiquidity = hasConcentratedLiquidity;
 
-      // ❌ ЖЕСТКИЙ ЗАПРЕТ: liquidity < 1000 - НИКОГДА НЕ ВХОДИТЬ
-      if (!tierInfo) {
-        const reason = `Token does not meet any Tier requirements: liquidity=$${volumeUsd.toFixed(2)}, holders=${honeypotCheck.uniqueBuyers}`;
+      // Проверяем признаки гема (быстрый рост цены, объема, держателей)
+      const { priceFetcher } = await import('./price-fetcher');
+      const currentPrice = await priceFetcher.getPrice(candidate.mint);
+      const marketData = await priceFetcher.getMarketData(candidate.mint);
+      const marketCap = marketData?.marketCap || 0;
+      
+      // Признаки гема: быстрый рост цены, объема, капитализации
+      const ageSeconds = (Date.now() - candidate.createdAt) / 1000;
+      const priceMultiplier = currentPrice > 0 ? currentPrice / 0.000000028 : 1; // От начальной цены pump.fun
+      const isGem = priceMultiplier >= 2.0 && volumeUsd >= 500 && ageSeconds < 300; // Рост 2x+, объем >$500, возраст <5мин
+      
+      let tokenType: 'MANIPULATOR' | 'GEM' | 'REGULAR' = 'REGULAR';
+      
+      if (hasConcentratedLiquidity) {
+        tokenType = 'MANIPULATOR';
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `🎯 MANIPULATOR DETECTED: ${candidate.mint.substring(0, 8)}... | liquidity=$${volumeUsd.toFixed(2)}, holders=${honeypotCheck.uniqueBuyers}, marketCap=$${marketCap.toFixed(2)}`,
+        });
+      } else if (isGem) {
+        tokenType = 'GEM';
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `💎 GEM DETECTED: ${candidate.mint.substring(0, 8)}... | multiplier=${priceMultiplier.toFixed(2)}x, volume=$${volumeUsd.toFixed(2)}, marketCap=$${marketCap.toFixed(2)}`,
+        });
+      }
+
+      details.tokenType = tokenType;
+
+      // 4. Классификация по Tier (для манипуляторов и гемов требования мягче)
+      let tierInfo: TierInfo | null = null;
+      
+      if (tokenType === 'MANIPULATOR') {
+        // Для манипуляторов: минимальная ликвидность $500 (ранние точки входа важны)
+        if (volumeUsd >= 500) {
+          tierInfo = {
+            tier: volumeUsd >= 2000 ? 1 : (volumeUsd >= 1000 ? 2 : 3),
+            liquidity: volumeUsd,
+            holders: honeypotCheck.uniqueBuyers,
+            positionSizeMultiplier: volumeUsd >= 2000 ? 1.0 : (volumeUsd >= 1000 ? 0.5 : 0.25),
+            allowsPartialSells: volumeUsd >= 2000,
+            minEffectiveMultiplier: volumeUsd >= 2000 ? undefined : 1.15,
+          };
+        }
+      } else if (tokenType === 'GEM') {
+        // Для гемов: минимальная ликвидность $500, но более консервативный подход
+        if (volumeUsd >= 500) {
+          tierInfo = {
+            tier: volumeUsd >= 3000 ? 1 : (volumeUsd >= 1500 ? 2 : 3),
+            liquidity: volumeUsd,
+            holders: honeypotCheck.uniqueBuyers,
+            positionSizeMultiplier: 1.0, // Гемы - полный размер позиции
+            allowsPartialSells: true,
+          };
+        }
+      } else {
+        // Для обычных токенов: стандартная классификация Tier
+        tierInfo = await this.classifyTier(candidate.mint, volumeUsd, honeypotCheck.uniqueBuyers);
+      }
+
+      // 5. Минимальные требования для прохождения (только для обычных токенов)
+      if (tokenType === 'REGULAR' && !tierInfo) {
+        const reason = `Regular token does not meet Tier requirements: liquidity=$${volumeUsd.toFixed(2)}, holders=${honeypotCheck.uniqueBuyers}`;
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'filter_failed',
           token: candidate.mint,
           filterStage: 'simplified_tier',
           filterDetails: { ...details, rejectionReason: reason },
-          message: `Token rejected: ${reason}`,
+          message: `❌ Token rejected: ${reason}`,
         });
         return { passed: false, reason, details, tierInfo: null };
       }
 
-      // Логируем классификацию по Tier
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        token: candidate.mint,
-        message: `🔄 Tier ${tierInfo.tier} classified: liquidity=$${volumeUsd.toFixed(2)}, holders=${honeypotCheck.uniqueBuyers}, positionSizeMultiplier=${tierInfo.positionSizeMultiplier}`,
-      });
-
-      // 3. Проверка распределения ликвидности (нет одного держателя с >maxSingleHolderPct%)
-      const hasConcentratedLiquidity = await this.hasSnipers(candidate.mint);
-      details.hasConcentratedLiquidity = hasConcentratedLiquidity;
-
-      if (hasConcentratedLiquidity) {
-        const reason = `Liquidity too concentrated: single holder has >${config.maxSingleHolderPct}%`;
+      // Манипуляторы и гемы проходят даже с низкой ликвидностью (>= $500)
+      if ((tokenType === 'MANIPULATOR' || tokenType === 'GEM') && !tierInfo) {
+        const reason = `Token type ${tokenType} but liquidity too low: $${volumeUsd.toFixed(2)} < $500`;
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'filter_failed',
           token: candidate.mint,
-          filterStage: 'simplified_distribution',
+          filterStage: 'simplified_tier',
           filterDetails: { ...details, rejectionReason: reason },
-          message: `Token rejected: ${reason}`,
+          message: `❌ Token rejected: ${reason}`,
         });
-        return { passed: false, reason, details };
+        return { passed: false, reason, details, tierInfo: null };
       }
 
+      // 6. Успешное прохождение фильтра
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'filter_passed',
         token: candidate.mint,
         filterStage: 'simplified',
         filterDetails: { ...details },
-        message: `Token passed simplified filters: ${candidate.mint.substring(0, 8)}..., Tier ${tierInfo.tier}, uniqueBuyers=${honeypotCheck.uniqueBuyers}, volume=$${volumeUsd.toFixed(2)}`,
+        message: `✅ Token PASSED: ${candidate.mint.substring(0, 8)}... | Type=${tokenType}, Tier=${tierInfo?.tier || 'N/A'}, liquidity=$${volumeUsd.toFixed(2)}, holders=${honeypotCheck.uniqueBuyers}`,
       });
 
-      return { passed: true, details, tierInfo };
+      return { passed: true, details, tierInfo, tokenType };
     } catch (error: any) {
       const reason = `Filter error: ${error?.message || String(error)}`;
       logger.log({
@@ -1279,7 +1338,7 @@ export class TokenFilters {
         token: candidate.mint,
         filterStage: 'simplified_error',
         filterDetails: { ...details, rejectionReason: reason },
-        message: `Error in simplified filter: ${reason}`,
+        message: `❌ Error in simplified filter: ${reason}`,
       });
       return { passed: false, reason, details };
     }

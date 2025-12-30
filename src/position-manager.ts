@@ -144,6 +144,53 @@ class Account {
   }
 
   /**
+   * ⭐ КРИТИЧНО: Commit loss for abandoned position
+   * Списывает убыток БЕЗ возврата средств в баланс
+   * 
+   * Правила:
+   * - Освобождает lockedBalance (освобождает слот)
+   * - НЕ возвращает investedSol в totalBalance
+   * - НЕ увеличивает freeBalance
+   * - investedSol считается навсегда потерянным
+   * 
+   * @param reservedAmount - зарезервированная сумма (lockedBalance)
+   * @param lossAmount - размер убытка (investedSol)
+   */
+  commitLoss(reservedAmount: number, lossAmount: number): void {
+    if (reservedAmount < 0 || lossAmount < 0) {
+      console.error(`⚠️ Invalid commitLoss: reservedAmount=${reservedAmount}, lossAmount=${lossAmount}`);
+      return;
+    }
+
+    if (this.lockedBalance < reservedAmount) {
+      console.error(`⚠️ commitLoss: lockedBalance=${this.lockedBalance} < reservedAmount=${reservedAmount}, fixing...`);
+      // Исправляем рассинхронизацию
+      this.lockedBalance = Math.max(0, this.lockedBalance);
+    }
+
+    // ⭐ КРИТИЧНО: Освобождаем lockedBalance (освобождаем слот)
+    // НО НЕ возвращаем средства в totalBalance
+    this.lockedBalance -= reservedAmount;
+    
+    // ⭐ КРИТИЧНО: Списываем убыток из totalBalance
+    // investedSol считается навсегда потерянным
+    this.totalBalance -= lossAmount;
+
+    // Инварианты
+    if (this.lockedBalance < 0) {
+      this.lockedBalance = 0;
+    }
+    if (this.totalBalance < 0) {
+      this.totalBalance = 0;
+    }
+
+    // ⭐ ИНВАРИАНТ: freeBalance НЕ должен увеличиться после commitLoss
+    // freeBalance = totalBalance - lockedBalance
+    // После commitLoss: totalBalance уменьшился, lockedBalance уменьшился
+    // freeBalance может остаться тем же или уменьшиться, но НЕ увеличиться
+  }
+
+  /**
    * Get position size based on current free balance
    * Distributes balance evenly across available positions (not divided by fixed number)
    * Reserves funds for entry/exit fees
@@ -220,6 +267,9 @@ export class PositionManager {
 
     // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем и исправляем баланс при старте
     this.fixBalanceDesync();
+
+    // ⭐ КРИТИЧНО: Очищаем pendingTierInfo при создании (на случай перезапуска)
+    this.pendingTierInfo.clear();
 
     // Централизованное обновление цен каждые 1 секунду (уменьшено для лучшей реакции на волатильность)
     setInterval(() => this.updateAllPrices(), CHECK_INTERVAL);
@@ -338,6 +388,20 @@ export class PositionManager {
    * Исправляет рассинхронизацию баланса
    * Вызывается при старте и периодически
    */
+  /**
+   * ⭐ КРИТИЧНО: Очищает pendingTierInfo
+   * Вызывается при старте для предотвращения использования старых данных
+   */
+  clearPendingTierInfo(): void {
+    const size = this.pendingTierInfo.size;
+    this.pendingTierInfo.clear();
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      message: `🔄 PositionManager: cleared ${size} pendingTierInfo entries`,
+    });
+  }
+
   private fixBalanceDesync(): void {
     const activePositions = Array.from(this.positions.values()).filter(p => p.status === 'active');
     const totalReservedInPositions = activePositions.reduce((sum, p) => sum + (p.reservedAmount || 0), 0);
@@ -485,6 +549,42 @@ export class PositionManager {
       const isReady = await checkTokenReadiness(this.connection, candidate.mint);
       
       if (isReady) {
+          // ⭐ MANDATORY: Market cap filter with different thresholds based on token type
+          // MANIPULATOR tokens: >= $1500 USD (early entry is important)
+          // GEM and other tokens: >= $2000 USD (more conservative)
+          try {
+            // Use tokenType from candidate (set by simplifiedFilter)
+            const tokenType = candidate.tokenType || 'REGULAR';
+            const marketCapThreshold = tokenType === 'MANIPULATOR' ? 1500 : 2000;
+            
+            const marketData = await priceFetcher.getMarketData(candidate.mint);
+            if (!marketData || marketData.marketCap < marketCapThreshold) {
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'info',
+                token: candidate.mint,
+                message: `❌ MARKET CAP FILTER: marketCap=$${marketData?.marketCap.toFixed(2) || 'N/A'} < $${marketCapThreshold} USD (${tokenType}), ignoring token completely`,
+              });
+              return false; // Ignore token completely if market cap below threshold
+            }
+            
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'info',
+              token: candidate.mint,
+              message: `✅ MARKET CAP FILTER PASSED: marketCap=$${marketData.marketCap.toFixed(2)} USD >= $${marketCapThreshold} USD (${tokenType})`,
+            });
+          } catch (error) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'warning',
+              token: candidate.mint,
+              message: `⚠️ Error checking market cap: ${error instanceof Error ? error.message : String(error)}, skipping entry`,
+            });
+            await sleep(READINESS_CHECK_INTERVAL);
+            continue;
+          }
+
           // ⭐ КРИТИЧНО: Проверка multiplier перед входом (гарантирует прибыльность)
           // Для pump.fun токенов начальная цена = виртуальные резервы (30 SOL / 1.073e15 токенов)
           // Проверяем, что текущая цена уже выросла на нужный multiplier от начальной
@@ -1702,49 +1802,106 @@ export class PositionManager {
     position.status = 'closing';
 
     try {
-      // ⭐ WRITE-OFF CHECK: Проверяем, стоит ли продавать
+      // ⭐ MANDATORY EXIT PROFITABILITY CHECK: Calculate expected exit result before ANY SELL
       const exitFeeCheck = config.priorityFee + config.signatureFee;
+      const entryFeeCheck = config.priorityFee + config.signatureFee;
       const positionInvestedAmount = position.investedSol;
-      const currentMultiplier = exitPrice / position.entryPrice;
-      const expectedProceeds = positionInvestedAmount * currentMultiplier;
+      const positionSize = positionInvestedAmount + entryFeeCheck; // Total invested (including entry fees)
       
-      // Оцениваем impact для продажи
-      const sellSizeSol = expectedProceeds;
+      // Calculate expected exit price (use current exitPrice)
+      const expectedExitPrice = exitPrice;
+      const currentMultiplier = expectedExitPrice / position.entryPrice;
+      
+      // Calculate expected proceeds before slippage
+      const tokensReceived = positionInvestedAmount / position.entryPrice;
+      const expectedProceedsBeforeSlippage = tokensReceived * expectedExitPrice;
+      
+      // Estimate slippage based on current liquidity & historical slippage model
+      const sellSizeSol = expectedProceedsBeforeSlippage;
       const estimatedImpact = this.adapter.estimateImpact(sellSizeSol);
-      const realProceedsAfterSlippage = expectedProceeds * (1 - estimatedImpact);
-      const netAfterFees = realProceedsAfterSlippage - exitFeeCheck;
-      const proceedsPctOfInvested = netAfterFees / positionInvestedAmount;
-
-      // Write-off если ожидаемые proceeds < threshold
-      if (proceedsPctOfInvested < config.writeOffThresholdPct) {
+      
+      // Calculate expected exit price after slippage
+      const expectedExitPriceAfterSlippage = expectedExitPrice * (1 - estimatedImpact);
+      const expectedProceedsAfterSlippage = tokensReceived * expectedExitPriceAfterSlippage;
+      
+      // Calculate all fees (DEX fees, priority fees, network fees)
+      const allFees = exitFeeCheck; // Entry fees already deducted from investedAmount
+      
+      // Calculate net profit
+      const netProfit = expectedProceedsAfterSlippage - positionSize - allFees;
+      
+      // ⭐ HARD RULE: IF netProfit <= 0 THEN abandon position
+      if (netProfit <= 0) {
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'warning',
           token: position.token,
-          message: `💀 WRITE-OFF: ${position.token} | expectedProceeds=${expectedProceeds.toFixed(6)} SOL, afterImpact=${realProceedsAfterSlippage.toFixed(6)} SOL, afterFees=${netAfterFees.toFixed(6)} SOL (${(proceedsPctOfInvested * 100).toFixed(1)}% of invested), threshold=${(config.writeOffThresholdPct * 100).toFixed(1)}%. Abandoning position without sell.`,
+          message: `💀 EXIT NOT PROFITABLE: ${position.token.substring(0, 12)}... | expectedExitPrice=${expectedExitPrice.toFixed(10)}, expectedExitPriceAfterSlippage=${expectedExitPriceAfterSlippage.toFixed(10)}, expectedProceedsAfterSlippage=${expectedProceedsAfterSlippage.toFixed(6)} SOL, positionSize=${positionSize.toFixed(6)} SOL, allFees=${allFees.toFixed(6)} SOL, netProfit=${netProfit.toFixed(6)} SOL (<= 0). Abandoning position without sell.`,
         });
 
-        // Write-off: не продаем, просто освобождаем резервы
-        const reservedAmount = position.reservedAmount || position.investedSol;
-        this.account.release(reservedAmount, 0); // 0 proceeds = полная потеря
+        // ⭐ КРИТИЧНО: Abandon position - НЕ выполнять SELL, НЕ возвращать средства
+        const reservedAmount = position.reservedAmount || positionSize;
+        const investedSol = positionSize; // Полный размер позиции (уже включает entry fees)
 
-        // Удаляем из активных
+        // ⭐ КРИТИЧНО: Используем commitLoss вместо release
+        // commitLoss:
+        // - Освобождает lockedBalance (освобождает слот)
+        // - Списывает investedSol из totalBalance (убыток навсегда)
+        // - НЕ возвращает средства в freeBalance
+        this.account.commitLoss(reservedAmount, investedSol);
+
+        // Remove from active positions
         this.positions.delete(position.token);
         position.status = 'abandoned';
 
+        // ⭐ MANDATORY LOGGING: Log abandoned position with all required metrics
+        // Required fields: token mint, entry SOL, expected exit SOL, expected slippage %, estimated fees, netProfit, reason
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'sell',
           token: position.token,
-          exitPrice: exitPrice,
+          exitPrice: expectedExitPrice,
           multiplier: currentMultiplier,
-          profitSol: -position.investedSol,
-          reason: 'write_off_low_proceeds',
-          message: `💀 Position written off: ${position.token.substring(0, 8)}..., loss=${position.investedSol.toFixed(6)} SOL, reason=write_off_low_proceeds`,
+          profitSol: -investedSol, // Full loss (investedSol списан из totalBalance)
+          reason: 'abandoned_unprofitable_exit',
+          message: `💀 POSITION ABANDONED: ${position.token.substring(0, 12)}... | entrySOL=${investedSol.toFixed(6)}, expectedExitSOL=${expectedProceedsAfterSlippage.toFixed(6)}, expectedSlippage=${(estimatedImpact * 100).toFixed(2)}%, estimatedFees=${allFees.toFixed(6)} SOL, netProfit=${netProfit.toFixed(6)} SOL (<= 0), reason=abandoned_unprofitable_exit | investedSol=${investedSol.toFixed(6)} SOL permanently lost, totalBalance decreased by ${investedSol.toFixed(6)} SOL`,
         });
 
-        return; // Не продаем, просто списываем
+        // ⭐ MANDATORY: Log to trade logger for statistical analysis
+        tradeLogger.logTradeClose({
+          tradeId: (position as any).tradeId || `abandoned-${position.token}`,
+          token: position.token,
+          exitPrice: expectedExitPrice,
+          multiplier: currentMultiplier,
+          profitSol: -investedSol, // Full loss (100% loss)
+          reason: 'abandoned_unprofitable_exit',
+        });
+        
+        // ⭐ MANDATORY: Additional detailed logging for abandoned positions (for future analysis)
+        console.log(`[ABANDONED POSITION] ${position.token.substring(0, 12)}... | entrySOL: ${investedSol.toFixed(6)}, expectedExitSOL: ${expectedProceedsAfterSlippage.toFixed(6)}, expectedSlippage: ${(estimatedImpact * 100).toFixed(2)}%, estimatedFees: ${allFees.toFixed(6)} SOL, netProfit: ${netProfit.toFixed(6)} SOL, reason: abandoned_unprofitable_exit | investedSol=${investedSol.toFixed(6)} SOL permanently lost`);
+
+        // ⭐ ИНВАРИАНТ: Проверяем что freeBalance НЕ увеличился
+        const freeBalanceAfter = this.account.getFreeBalance();
+        const totalBalanceAfter = this.account.getTotalBalance();
+        const lockedBalanceAfter = this.account.getLockedBalance();
+        
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: position.token,
+          message: `✅ ABANDONED VERIFICATION: freeBalance=${freeBalanceAfter.toFixed(6)} SOL, totalBalance=${totalBalanceAfter.toFixed(6)} SOL, lockedBalance=${lockedBalanceAfter.toFixed(6)} SOL | investedSol=${investedSol.toFixed(6)} SOL permanently lost, slot freed`,
+        });
+
+        return; // DO NOT execute sell, DO NOT retry, DO NOT fallback, position is abandoned
       }
+      
+      // netProfit > 0: Proceed with normal SELL execution
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: position.token,
+        message: `✅ EXIT PROFITABLE: ${position.token.substring(0, 12)}... | expectedExitPrice=${expectedExitPrice.toFixed(10)}, expectedProceedsAfterSlippage=${expectedProceedsAfterSlippage.toFixed(6)} SOL, netProfit=${netProfit.toFixed(6)} SOL (> 0), proceeding with sell`,
+      });
 
       // ⭐ FIX FOR PAPER TRADING: Получаем реальную цену в момент закрытия
       // Для paper mode используем реальную цену из priceFetcher, а не переданный exitPrice
@@ -1776,7 +1933,7 @@ export class PositionManager {
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: position.token,
-        message: `${this.adapter.getMode() === 'real' ? '🔴' : '📄'} Executing ${this.adapter.getMode().toUpperCase()} SELL: ${position.token} → SOL (expected ~${expectedProceeds.toFixed(6)} SOL, estimatedImpact=${(estimatedImpact * 100).toFixed(2)}%, exitPrice=${realExitPrice.toFixed(10)})`,
+        message: `${this.adapter.getMode() === 'real' ? '🔴' : '📄'} Executing ${this.adapter.getMode().toUpperCase()} SELL: ${position.token} → SOL (expected ~${expectedProceedsAfterSlippage.toFixed(6)} SOL, estimatedImpact=${(estimatedImpact * 100).toFixed(2)}%, exitPrice=${realExitPrice.toFixed(10)})`,
       });
 
       // Получаем количество токенов для продажи
@@ -1848,8 +2005,8 @@ export class PositionManager {
       const reservedAmount = position.reservedAmount || investedAmount; // Amount that was locked
       
       // ✅ FIX: Рассчитываем реальные затраты на позицию (без завышенного slippage)
-      // positionSize = positionInvestedAmount + entryFees (это реально потрачено при покупке)
-      const positionSize = positionInvestedAmount + entryFee;
+      // totalPositionCost = positionInvestedAmount + entryFees (это реально потрачено при покупке)
+      const totalPositionCost = positionInvestedAmount + entryFee;
       
       // 🔴 FIX: Используем реальную цену из SELL транзакции вместо bonding curve цены
       // Это исправляет ошибки bonding curve, которые дают неправильные цены
@@ -1993,9 +2150,9 @@ export class PositionManager {
       
       // ✅ FIX: Calculate profit correctly
       // proceeds (solReceived) уже включает вычет всех комиссий выхода из транзакции
-      // Поэтому profit = proceeds - positionSize (без дополнительного вычета exitFee)
-      // positionSize = investedAmount + entryFee (реально потрачено при покупке)
-      const profit = proceeds - positionSize;
+      // Поэтому profit = proceeds - totalPositionCost (без дополнительного вычета exitFee)
+      // totalPositionCost = investedAmount + entryFee (реально потрачено при покупке)
+      const profit = proceeds - totalPositionCost;
       
       // TIMING ANALYSIS: Extract timing data for hypothesis validation
       const timingData = (position as any).timingData || {};
@@ -2217,6 +2374,7 @@ export class PositionManager {
     const positions = Array.from(this.positions.values());
     
     for (const position of positions) {
+      // ⭐ Only close active positions (abandoned positions are already excluded)
       if (position.status === 'active') {
         const exitPrice = position.currentPrice || position.entryPrice;
         await this.closePosition(position, 'shutdown', exitPrice);

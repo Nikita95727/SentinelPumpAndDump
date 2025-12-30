@@ -216,4 +216,3 @@ export class PaperTradingAdapter implements ITradingAdapter {
     return new Map(this.positions);
   }
 }
-

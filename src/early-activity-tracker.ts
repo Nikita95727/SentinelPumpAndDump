@@ -107,6 +107,17 @@ export class EarlyActivityTracker {
       }
     }
   }
+
+  /**
+   * ⭐ КРИТИЧНО: Полная очистка всех наблюдений
+   * Вызывается при старте бота для предотвращения повторной обработки токенов
+   * @returns Количество очищенных наблюдений
+   */
+  clearAll(): number {
+    const size = this.observations.size;
+    this.observations.clear();
+    return size;
+  }
 }
 
 export const earlyActivityTracker = new EarlyActivityTracker();

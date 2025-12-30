@@ -9,11 +9,14 @@ export interface TierInfo {
   minEffectiveMultiplier?: number; // Минимальный эффективный multiplier для входа (для Tier 2/3)
 }
 
+export type TokenType = 'MANIPULATOR' | 'GEM' | 'REGULAR';
+
 export interface TokenCandidate {
   mint: string;
   createdAt: number; // timestamp в миллисекундах
   signature: string; // signature создания токена
   isRisky?: boolean; // Флаг для рискованных токенов (не honeypot, но требуют осторожности)
+  tokenType?: TokenType; // Тип токена: манипулятор, самородок или обычный
 }
 
 export interface Position {

@@ -87,6 +87,10 @@ class PumpFunSniper {
         this.adapter
       );
       console.log(`✅ Position Manager initialized with ${initialDeposit.toFixed(6)} SOL`);
+      
+      // ⭐ КРИТИЧНО: Очищаем pendingTierInfo в PositionManager
+      // Это предотвращает использование старых данных о Tier между запусками
+      this.positionManager.clearPendingTierInfo();
 
       // ⭐ Инициализируем фильтры для honeypot check
       this.filters = new TokenFilters(this.connection);
@@ -108,13 +112,17 @@ class PumpFunSniper {
       });
       console.log('✅ Gem Tracker initialized (GEM DETECTION STRATEGY enabled)');
 
+      // ⭐ КРИТИЧНО: Очищаем все кеши и структуры данных перед запуском
+      // Это предотвращает повторную обработку токенов между запусками
+      this.clearAllCaches();
+
       // Инициализируем сканер
       this.scanner = new TokenScanner(async (candidate: TokenCandidate) => {
         await this.handleNewToken(candidate);
       });
 
       await this.scanner.start();
-      console.log('✅ Token scanner started');
+      console.log('✅ Token scanner started (all caches cleared)');
 
       // Периодическая статистика (каждые 10 секунд)
       this.statsInterval = setInterval(() => {
@@ -154,6 +162,50 @@ class PumpFunSniper {
     }
   }
 
+  /**
+   * ⭐ КРИТИЧНО: Очищает все кеши и структуры данных перед запуском
+   * Вызывается ПЕРЕД каждым запуском для предотвращения повторной обработки токенов
+   * Это гарантирует, что бот не будет входить в одни и те же токены несколько раз
+   */
+  private clearAllCaches(): void {
+    try {
+      // Очищаем earlyActivityTracker (singleton) - наблюдения за ранней активностью
+      const { earlyActivityTracker } = require('./early-activity-tracker');
+      if (earlyActivityTracker && earlyActivityTracker.clearAll) {
+        const observationsSize = earlyActivityTracker.clearAll();
+        console.log(`   • EarlyActivityTracker: cleared ${observationsSize} observations`);
+      }
+      
+      // Очищаем cache (singleton) - кеш фильтров и RPC запросов
+      const { cache } = require('./cache');
+      if (cache) {
+        cache.clear().catch(() => {}); // Неблокирующая очистка
+        console.log('   • Cache: cleared (memory + Redis if available)');
+      }
+      
+      // Очищаем priceFetcher кеш (singleton) - кеш цен токенов
+      const { priceFetcher } = require('./price-fetcher');
+      if (priceFetcher && priceFetcher.clearCache) {
+        priceFetcher.clearCache();
+        console.log('   • PriceFetcher: cleared price cache');
+      }
+      
+      console.log('✅ All caches and data structures cleared before startup');
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: '🔄 All caches and data structures cleared before startup (earlyActivityTracker, cache, priceFetcher)',
+      });
+    } catch (error) {
+      console.warn('⚠️ Warning: Error clearing some caches:', error instanceof Error ? error.message : String(error));
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'warning',
+        message: `Warning: Error clearing some caches: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
   private async handleNewToken(candidate: TokenCandidate): Promise<void> {
     if (!this.positionManager || !this.gemTracker || !this.filters || this.isShuttingDown) return;
 
@@ -173,42 +225,36 @@ class PumpFunSniper {
     }
 
     try {
-      // ⭐ ФИЛЬТРАЦИЯ: Проверяем токен через simplifiedFilter (включая Tier классификацию)
-      // Фильтр уже выполнен в positionManager.tryOpenPosition, но для gem-tracker нужна отдельная проверка
-      // Если токен прошел фильтры - отправляем в tryOpenPosition для входа
+      // ⭐ НОВАЯ ЛОГИКА: Упрощенная фильтрация для поиска МАНИПУЛЯТОРОВ и ГЕМОВ
+      // Фильтр ищет манипуляторов и гемов, а не отбрасывает их
       const filterResult = await this.filters.simplifiedFilter(candidate);
       
       if (!filterResult.passed) {
-        // ⭐ ЗАПУСКАЕМ ОТСЛЕЖИВАНИЕ ТОКЕНА С КОНЦЕНТРИРОВАННОЙ ЛИКВИДНОСТЬЮ
-        if (filterResult.details?.hasConcentratedLiquidity && this.concentratedLiquidityTracker) {
-          const liquidityData = await this.filters.getLiquidityDistribution(candidate.mint);
-          if (liquidityData) {
-            await this.concentratedLiquidityTracker.startTracking(candidate.mint, {
-              liquidity: liquidityData.totalLiquidity,
-              holders: liquidityData.uniqueHolders,
-              topHolderPct: liquidityData.topHolderPercentage,
-            });
-          }
-        }
-        
+        // Токен не прошел фильтр (только honeypot или слишком низкая ликвидность)
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: candidate.mint,
-          message: `❌ Token rejected: ${filterResult.reason || 'Unknown reason'}${filterResult.details?.hasConcentratedLiquidity ? ' (tracking started for analysis)' : ''}`,
+          message: `❌ Token rejected: ${filterResult.reason || 'Unknown reason'}`,
         });
         return;
       }
 
-      // Фильтр прошел - отправляем токен в tryOpenPosition для входа
-      // tryOpenPosition сам выполнит readiness check, multiplier check и откроет позицию
+      // ⭐ Токен прошел фильтр - определяем тип и отправляем в очередь для торговли
+      const tokenType = filterResult.tokenType || 'REGULAR';
+      candidate.tokenType = tokenType; // Сохраняем тип токена в candidate
+
+      // Логируем тип токена
+      const typeEmoji = tokenType === 'MANIPULATOR' ? '🎯' : (tokenType === 'GEM' ? '💎' : '📊');
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `${typeEmoji} Token PASSED: Type=${tokenType}, Tier=${filterResult.tierInfo?.tier || 'N/A'}, liquidity=$${filterResult.details?.volumeUsd?.toFixed(2) || 'N/A'}, sending to position manager for entry`,
+      });
+
+      // ⭐ Отправляем в очередь для торговли (манипуляторы, гемы и обычные токены)
       if (this.positionManager && !this.isShuttingDown) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          token: candidate.mint,
-          message: `✅ Token passed filters (Tier ${filterResult.tierInfo?.tier || 'N/A'}), sending to position manager for entry`,
-        });
         await this.positionManager.tryOpenPosition(candidate);
       }
     } catch (error) {

@@ -47,6 +47,9 @@ interface ConcentratedTokenData {
   lowestPriceTime: number;
   maxLiquidity: number;
   minLiquidity: number;
+  peakMarketCap: number; // ⭐ Пиковая капитализация (для расчета slippage при выходе)
+  peakMarketCapTime: number; // ⭐ Время достижения пиковой капитализации
+  initialMarketCap: number; // ⭐ Начальная капитализация
   entryOpportunities: Array<{
     timestamp: number;
     price: number;
@@ -54,6 +57,7 @@ interface ConcentratedTokenData {
     reason: string;
     estimatedSlippage?: number;
     safetyScore?: number; // 0-1
+    marketCap?: number; // ⭐ Капитализация на момент возможности входа
   }>;
   exitOpportunities: Array<{
     timestamp: number;
@@ -61,6 +65,8 @@ interface ConcentratedTokenData {
     multiplier: number;
     reason: string;
     urgency?: number; // 0-1
+    marketCap?: number; // ⭐ Капитализация на момент возможности выхода
+    estimatedExitSlippage?: number; // ⭐ Ожидаемый slippage при выходе на основе капитализации
   }>;
   manipulationPhases: ManipulationPattern[];
   currentPhase: ManipulationPhase;
@@ -72,7 +78,7 @@ interface ConcentratedTokenData {
   }>;
   estimatedSlippage: {
     entry: number; // Ожидаемый slippage при входе
-    exit: number; // Ожидаемый slippage при выходе
+    exit: number; // Ожидаемый slippage при выходе (на основе пиковой капитализации)
     lastCalculated: number;
   };
   status: 'tracking' | 'completed' | 'abandoned';
@@ -121,6 +127,15 @@ export class ConcentratedLiquidityTracker {
     const now = Date.now();
     const initialPrice = await priceFetcher.getPrice(mint);
 
+    // ⭐ Получаем начальную капитализацию
+    let initialMarketCap = 0;
+    try {
+      const marketData = await priceFetcher.getMarketData(mint);
+      initialMarketCap = marketData?.marketCap || 0;
+    } catch (error) {
+      // Игнорируем ошибки получения капитализации
+    }
+
     // Рассчитываем ожидаемый slippage на основе ликвидности
     const estimatedEntrySlippage = this.calculateEstimatedSlippage(initialData.liquidity, 0.003); // Стандартный размер позиции
     const estimatedExitSlippage = this.calculateEstimatedSlippage(initialData.liquidity, 0.003);
@@ -135,6 +150,7 @@ export class ConcentratedLiquidityTracker {
         liquidity: initialData.liquidity,
         holders: initialData.holders,
         topHolderPct: initialData.topHolderPct,
+        marketCap: initialMarketCap, // ⭐ Сохраняем капитализацию в снимке
       }],
       peakPrice: initialPrice || 0,
       peakPriceTime: now,
@@ -142,6 +158,9 @@ export class ConcentratedLiquidityTracker {
       lowestPriceTime: now,
       maxLiquidity: initialData.liquidity,
       minLiquidity: initialData.liquidity,
+      peakMarketCap: initialMarketCap, // ⭐ Начальная капитализация = пиковая
+      peakMarketCapTime: now,
+      initialMarketCap, // ⭐ Сохраняем начальную капитализацию
       entryOpportunities: [],
       exitOpportunities: [],
       manipulationPhases: [],
@@ -161,6 +180,7 @@ export class ConcentratedLiquidityTracker {
       holders: initialData.holders,
       topHolderPct: initialData.topHolderPct,
       initialPrice,
+      initialMarketCap, // ⭐ Логируем начальную капитализацию
       estimatedEntrySlippage,
       estimatedExitSlippage,
       tier: initialData.liquidity >= 5000 ? 1 : (initialData.liquidity >= 2000 ? 2 : 3),
@@ -259,6 +279,16 @@ export class ConcentratedLiquidityTracker {
       return; // Не удалось получить цену
     }
 
+    // ⭐ Получаем текущую капитализацию
+    let currentMarketCap = 0;
+    try {
+      const marketData = await priceFetcher.getMarketData(mint);
+      currentMarketCap = marketData?.marketCap || 0;
+    } catch (error) {
+      // Используем последнюю известную капитализацию из снимка
+      currentMarketCap = lastSnapshot?.marketCap || 0;
+    }
+
     // Получаем текущие данные о ликвидности и holders
     let liquidity = lastSnapshot?.liquidity || 0;
     let holders = lastSnapshot?.holders || 0;
@@ -283,6 +313,7 @@ export class ConcentratedLiquidityTracker {
       liquidity,
       holders,
       topHolderPct,
+      marketCap: currentMarketCap, // ⭐ Сохраняем капитализацию в снимке
     };
 
     tokenData.snapshots.push(snapshot);
@@ -303,6 +334,11 @@ export class ConcentratedLiquidityTracker {
     if (liquidity < tokenData.minLiquidity || tokenData.minLiquidity === 0) {
       tokenData.minLiquidity = liquidity;
     }
+    // ⭐ Обновляем пиковую капитализацию (критично для расчета slippage при выходе)
+    if (currentMarketCap > tokenData.peakMarketCap) {
+      tokenData.peakMarketCap = currentMarketCap;
+      tokenData.peakMarketCapTime = now;
+    }
 
     // Рассчитываем velocity (скорость изменения)
     const snapshots = tokenData.snapshots;
@@ -315,7 +351,13 @@ export class ConcentratedLiquidityTracker {
 
     // Обновляем ожидаемый slippage
     tokenData.estimatedSlippage.entry = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
-    tokenData.estimatedSlippage.exit = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
+    // ⭐ КРИТИЧНО: Используем пиковую капитализацию для расчета slippage при выходе
+    // Чем выше была капитализация на пике, тем ниже будет slippage при выходе
+    tokenData.estimatedSlippage.exit = this.calculateExitSlippageByMarketCap(
+      tokenData.peakMarketCap,
+      snapshot.liquidity,
+      0.003 // Размер позиции при выходе
+    );
     tokenData.estimatedSlippage.lastCalculated = now;
 
     // Детектируем фазу манипуляции
@@ -533,6 +575,33 @@ export class ConcentratedLiquidityTracker {
   }
 
   /**
+   * ⭐ КРИТИЧНО: Рассчитывает ожидаемый slippage при выходе на основе пиковой капитализации
+   * Чем выше была капитализация на пике, тем больше была ликвидность и тем ниже slippage
+   * Это ключевая метрика для понимания, сможем ли мы выйти с прибылью
+   */
+  private calculateExitSlippageByMarketCap(
+    peakMarketCap: number,
+    currentLiquidity: number,
+    positionSizeSol: number
+  ): number {
+    // Используем пиковую капитализацию как индикатор максимальной ликвидности
+    // Обычно ликвидность составляет 10-30% от капитализации
+    const estimatedPeakLiquidity = peakMarketCap * 0.2; // Берем 20% как среднее
+    
+    // Используем минимум из текущей ликвидности и оцененной пиковой
+    // Если капитализация упала, ликвидность тоже могла упасть
+    const effectiveLiquidity = Math.min(currentLiquidity, estimatedPeakLiquidity);
+    
+    // Если ликвидность очень низкая, используем текущую
+    if (effectiveLiquidity < 100) {
+      return this.calculateEstimatedSlippage(currentLiquidity, positionSizeSol);
+    }
+    
+    // Рассчитываем slippage на основе эффективной ликвидности
+    return this.calculateEstimatedSlippage(effectiveLiquidity, positionSizeSol);
+  }
+
+  /**
    * Детектирует текущую фазу манипуляции
    */
   private async detectManipulationPhase(
@@ -698,11 +767,13 @@ export class ConcentratedLiquidityTracker {
           reason: `Price dropped ${priceFromPeak.toFixed(1)}% from peak (potential bounce)`,
           estimatedSlippage,
           safetyScore,
+          marketCap: snapshot.marketCap, // ⭐ Капитализация на момент возможности входа
         });
         await this.logEvent(mint, 'ENTRY_OPPORTUNITY', {
           price: currentPrice,
           priceFromPeak,
           liquidity: snapshot.liquidity,
+          marketCap: snapshot.marketCap, // ⭐ Логируем капитализацию
           reason: 'Price drop from peak',
         });
       }
@@ -728,11 +799,13 @@ export class ConcentratedLiquidityTracker {
           reason: `Liquidity increased ${liquidityChange.toFixed(1)}% (manipulator adding liquidity?)`,
           estimatedSlippage,
           safetyScore,
+          marketCap: snapshot.marketCap, // ⭐ Капитализация на момент возможности входа
         });
           await this.logEvent(mint, 'ENTRY_OPPORTUNITY', {
             price: currentPrice,
             liquidityChange,
             liquidity: snapshot.liquidity,
+            marketCap: snapshot.marketCap, // ⭐ Логируем капитализацию
             reason: 'Liquidity increase',
           });
         }
@@ -749,17 +822,29 @@ export class ConcentratedLiquidityTracker {
       if (!existing) {
         const urgency = this.calculateExitUrgency(tokenData.currentPhase, snapshot);
         
+        // ⭐ Рассчитываем ожидаемый slippage при выходе на основе пиковой капитализации
+        const estimatedExitSlippage = this.calculateExitSlippageByMarketCap(
+          tokenData.peakMarketCap,
+          snapshot.liquidity,
+          0.003
+        );
+        
         tokenData.exitOpportunities.push({
           timestamp: snapshot.timestamp,
           price: currentPrice,
           multiplier,
           reason: `Price increased ${priceChange.toFixed(1)}% from entry (${multiplier.toFixed(2)}x)`,
           urgency,
+          marketCap: snapshot.marketCap, // ⭐ Капитализация на момент возможности выхода
+          estimatedExitSlippage, // ⭐ Ожидаемый slippage при выходе
         });
         await this.logEvent(mint, 'EXIT_OPPORTUNITY', {
           price: currentPrice,
           multiplier,
           priceChange,
+          marketCap: snapshot.marketCap, // ⭐ Логируем капитализацию
+          peakMarketCap: tokenData.peakMarketCap, // ⭐ Логируем пиковую капитализацию
+          estimatedExitSlippage, // ⭐ Логируем ожидаемый slippage
           reason: 'Significant price increase',
         });
       }
@@ -778,17 +863,29 @@ export class ConcentratedLiquidityTracker {
         if (!existing) {
         const urgency = this.calculateExitUrgency(tokenData.currentPhase, snapshot);
         
+        // ⭐ Рассчитываем ожидаемый slippage при выходе на основе пиковой капитализации
+        const estimatedExitSlippage = this.calculateExitSlippageByMarketCap(
+          tokenData.peakMarketCap,
+          snapshot.liquidity,
+          0.003
+        );
+        
         tokenData.exitOpportunities.push({
           timestamp: snapshot.timestamp,
           price: currentPrice,
           multiplier,
           reason: `Liquidity dropped ${Math.abs(liquidityChange).toFixed(1)}% (manipulator withdrawing? Exit now!)`,
           urgency,
+          marketCap: snapshot.marketCap, // ⭐ Капитализация на момент возможности выхода
+          estimatedExitSlippage, // ⭐ Ожидаемый slippage при выходе
         });
           await this.logEvent(mint, 'EXIT_OPPORTUNITY', {
             price: currentPrice,
             multiplier,
             liquidityChange,
+            marketCap: snapshot.marketCap, // ⭐ Логируем капитализацию
+            peakMarketCap: tokenData.peakMarketCap, // ⭐ Логируем пиковую капитализацию
+            estimatedExitSlippage, // ⭐ Логируем ожидаемый slippage
             reason: 'Liquidity withdrawal warning',
           });
         }
@@ -810,8 +907,11 @@ export class ConcentratedLiquidityTracker {
         lowestPrice: tokenData.lowestPrice,
         maxLiquidity: tokenData.maxLiquidity,
         minLiquidity: tokenData.minLiquidity,
+        peakMarketCap: tokenData.peakMarketCap, // ⭐ Пиковая капитализация
+        initialMarketCap: tokenData.initialMarketCap, // ⭐ Начальная капитализация
         entryOpportunities: tokenData.entryOpportunities.length,
         exitOpportunities: tokenData.exitOpportunities.length,
+        estimatedExitSlippage: tokenData.estimatedSlippage.exit, // ⭐ Ожидаемый slippage при выходе
       },
     };
 
@@ -825,7 +925,7 @@ export class ConcentratedLiquidityTracker {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `🔍 [CONCENTRATED] ${mint.substring(0, 12)}... | Price: ${snapshot.price.toFixed(10)}, Liq: $${snapshot.liquidity.toFixed(2)}, Holders: ${snapshot.holders}, Top: ${snapshot.topHolderPct.toFixed(1)}% | Peak: ${tokenData.peakPrice.toFixed(10)} (${((snapshot.price / tokenData.peakPrice - 1) * 100).toFixed(1)}%) | Entry opps: ${tokenData.entryOpportunities.length}, Exit opps: ${tokenData.exitOpportunities.length}`,
+        message: `🔍 [CONCENTRATED] ${mint.substring(0, 12)}... | Price: ${snapshot.price.toFixed(10)}, MarketCap: $${(snapshot.marketCap || 0).toFixed(2)}, Peak MC: $${tokenData.peakMarketCap.toFixed(2)}, Liq: $${snapshot.liquidity.toFixed(2)}, Holders: ${snapshot.holders}, Top: ${snapshot.topHolderPct.toFixed(1)}% | Peak: ${tokenData.peakPrice.toFixed(10)} (${((snapshot.price / tokenData.peakPrice - 1) * 100).toFixed(1)}%) | Exit slippage: ${(tokenData.estimatedSlippage.exit * 100).toFixed(1)}% | Entry opps: ${tokenData.entryOpportunities.length}, Exit opps: ${tokenData.exitOpportunities.length}`,
       });
     }
   }

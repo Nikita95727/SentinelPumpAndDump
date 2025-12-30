@@ -230,9 +230,11 @@ export class PumpFunPriceFetcher {
 
   /**
    * Очищает кэш
+   * ⭐ КРИТИЧНО: Вызывается при старте для полной очистки всех кешей цен
    */
   clearCache(): void {
     this.priceCache.clear();
+    this.microPriceCache.clear();
   }
 }
 
