@@ -21,6 +21,19 @@ interface ConcentratedTokenSnapshot {
   volume24h?: number;
   priceChange24h?: number;
   marketCap?: number;
+  priceVelocity?: number; // Изменение цены за период (для детекции импульса)
+  liquidityVelocity?: number; // Изменение ликвидности за период
+}
+
+type ManipulationPhase = 'accumulation' | 'pump' | 'dump' | 'recovery' | 'unknown';
+
+interface ManipulationPattern {
+  phase: ManipulationPhase;
+  confidence: number; // 0-1
+  detectedAt: number;
+  expectedDuration?: number; // Ожидаемая длительность фазы в мс
+  entrySafety?: number; // 0-1, безопасность входа в этой фазе
+  exitUrgency?: number; // 0-1, срочность выхода
 }
 
 interface ConcentratedTokenData {
@@ -39,13 +52,29 @@ interface ConcentratedTokenData {
     price: number;
     liquidity: number;
     reason: string;
+    estimatedSlippage?: number;
+    safetyScore?: number; // 0-1
   }>;
   exitOpportunities: Array<{
     timestamp: number;
     price: number;
     multiplier: number;
     reason: string;
+    urgency?: number; // 0-1
   }>;
+  manipulationPhases: ManipulationPattern[];
+  currentPhase: ManipulationPhase;
+  phaseHistory: Array<{
+    phase: ManipulationPhase;
+    startTime: number;
+    endTime?: number;
+    duration?: number;
+  }>;
+  estimatedSlippage: {
+    entry: number; // Ожидаемый slippage при входе
+    exit: number; // Ожидаемый slippage при выходе
+    lastCalculated: number;
+  };
   status: 'tracking' | 'completed' | 'abandoned';
 }
 
@@ -88,6 +117,10 @@ export class ConcentratedLiquidityTracker {
     const now = Date.now();
     const initialPrice = await priceFetcher.getPrice(mint);
 
+    // Рассчитываем ожидаемый slippage на основе ликвидности
+    const estimatedEntrySlippage = this.calculateEstimatedSlippage(initialData.liquidity, 0.003); // Стандартный размер позиции
+    const estimatedExitSlippage = this.calculateEstimatedSlippage(initialData.liquidity, 0.003);
+
     const tokenData: ConcentratedTokenData = {
       mint,
       firstDetected: now,
@@ -107,6 +140,14 @@ export class ConcentratedLiquidityTracker {
       minLiquidity: initialData.liquidity,
       entryOpportunities: [],
       exitOpportunities: [],
+      manipulationPhases: [],
+      currentPhase: 'unknown',
+      phaseHistory: [],
+      estimatedSlippage: {
+        entry: estimatedEntrySlippage,
+        exit: estimatedExitSlippage,
+        lastCalculated: now,
+      },
       status: 'tracking',
     };
 
@@ -248,11 +289,176 @@ export class ConcentratedLiquidityTracker {
       tokenData.minLiquidity = liquidity;
     }
 
+    // Рассчитываем velocity (скорость изменения)
+    const snapshots = tokenData.snapshots;
+    if (snapshots.length >= 2) {
+      const prevSnapshot = snapshots[snapshots.length - 2];
+      const timeDelta = (snapshot.timestamp - prevSnapshot.timestamp) / 1000; // секунды
+      snapshot.priceVelocity = timeDelta > 0 ? (snapshot.price - prevSnapshot.price) / timeDelta : 0;
+      snapshot.liquidityVelocity = timeDelta > 0 ? (snapshot.liquidity - prevSnapshot.liquidity) / timeDelta : 0;
+    }
+
+    // Обновляем ожидаемый slippage
+    tokenData.estimatedSlippage.entry = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
+    tokenData.estimatedSlippage.exit = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
+    tokenData.estimatedSlippage.lastCalculated = now;
+
+    // Детектируем фазу манипуляции
+    await this.detectManipulationPhase(mint, tokenData, snapshot);
+
     // Анализируем возможности входа/выхода
     await this.analyzeOpportunities(mint, tokenData, snapshot);
 
     // Логируем снимок
     await this.logSnapshot(mint, snapshot, tokenData);
+  }
+
+  /**
+   * Рассчитывает ожидаемый slippage на основе ликвидности
+   */
+  private calculateEstimatedSlippage(liquidityUsd: number, positionSizeSol: number): number {
+    // Простая модель: slippage обратно пропорционален ликвидности
+    // Чем больше ликвидность, тем меньше slippage
+    const positionSizeUsd = positionSizeSol * 170; // Примерная цена SOL
+    const liquidityRatio = positionSizeUsd / liquidityUsd;
+    
+    // Базовый slippage + влияние размера позиции
+    const baseSlippage = 0.05; // 5% базовый
+    const impactSlippage = Math.min(liquidityRatio * 0.5, 0.3); // Максимум 30% impact
+    
+    return baseSlippage + impactSlippage;
+  }
+
+  /**
+   * Детектирует текущую фазу манипуляции
+   */
+  private async detectManipulationPhase(
+    mint: string,
+    tokenData: ConcentratedTokenData,
+    snapshot: ConcentratedTokenSnapshot
+  ): Promise<void> {
+    const snapshots = tokenData.snapshots;
+    if (snapshots.length < 5) return; // Нужно минимум 5 снимков для детекции
+
+    const recentSnapshots = snapshots.slice(-5);
+    const priceTrend = recentSnapshots[recentSnapshots.length - 1].price / recentSnapshots[0].price - 1;
+    const liquidityTrend = (recentSnapshots[recentSnapshots.length - 1].liquidity - recentSnapshots[0].liquidity) / recentSnapshots[0].liquidity;
+
+    let detectedPhase: ManipulationPhase = 'unknown';
+    let confidence = 0.5;
+
+    // ACCUMULATION: Цена стабильна/растет медленно, ликвидность увеличивается
+    if (priceTrend >= -0.1 && priceTrend <= 0.3 && liquidityTrend > 0.1) {
+      detectedPhase = 'accumulation';
+      confidence = 0.7 + Math.min(liquidityTrend, 0.3);
+      tokenData.estimatedSlippage.entry = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
+    }
+    // PUMP: Цена быстро растет, ликвидность стабильна или растет
+    else if (priceTrend > 0.3 && liquidityTrend >= -0.1) {
+      detectedPhase = 'pump';
+      confidence = 0.6 + Math.min(priceTrend, 0.4);
+    }
+    // DUMP: Цена падает, ликвидность уменьшается
+    else if (priceTrend < -0.2 && liquidityTrend < -0.1) {
+      detectedPhase = 'dump';
+      confidence = 0.8;
+    }
+    // RECOVERY: Цена стабилизируется после падения, ликвидность стабильна
+    else if (priceTrend > -0.1 && priceTrend < 0.1 && liquidityTrend > -0.05 && liquidityTrend < 0.05) {
+      detectedPhase = 'recovery';
+      confidence = 0.6;
+    }
+
+    // Обновляем текущую фазу если изменилась
+    if (detectedPhase !== tokenData.currentPhase) {
+      const now = Date.now();
+      
+      // Завершаем предыдущую фазу
+      if (tokenData.phaseHistory.length > 0) {
+        const lastPhase = tokenData.phaseHistory[tokenData.phaseHistory.length - 1];
+        if (!lastPhase.endTime) {
+          lastPhase.endTime = now;
+          lastPhase.duration = now - lastPhase.startTime;
+        }
+      }
+
+      // Начинаем новую фазу
+      tokenData.phaseHistory.push({
+        phase: detectedPhase,
+        startTime: now,
+      });
+
+      tokenData.currentPhase = detectedPhase;
+
+      // Сохраняем паттерн
+      tokenData.manipulationPhases.push({
+        phase: detectedPhase,
+        confidence,
+        detectedAt: now,
+        entrySafety: this.calculateEntrySafety(detectedPhase, snapshot),
+        exitUrgency: this.calculateExitUrgency(detectedPhase, snapshot),
+      });
+
+      await this.logEvent(mint, 'PHASE_DETECTED', {
+        phase: detectedPhase,
+        confidence,
+        price: snapshot.price,
+        liquidity: snapshot.liquidity,
+        priceTrend: priceTrend * 100,
+        liquidityTrend: liquidityTrend * 100,
+        entrySafety: this.calculateEntrySafety(detectedPhase, snapshot),
+        exitUrgency: this.calculateExitUrgency(detectedPhase, snapshot),
+      });
+    }
+  }
+
+  /**
+   * Рассчитывает безопасность входа (0-1)
+   */
+  private calculateEntrySafety(phase: ManipulationPhase, snapshot: ConcentratedTokenSnapshot): number {
+    let safety = 0.5; // Базовая безопасность
+
+    // ACCUMULATION - самый безопасный момент
+    if (phase === 'accumulation') {
+      safety = 0.8;
+      // Увеличиваем безопасность если ликвидность высокая
+      if (snapshot.liquidity > 3000) safety = 0.9;
+      if (snapshot.liquidity > 5000) safety = 0.95;
+    }
+    // RECOVERY - относительно безопасно
+    else if (phase === 'recovery') {
+      safety = 0.6;
+    }
+    // PUMP - рискованно, но может быть прибыльно
+    else if (phase === 'pump') {
+      safety = 0.3;
+    }
+    // DUMP - очень рискованно
+    else if (phase === 'dump') {
+      safety = 0.1;
+    }
+
+    // Учитываем slippage: чем меньше slippage, тем безопаснее
+    const slippage = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
+    safety *= (1 - slippage * 0.5); // Уменьшаем безопасность на 50% от slippage
+
+    return Math.max(0, Math.min(1, safety));
+  }
+
+  /**
+   * Рассчитывает срочность выхода (0-1)
+   */
+  private calculateExitUrgency(phase: ManipulationPhase, snapshot: ConcentratedTokenSnapshot): number {
+    // DUMP - очень срочно выходить
+    if (phase === 'dump') {
+      return 0.9;
+    }
+    // PUMP - может быть хороший момент для выхода
+    if (phase === 'pump') {
+      return 0.6;
+    }
+    // Остальные фазы - не срочно
+    return 0.2;
   }
 
   /**
@@ -279,11 +485,16 @@ export class ConcentratedLiquidityTracker {
         opp => Math.abs(opp.timestamp - snapshot.timestamp) < 60000 // В пределах минуты
       );
       if (!existing) {
+        const estimatedSlippage = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
+        const safetyScore = this.calculateEntrySafety(tokenData.currentPhase, snapshot);
+        
         tokenData.entryOpportunities.push({
           timestamp: snapshot.timestamp,
           price: currentPrice,
           liquidity: snapshot.liquidity,
           reason: `Price dropped ${priceFromPeak.toFixed(1)}% from peak (potential bounce)`,
+          estimatedSlippage,
+          safetyScore,
         });
         await this.logEvent(mint, 'ENTRY_OPPORTUNITY', {
           price: currentPrice,
@@ -304,12 +515,17 @@ export class ConcentratedLiquidityTracker {
           opp => Math.abs(opp.timestamp - snapshot.timestamp) < 60000
         );
         if (!existing) {
-          tokenData.entryOpportunities.push({
-            timestamp: snapshot.timestamp,
-            price: currentPrice,
-            liquidity: snapshot.liquidity,
-            reason: `Liquidity increased ${liquidityChange.toFixed(1)}% (manipulator adding liquidity?)`,
-          });
+        const estimatedSlippage = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
+        const safetyScore = this.calculateEntrySafety(tokenData.currentPhase, snapshot);
+        
+        tokenData.entryOpportunities.push({
+          timestamp: snapshot.timestamp,
+          price: currentPrice,
+          liquidity: snapshot.liquidity,
+          reason: `Liquidity increased ${liquidityChange.toFixed(1)}% (manipulator adding liquidity?)`,
+          estimatedSlippage,
+          safetyScore,
+        });
           await this.logEvent(mint, 'ENTRY_OPPORTUNITY', {
             price: currentPrice,
             liquidityChange,
@@ -328,11 +544,14 @@ export class ConcentratedLiquidityTracker {
         opp => Math.abs(opp.timestamp - snapshot.timestamp) < 60000
       );
       if (!existing) {
+        const urgency = this.calculateExitUrgency(tokenData.currentPhase, snapshot);
+        
         tokenData.exitOpportunities.push({
           timestamp: snapshot.timestamp,
           price: currentPrice,
           multiplier,
           reason: `Price increased ${priceChange.toFixed(1)}% from entry (${multiplier.toFixed(2)}x)`,
+          urgency,
         });
         await this.logEvent(mint, 'EXIT_OPPORTUNITY', {
           price: currentPrice,
@@ -354,12 +573,15 @@ export class ConcentratedLiquidityTracker {
           opp => Math.abs(opp.timestamp - snapshot.timestamp) < 60000
         );
         if (!existing) {
-          tokenData.exitOpportunities.push({
-            timestamp: snapshot.timestamp,
-            price: currentPrice,
-            multiplier,
-            reason: `Liquidity dropped ${Math.abs(liquidityChange).toFixed(1)}% (manipulator withdrawing? Exit now!)`,
-          });
+        const urgency = this.calculateExitUrgency(tokenData.currentPhase, snapshot);
+        
+        tokenData.exitOpportunities.push({
+          timestamp: snapshot.timestamp,
+          price: currentPrice,
+          multiplier,
+          reason: `Liquidity dropped ${Math.abs(liquidityChange).toFixed(1)}% (manipulator withdrawing? Exit now!)`,
+          urgency,
+        });
           await this.logEvent(mint, 'EXIT_OPPORTUNITY', {
             price: currentPrice,
             multiplier,
