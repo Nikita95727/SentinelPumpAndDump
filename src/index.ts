@@ -11,6 +11,7 @@ import { ITradingAdapter } from './trading/trading-adapter.interface';
 import { RealTradingAdapter } from './trading/real-trading-adapter';
 import { GemTracker } from './gem-tracker';
 import { TokenFilters } from './filters';
+import { ConcentratedLiquidityTracker } from './concentrated-liquidity-tracker';
 
 class PumpFunSniper {
   private scanner: TokenScanner | null = null;
@@ -23,6 +24,7 @@ class PumpFunSniper {
   private initialDeposit: number = 0; // Сохраняем реальный начальный баланс
   private gemTracker: GemTracker | null = null; // ⭐ Система выявления самородков
   private filters: TokenFilters | null = null; // Для honeypot check
+  private concentratedLiquidityTracker: ConcentratedLiquidityTracker | null = null; // ⭐ Трекер токенов с концентрированной ликвидностью
 
   async start(): Promise<void> {
     console.log('🚀 Starting Pump.fun Sniper Bot (Optimized)...');
@@ -88,6 +90,7 @@ class PumpFunSniper {
 
       // ⭐ Инициализируем фильтры для honeypot check
       this.filters = new TokenFilters(this.connection);
+      this.concentratedLiquidityTracker = new ConcentratedLiquidityTracker(this.connection, this.filters);
       
       // ⭐ Инициализируем Gem Tracker (система выявления самородков)
       this.gemTracker = new GemTracker(this.connection, this.filters);
@@ -176,11 +179,23 @@ class PumpFunSniper {
       const filterResult = await this.filters.simplifiedFilter(candidate);
       
       if (!filterResult.passed) {
+        // ⭐ ЗАПУСКАЕМ ОТСЛЕЖИВАНИЕ ТОКЕНА С КОНЦЕНТРИРОВАННОЙ ЛИКВИДНОСТЬЮ
+        if (filterResult.details?.hasConcentratedLiquidity && this.concentratedLiquidityTracker) {
+          const liquidityData = await this.filters.getLiquidityDistribution(candidate.mint);
+          if (liquidityData) {
+            await this.concentratedLiquidityTracker.startTracking(candidate.mint, {
+              liquidity: liquidityData.totalLiquidity,
+              holders: liquidityData.uniqueHolders,
+              topHolderPct: liquidityData.topHolderPercentage,
+            });
+          }
+        }
+        
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: candidate.mint,
-          message: `❌ Token rejected: ${filterResult.reason || 'Unknown reason'}`,
+          message: `❌ Token rejected: ${filterResult.reason || 'Unknown reason'}${filterResult.details?.hasConcentratedLiquidity ? ' (tracking started for analysis)' : ''}`,
         });
         return;
       }
@@ -238,6 +253,12 @@ class PumpFunSniper {
         console.log('Closing all remaining positions...');
         await this.positionManager.closeAllPositions();
         console.log('✅ All positions closed');
+      }
+
+      // Останавливаем трекер концентрированной ликвидности
+      if (this.concentratedLiquidityTracker) {
+        this.concentratedLiquidityTracker.stop();
+        console.log('✅ Concentrated liquidity tracker stopped');
       }
 
       // Сохраняем финальную статистику

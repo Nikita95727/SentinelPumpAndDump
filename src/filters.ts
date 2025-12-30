@@ -908,7 +908,51 @@ export class TokenFilters {
     }
   }
 
-  private async hasSnipers(mint: string): Promise<boolean> {
+  /**
+   * Получает распределение ликвидности токена
+   * Возвращает данные о ликвидности, holders и проценте топ-держателя
+   */
+  async getLiquidityDistribution(mint: string): Promise<{
+    totalLiquidity: number;
+    uniqueHolders: number;
+    topHolderPercentage: number;
+  } | null> {
+    try {
+      const mintPubkey = new PublicKey(mint);
+      const connection = this.rpcPool.getConnection();
+      
+      // Получаем топ-5 холдеров
+      const largestAccounts = await connection.getTokenLargestAccounts(mintPubkey);
+      if (largestAccounts.value.length === 0) {
+        return null;
+      }
+
+      // Получаем общий supply
+      const mintInfo = await getMint(connection, mintPubkey);
+      const totalSupply = Number(mintInfo.supply);
+
+      // Вычисляем процент топ-держателя
+      const topHolderAmount = Number(largestAccounts.value[0].amount);
+      const topHolderPct = (topHolderAmount / totalSupply) * 100;
+
+      // Получаем объем торговли как приблизительную ликвидность
+      const volumeUsd = await this.getTradingVolume(mint, true);
+
+      // Приблизительное количество holders (из транзакций)
+      const honeypotCheck = await this.checkHoneypotAndScam(mint, true);
+
+      return {
+        totalLiquidity: volumeUsd,
+        uniqueHolders: honeypotCheck.uniqueBuyers,
+        topHolderPercentage: topHolderPct,
+      };
+    } catch (error) {
+      console.error(`Error getting liquidity distribution for ${mint}:`, error);
+      return null;
+    }
+  }
+
+  async hasSnipers(mint: string): Promise<boolean> {
     const startTime = Date.now();
     try {
       logger.log({
