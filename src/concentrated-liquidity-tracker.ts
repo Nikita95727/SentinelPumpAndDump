@@ -923,5 +923,40 @@ export class ConcentratedLiquidityTracker {
 
     fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));
   }
+
+  /**
+   * Рассчитывает средние длительности фаз
+   */
+  private calculateAvgPhaseDurations(tokenData: ConcentratedTokenData): Record<ManipulationPhase, number> {
+    const phaseDurations: Record<ManipulationPhase, number[]> = {
+      accumulation: [],
+      pump: [],
+      dump: [],
+      recovery: [],
+      unknown: [],
+    };
+
+    for (const phase of tokenData.phaseHistory) {
+      if (phase.duration) {
+        phaseDurations[phase.phase].push(phase.duration);
+      }
+    }
+
+    return {
+      accumulation: phaseDurations.accumulation.length > 0 
+        ? phaseDurations.accumulation.reduce((a, b) => a + b, 0) / phaseDurations.accumulation.length 
+        : 0,
+      pump: phaseDurations.pump.length > 0 
+        ? phaseDurations.pump.reduce((a, b) => a + b, 0) / phaseDurations.pump.length 
+        : 0,
+      dump: phaseDurations.dump.length > 0 
+        ? phaseDurations.dump.reduce((a, b) => a + b, 0) / phaseDurations.dump.length 
+        : 0,
+      recovery: phaseDurations.recovery.length > 0 
+        ? phaseDurations.recovery.reduce((a, b) => a + b, 0) / phaseDurations.recovery.length 
+        : 0,
+      unknown: 0,
+    };
+  }
 }
 
