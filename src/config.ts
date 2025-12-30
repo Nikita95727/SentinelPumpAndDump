@@ -77,7 +77,7 @@ const networkConfig = getNetworkConfig();
 export const config: Config = {
   initialDeposit: parseFloat(process.env.INITIAL_DEPOSIT || '0.03'),
   solUsdRate: parseFloat(process.env.SOL_USD_RATE || '170'),
-  maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || '6', 10), // Ограничено до 6 для более селективного подхода при позиции 0.004 SOL
+  maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || '5', 10), // Ограничено до 5 для максимально селективного подхода при позиции 0.004 SOL (резерв 0.01 SOL)
   maxDrawdownPct: parseFloat(process.env.MAX_DRAWDOWN_PCT || '25'),
       batchSize: 10,
       minDelaySeconds: 10,
