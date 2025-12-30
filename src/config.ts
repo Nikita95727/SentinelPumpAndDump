@@ -77,7 +77,7 @@ const networkConfig = getNetworkConfig();
 export const config: Config = {
   initialDeposit: parseFloat(process.env.INITIAL_DEPOSIT || '0.03'),
   solUsdRate: parseFloat(process.env.SOL_USD_RATE || '170'),
-  maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || '15', 10),
+  maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || '6', 10), // Ограничено до 6 для более селективного подхода при позиции 0.004 SOL
   maxDrawdownPct: parseFloat(process.env.MAX_DRAWDOWN_PCT || '25'),
       batchSize: 10,
       minDelaySeconds: 10,
@@ -115,8 +115,8 @@ export const config: Config = {
   // Safety mechanisms
   maxSolPerTrade: parseFloat(process.env.MAX_SOL_PER_TRADE || '0.05'), // Hard cap per trade (stealth) - безопасный размер, не влияет на цену
   maxTradingBalance: parseFloat(process.env.MAX_TRADING_BALANCE || '0.3'), // Максимальный торговый баланс (излишек выводится)
-  minPositionSize: parseFloat(process.env.MIN_POSITION_SIZE || '0.003'), // Минимальный размер позиции: 0.003 SOL
-  maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.003'), // Максимальный размер позиции: 0.003 SOL (равен минимальному)
+  minPositionSize: parseFloat(process.env.MIN_POSITION_SIZE || '0.004'), // Минимальный размер позиции: 0.004 SOL
+  maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.004'), // Максимальный размер позиции: 0.004 SOL (равен минимальному)
   personalWalletAddress: process.env.PERSONAL_WALLET_ADDRESS || '', // Адрес личного кошелька для вывода излишка
   maxReservePercent: parseFloat(process.env.MAX_RESERVE_PERCENT || '1.0'), // Max % of reserves per trade (if data available)
   // Trading mode configuration
