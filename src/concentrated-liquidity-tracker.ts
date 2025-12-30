@@ -88,6 +88,10 @@ export class ConcentratedLiquidityTracker {
   private readonly TRACKING_DURATION = 24 * 60 * 60 * 1000; // 24 часа
   private readonly SNAPSHOT_INTERVAL = 30 * 1000; // Снимок каждые 30 секунд
   private readonly PRICE_CHECK_INTERVAL = 10 * 1000; // Проверка цены каждые 10 секунд
+  
+  // Метрики для анализа паттернов
+  private readonly MIN_SNAPSHOTS_FOR_PATTERN = 10; // Минимум снимков для анализа паттерна
+  private readonly PATTERN_ANALYSIS_INTERVAL = 5 * 60 * 1000; // Анализ паттернов каждые 5 минут
 
   constructor(connection: Connection, filters: TokenFilters) {
     this.connection = connection;
@@ -150,6 +154,17 @@ export class ConcentratedLiquidityTracker {
       },
       status: 'tracking',
     };
+
+    // Логируем начальные метрики для анализа
+    await this.logEvent(mint, 'INITIAL_METRICS', {
+      liquidity: initialData.liquidity,
+      holders: initialData.holders,
+      topHolderPct: initialData.topHolderPct,
+      initialPrice,
+      estimatedEntrySlippage,
+      estimatedExitSlippage,
+      tier: initialData.liquidity >= 5000 ? 1 : (initialData.liquidity >= 2000 ? 2 : 3),
+    });
 
     this.trackedTokens.set(mint, tokenData);
 
@@ -311,6 +326,194 @@ export class ConcentratedLiquidityTracker {
 
     // Логируем снимок
     await this.logSnapshot(mint, snapshot, tokenData);
+
+    // Периодический анализ паттернов (каждые 5 минут)
+    const lastPatternAnalysis = (tokenData as any).lastPatternAnalysis || 0;
+    if (now - lastPatternAnalysis > this.PATTERN_ANALYSIS_INTERVAL && snapshots.length >= this.MIN_SNAPSHOTS_FOR_PATTERN) {
+      (tokenData as any).lastPatternAnalysis = now;
+      await this.analyzePatterns(mint, tokenData);
+    }
+  }
+
+  /**
+   * Анализирует паттерны для поиска закономерностей
+   */
+  private async analyzePatterns(mint: string, tokenData: ConcentratedTokenData): Promise<void> {
+    const snapshots = tokenData.snapshots;
+    if (snapshots.length < this.MIN_SNAPSHOTS_FOR_PATTERN) return;
+
+    // Анализ временных интервалов фаз
+    const phaseDurations: Record<ManipulationPhase, number[]> = {
+      accumulation: [],
+      pump: [],
+      dump: [],
+      recovery: [],
+      unknown: [],
+    };
+
+    for (const phase of tokenData.phaseHistory) {
+      if (phase.duration) {
+        phaseDurations[phase.phase].push(phase.duration);
+      }
+    }
+
+    // Средние длительности фаз
+    const avgPhaseDurations: Record<ManipulationPhase, number> = {
+      accumulation: phaseDurations.accumulation.length > 0 
+        ? phaseDurations.accumulation.reduce((a, b) => a + b, 0) / phaseDurations.accumulation.length 
+        : 0,
+      pump: phaseDurations.pump.length > 0 
+        ? phaseDurations.pump.reduce((a, b) => a + b, 0) / phaseDurations.pump.length 
+        : 0,
+      dump: phaseDurations.dump.length > 0 
+        ? phaseDurations.dump.reduce((a, b) => a + b, 0) / phaseDurations.dump.length 
+        : 0,
+      recovery: phaseDurations.recovery.length > 0 
+        ? phaseDurations.recovery.reduce((a, b) => a + b, 0) / phaseDurations.recovery.length 
+        : 0,
+      unknown: 0,
+    };
+
+    // Анализ корреляции между ликвидностью и ценой
+    const liquidityPriceCorrelation = this.calculateCorrelation(
+      snapshots.map(s => s.liquidity),
+      snapshots.map(s => s.price)
+    );
+
+    // Анализ типичных паттернов входа/выхода
+    const entryPattern = this.analyzeEntryPattern(tokenData);
+    const exitPattern = this.analyzeExitPattern(tokenData);
+
+    await this.logEvent(mint, 'PATTERN_ANALYSIS', {
+      totalSnapshots: snapshots.length,
+      avgPhaseDurations,
+      liquidityPriceCorrelation,
+      entryPattern,
+      exitPattern,
+      currentPhase: tokenData.currentPhase,
+      phaseCount: tokenData.phaseHistory.length,
+      entryOpportunitiesCount: tokenData.entryOpportunities.length,
+      exitOpportunitiesCount: tokenData.exitOpportunities.length,
+    });
+  }
+
+  /**
+   * Рассчитывает корреляцию между двумя массивами
+   */
+  private calculateCorrelation(x: number[], y: number[]): number {
+    if (x.length !== y.length || x.length === 0) return 0;
+
+    const n = x.length;
+    const sumX = x.reduce((a, b) => a + b, 0);
+    const sumY = y.reduce((a, b) => a + b, 0);
+    const sumXY = x.reduce((sum, xi, i) => sum + xi * y[i], 0);
+    const sumX2 = x.reduce((sum, xi) => sum + xi * xi, 0);
+    const sumY2 = y.reduce((sum, yi) => sum + yi * yi, 0);
+
+    const numerator = n * sumXY - sumX * sumY;
+    const denominator = Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
+
+    return denominator === 0 ? 0 : numerator / denominator;
+  }
+
+  /**
+   * Анализирует паттерн входа
+   */
+  private analyzeEntryPattern(tokenData: ConcentratedTokenData): {
+    avgLiquidity: number;
+    avgPrice: number;
+    avgSafetyScore: number;
+    commonPhase: ManipulationPhase;
+  } {
+    if (tokenData.entryOpportunities.length === 0) {
+      return {
+        avgLiquidity: 0,
+        avgPrice: 0,
+        avgSafetyScore: 0,
+        commonPhase: 'unknown',
+      };
+    }
+
+    const avgLiquidity = tokenData.entryOpportunities.reduce((sum, opp) => sum + opp.liquidity, 0) / tokenData.entryOpportunities.length;
+    const avgPrice = tokenData.entryOpportunities.reduce((sum, opp) => sum + opp.price, 0) / tokenData.entryOpportunities.length;
+    const avgSafetyScore = tokenData.entryOpportunities.reduce((sum, opp) => sum + (opp.safetyScore || 0.5), 0) / tokenData.entryOpportunities.length;
+
+    // Находим фазу, в которой чаще всего были возможности входа
+    const phaseCounts: Record<ManipulationPhase, number> = {
+      accumulation: 0,
+      pump: 0,
+      dump: 0,
+      recovery: 0,
+      unknown: 0,
+    };
+
+    for (const opp of tokenData.entryOpportunities) {
+      const phaseAtTime = this.getPhaseAtTime(tokenData, opp.timestamp);
+      phaseCounts[phaseAtTime]++;
+    }
+
+    const commonPhase = Object.entries(phaseCounts).reduce((a, b) => phaseCounts[a[0] as ManipulationPhase] > phaseCounts[b[0] as ManipulationPhase] ? a : b)[0] as ManipulationPhase;
+
+    return {
+      avgLiquidity,
+      avgPrice,
+      avgSafetyScore,
+      commonPhase,
+    };
+  }
+
+  /**
+   * Анализирует паттерн выхода
+   */
+  private analyzeExitPattern(tokenData: ConcentratedTokenData): {
+    avgMultiplier: number;
+    avgUrgency: number;
+    commonPhase: ManipulationPhase;
+  } {
+    if (tokenData.exitOpportunities.length === 0) {
+      return {
+        avgMultiplier: 0,
+        avgUrgency: 0,
+        commonPhase: 'unknown',
+      };
+    }
+
+    const avgMultiplier = tokenData.exitOpportunities.reduce((sum, opp) => sum + opp.multiplier, 0) / tokenData.exitOpportunities.length;
+    const avgUrgency = tokenData.exitOpportunities.reduce((sum, opp) => sum + (opp.urgency || 0.5), 0) / tokenData.exitOpportunities.length;
+
+    const phaseCounts: Record<ManipulationPhase, number> = {
+      accumulation: 0,
+      pump: 0,
+      dump: 0,
+      recovery: 0,
+      unknown: 0,
+    };
+
+    for (const opp of tokenData.exitOpportunities) {
+      const phaseAtTime = this.getPhaseAtTime(tokenData, opp.timestamp);
+      phaseCounts[phaseAtTime]++;
+    }
+
+    const commonPhase = Object.entries(phaseCounts).reduce((a, b) => phaseCounts[a[0] as ManipulationPhase] > phaseCounts[b[0] as ManipulationPhase] ? a : b)[0] as ManipulationPhase;
+
+    return {
+      avgMultiplier,
+      avgUrgency,
+      commonPhase,
+    };
+  }
+
+  /**
+   * Получает фазу в указанное время
+   */
+  private getPhaseAtTime(tokenData: ConcentratedTokenData, timestamp: number): ManipulationPhase {
+    for (let i = tokenData.phaseHistory.length - 1; i >= 0; i--) {
+      const phase = tokenData.phaseHistory[i];
+      if (timestamp >= phase.startTime && (!phase.endTime || timestamp <= phase.endTime)) {
+        return phase.phase;
+      }
+    }
+    return tokenData.currentPhase;
   }
 
   /**
@@ -703,6 +906,19 @@ export class ConcentratedLiquidityTracker {
       totalReturn: tokenData.snapshots[0]?.price 
         ? ((tokenData.snapshots[tokenData.snapshots.length - 1]?.price || 0) / tokenData.snapshots[0].price - 1) * 100
         : 0,
+      manipulationPhases: tokenData.manipulationPhases,
+      phaseHistory: tokenData.phaseHistory.map(ph => ({
+        phase: ph.phase,
+        startTime: new Date(ph.startTime).toISOString(),
+        endTime: ph.endTime ? new Date(ph.endTime).toISOString() : null,
+        duration: ph.duration,
+      })),
+      estimatedSlippage: tokenData.estimatedSlippage,
+      patternAnalysis: {
+        avgPhaseDurations: this.calculateAvgPhaseDurations(tokenData),
+        entryPattern: this.analyzeEntryPattern(tokenData),
+        exitPattern: this.analyzeExitPattern(tokenData),
+      },
     };
 
     fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));
