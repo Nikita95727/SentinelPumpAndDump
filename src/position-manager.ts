@@ -1853,8 +1853,9 @@ export class PositionManager {
       
       // 🔴 FIX: Используем реальную цену из SELL транзакции вместо bonding curve цены
       // Это исправляет ошибки bonding curve, которые дают неправильные цены
-      // ⭐ FIX FOR PAPER TRADING: realExitPrice уже установлен выше из priceFetcher или executeSell
-      let actualExitPrice = (this.adapter.getMode() === 'paper' && realExitPrice !== exitPrice) ? realExitPrice : exitPrice;
+      // ⭐ CRITICAL FIX: actualExitPrice должен использовать realExitPrice если он был обновлен из sellResult.markPrice
+      // realExitPrice уже может быть обновлен из sellResult.markPrice выше (строка 1823)
+      let actualExitPrice = realExitPrice; // Используем realExitPrice (который может быть обновлен из sellResult.markPrice)
       let actualProceeds: number | null = null;
       
       // Если есть реальная SELL транзакция, используем solReceived для расчета прибыли
@@ -1866,15 +1867,20 @@ export class PositionManager {
           
           // ⭐ FIX FOR PAPER TRADING: Используем markPrice из executeSell для расчета exitPrice
           // В paper mode executeSell возвращает реальную цену из priceFetcher
+          // realExitPrice уже обновлен выше из sellResult.markPrice (строка 1823), но проверим еще раз
           if (this.adapter.getMode() === 'paper' && (position as any).sellResult?.markPrice) {
             actualExitPrice = (position as any).sellResult.markPrice;
+            // Убедимся что realExitPrice тоже обновлен
+            if (realExitPrice !== actualExitPrice) {
+              realExitPrice = actualExitPrice;
+            }
             logger.log({
               timestamp: getCurrentTimestamp(),
               type: 'info',
               token: position.token,
               message: `📄 PAPER MODE: Using markPrice from executeSell: ${actualExitPrice.toFixed(10)}, solReceived=${solReceived.toFixed(6)} SOL`,
             });
-          } else {
+          } else if (this.adapter.getMode() === 'real') {
             // Для real mode рассчитываем exitPrice из solReceived
             actualExitPrice = (solReceived + exitFeeCheck) / positionInvestedAmount * position.entryPrice;
             logger.log({
