@@ -460,7 +460,8 @@ export class PositionManager {
     // Рассчитываем резерв для выхода (exit fees + slippage)
     // Expected proceeds при take profit: investedAmount * 2.5
     const expectedProceedsAtTakeProfit = investedAmount * config.takeProfitMultiplier;
-    const exitSlippage = expectedProceedsAtTakeProfit * config.slippageMax;
+    // ⭐ КРИТИЧНО: Используем exitSlippageMax (35%) вместо slippageMax (3%) для резерва
+    const exitSlippage = expectedProceedsAtTakeProfit * config.exitSlippageMax;
     
     // Общий требуемый резерв: positionSize + exitFees + exitSlippage
     const requiredAmount = minPositionSize + exitFees + exitSlippage;
@@ -515,7 +516,8 @@ export class PositionManager {
     const MIN_POSITION_SIZE = config.minPositionSize;
     const minInvestedAmount = MIN_POSITION_SIZE - entryFees;
     const minExpectedProceeds = minInvestedAmount * config.takeProfitMultiplier;
-    const minExitSlippage = minExpectedProceeds * config.slippageMax;
+    // ⭐ КРИТИЧНО: Используем exitSlippageMax (35%) вместо slippageMax (3%)
+    const minExitSlippage = minExpectedProceeds * config.exitSlippageMax;
     const minTotalReserved = MIN_POSITION_SIZE + exitFees + minExitSlippage;
     
     if (this.account.getFreeBalance() < minTotalReserved) {
@@ -912,8 +914,9 @@ export class PositionManager {
         positionSize = MIN_POSITION_SIZE;
       }
 
-      // ⭐ EXIT SIMULATION для Tier 2 и Tier 3
-      if (tierInfo && (tierInfo.tier === 2 || tierInfo.tier === 3)) {
+      // ⭐ EXIT SIMULATION для ВСЕХ Tier (включая Tier 1)
+      // ⭐ КРИТИЧНО: Проверяем exit slippage перед входом для всех токенов
+      if (tierInfo) {
         const exitSimulation = await this.simulateExit(entryPrice, positionSize, tierInfo);
         
         // Проверяем минимальный эффективный multiplier
@@ -924,11 +927,52 @@ export class PositionManager {
           );
         }
         
+        // ⭐ ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Если predicted slippage слишком высокий (> 50%), отклоняем токен
+        const MAX_ACCEPTABLE_EXIT_SLIPPAGE = 0.50; // 50% - максимально допустимый slippage
+        if (exitSimulation.predictedSlippage > MAX_ACCEPTABLE_EXIT_SLIPPAGE) {
+          throw new Error(
+            `Exit slippage too high: ${(exitSimulation.predictedSlippage * 100).toFixed(1)}% > ${(MAX_ACCEPTABLE_EXIT_SLIPPAGE * 100).toFixed(0)}% (Tier ${tierInfo.tier})`
+          );
+        }
+        
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: candidate.mint,
           message: `✅ Exit simulation passed (Tier ${tierInfo.tier}): effectiveMultiplier=${exitSimulation.effectiveMultiplier.toFixed(3)}, predictedProceeds=${exitSimulation.predictedProceeds.toFixed(6)} SOL, predictedSlippage=${(exitSimulation.predictedSlippage * 100).toFixed(1)}%`,
+        });
+      } else {
+        // ⭐ ДЛЯ REGULAR токенов (без tierInfo) также проверяем exit slippage
+        // Используем максимальный slippage для безопасности
+        const exitFees = config.priorityFee + config.signatureFee;
+        const investedAmount = positionSize - (config.priorityFee + config.signatureFee);
+        const expectedProceedsAtTakeProfit = investedAmount * config.takeProfitMultiplier;
+        const estimatedExitSlippage = config.exitSlippageMax; // 35% для REGULAR токенов
+        const slippageAmount = expectedProceedsAtTakeProfit * estimatedExitSlippage;
+        const predictedProceeds = expectedProceedsAtTakeProfit - slippageAmount - exitFees;
+        const effectiveMultiplier = predictedProceeds / investedAmount;
+        
+        // Проверяем минимальный эффективный multiplier (1.15 для REGULAR)
+        const minEffectiveMultiplier = 1.15;
+        if (effectiveMultiplier < minEffectiveMultiplier) {
+          throw new Error(
+            `Exit simulation failed for REGULAR token: effectiveMultiplier=${effectiveMultiplier.toFixed(3)} < ${minEffectiveMultiplier}`
+          );
+        }
+        
+        // Проверяем максимальный slippage
+        const MAX_ACCEPTABLE_EXIT_SLIPPAGE = 0.50; // 50%
+        if (estimatedExitSlippage > MAX_ACCEPTABLE_EXIT_SLIPPAGE) {
+          throw new Error(
+            `Exit slippage too high for REGULAR token: ${(estimatedExitSlippage * 100).toFixed(1)}% > ${(MAX_ACCEPTABLE_EXIT_SLIPPAGE * 100).toFixed(0)}%`
+          );
+        }
+        
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `✅ Exit simulation passed (REGULAR): effectiveMultiplier=${effectiveMultiplier.toFixed(3)}, predictedProceeds=${predictedProceeds.toFixed(6)} SOL, predictedSlippage=${(estimatedExitSlippage * 100).toFixed(1)}%`,
         });
       }
       
@@ -946,7 +990,9 @@ export class PositionManager {
       }
 
       const expectedProceedsAtTakeProfit = investedAmount * config.takeProfitMultiplier;
-      const exitSlippage = expectedProceedsAtTakeProfit * config.slippageMax;
+      // ⭐ КРИТИЧНО: Используем exitSlippageMax (35%) вместо slippageMax (3%) для резерва
+      // slippageMax используется для входа, exitSlippageMax - для выхода
+      const exitSlippage = expectedProceedsAtTakeProfit * config.exitSlippageMax;
       const totalReservedAmount = positionSize + exitFees + exitSlippage;
 
       if (investedAmount > 1.0 || positionSize > 1.0 || totalReservedAmount > 1.0) {
@@ -1229,8 +1275,9 @@ export class PositionManager {
     // - exitSlippage (slippage на выход, рассчитываем как процент от expected proceeds)
     // Expected proceeds при take profit (2.5x): investedAmount * 2.5
     const expectedProceedsAtTakeProfit = investedAmount * config.takeProfitMultiplier;
-    // Slippage на выход: используем максимальный slippage для безопасности
-    const exitSlippage = expectedProceedsAtTakeProfit * config.slippageMax;
+    // ⭐ КРИТИЧНО: Используем exitSlippageMax (35%) вместо slippageMax (3%) для резерва
+    // Slippage на выход: используем максимальный exit slippage для безопасности
+    const exitSlippage = expectedProceedsAtTakeProfit * config.exitSlippageMax;
     
     // Общий резерв для позиции: investedAmount + entryFees + exitFees + exitSlippage
     const totalReservedAmount = positionSize + exitFees + exitSlippage;
