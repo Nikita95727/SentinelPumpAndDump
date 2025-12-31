@@ -1021,8 +1021,33 @@ export class PositionManager {
         }
 
       // Используем execution price из результата (с учетом реального slippage)
-      const executionPrice = buyResult.executionPrice || entryPrice;
+      let executionPrice = buyResult.executionPrice || entryPrice;
       const markPrice = buyResult.markPrice || entryPrice;
+      
+      // ⭐ КРИТИЧНО: Fallback для executionPrice если он равен 0
+      // Если executionPrice = 0 и entryPrice = 0, рассчитываем из investedSol / tokensReceived
+      if ((!executionPrice || executionPrice <= 0) && (!entryPrice || entryPrice <= 0)) {
+        const tokensReceived = buyResult.tokensReceived;
+        if (tokensReceived && tokensReceived > 0) {
+          executionPrice = investedAmount / tokensReceived;
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'warning',
+            token: candidate.mint,
+            message: `⚠️ FALLBACK entryPrice calculation: executionPrice=${executionPrice.toFixed(10)} (from investedSol=${investedAmount.toFixed(6)} / tokensReceived=${tokensReceived.toFixed(6)})`,
+          });
+        } else {
+          // Последний fallback - используем markPrice
+          executionPrice = markPrice || 0;
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'warning',
+            token: candidate.mint,
+            message: `⚠️ FALLBACK entryPrice: Using markPrice=${markPrice?.toFixed(10) || 'N/A'} as last resort`,
+          });
+        }
+      }
+      
       const actualEntryPrice = executionPrice; // Используем реальную цену исполнения
 
       // ⭐ Сохраняем tier в позиции
@@ -1353,6 +1378,29 @@ export class PositionManager {
     // ⭐ КРИТИЧНО: Если executionPrice все еще 0, используем actualEntryPrice (цена из bonding curve)
     if (!executionPrice || executionPrice <= 0) {
       executionPrice = actualEntryPrice;
+    }
+    
+    // ⭐ КРИТИЧНО: Последний fallback - рассчитываем из investedSol / tokensReceived
+    if (!executionPrice || executionPrice <= 0) {
+      const tokensReceived = buyResult.tokensReceived;
+      if (tokensReceived && tokensReceived > 0) {
+        executionPrice = positionSize / tokensReceived;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'warning',
+          token: candidate.mint,
+          message: `⚠️ FALLBACK entryPrice calculation (retry path): executionPrice=${executionPrice.toFixed(10)} (from positionSize=${positionSize.toFixed(6)} / tokensReceived=${tokensReceived.toFixed(6)})`,
+        });
+      } else {
+        // Последний fallback - используем markPrice
+        executionPrice = markPrice || 0;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'warning',
+          token: candidate.mint,
+          message: `⚠️ FALLBACK entryPrice (retry path): Using markPrice=${markPrice?.toFixed(10) || 'N/A'} as last resort`,
+        });
+      }
     }
     
     position.entryPrice = executionPrice;

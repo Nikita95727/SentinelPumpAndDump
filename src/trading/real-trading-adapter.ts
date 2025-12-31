@@ -215,8 +215,14 @@ export class RealTradingAdapter implements ITradingAdapter {
     }
 
     // Полная продажа
-    const tokenBalance = await this.getTokenBalance(mint);
-    const tokensToSell = Math.min(amountTokens, tokenBalance);
+    // ⭐ КРИТИЧНО: amountTokens приходит нормализованным (из tokensReceived в TradeResult)
+    // Но PumpFunSwap.sell() ожидает raw tokens (с учетом decimals)
+    // Конвертируем нормализованные токены в raw tokens
+    const TOKEN_DECIMALS = 9; // pump.fun tokens обычно имеют 9 decimals
+    const rawTokensToSell = Math.floor(amountTokens * Math.pow(10, TOKEN_DECIMALS));
+    
+    const tokenBalance = await this.getTokenBalance(mint); // tokenBalance уже в raw units
+    const tokensToSell = Math.min(rawTokensToSell, tokenBalance);
 
     if (tokensToSell === 0) {
       const error = 'No tokens to sell';
@@ -229,6 +235,14 @@ export class RealTradingAdapter implements ITradingAdapter {
       return { success: false, error };
     }
 
+    // ⭐ Логируем для отладки
+    logger.log({
+      timestamp: getCurrentTimestamp(),
+      type: 'info',
+      token: mint,
+      message: `🔄 Converting tokens for sell: normalized=${amountTokens.toFixed(6)}, raw=${tokensToSell}, balance=${tokenBalance}`,
+    });
+
     const result = await this.pumpFunSwap.sell(keypair, mint, tokensToSell);
     const sellDuration = Date.now() - sellStartTime;
     const balanceAfter = await this.getBalance().catch(() => balanceBefore);
@@ -236,9 +250,12 @@ export class RealTradingAdapter implements ITradingAdapter {
     if (result.success) {
       const solReceived = result.solReceived || 0;
       
-      // Рассчитываем execution price из фактического результата
-      const executionPrice = tokensToSell > 0
-        ? solReceived / tokensToSell
+      // ⭐ КРИТИЧНО: Рассчитываем execution price из фактического результата
+      // tokensToSell в raw units, но для расчета цены нужны нормализованные токены
+      const TOKEN_DECIMALS = 9; // pump.fun tokens обычно имеют 9 decimals
+      const normalizedTokensSold = tokensToSell / Math.pow(10, TOKEN_DECIMALS);
+      const executionPrice = normalizedTokensSold > 0
+        ? solReceived / normalizedTokensSold
         : markPrice || 0;
 
       // Очистить кэш
