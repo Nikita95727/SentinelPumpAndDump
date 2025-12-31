@@ -13,6 +13,8 @@ import { RealTradingAdapter } from './trading/real-trading-adapter';
 import { checkTokenReadiness } from './readiness-checker';
 import { BalanceManager } from './balance-manager';
 import { AbandonedTokenTracker } from './abandoned-token-tracker';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // Используем config.maxOpenPositions вместо хардкода
 const MAX_HOLD_TIME = 45_000; // ⭐ 45 секунд (уменьшено с 90 для уменьшения slippage - SLIPPAGE_SOLUTIONS.md)
@@ -236,6 +238,8 @@ export class PositionManager {
   private positions = new Map<string, Position>();
   private pendingTierInfo = new Map<string, TierInfo | null>(); // Сохраняем tierInfo для токенов, прошедших фильтры;
   private connection: Connection;
+  private readonly STATE_FILE = path.join(config.logDir, '..', 'data', 'active-positions.json');
+  private saveInterval: NodeJS.Timeout | null = null;
   
   /**
    * Сохраняет tierInfo для токена перед попыткой открытия позиции
@@ -262,6 +266,26 @@ export class PositionManager {
     this.adapter = adapter;
     this.balanceManager = new BalanceManager(connection);
     this.abandonedTracker = new AbandonedTokenTracker(connection, adapter);
+    
+    // Создаем директорию для данных, если её нет
+    const dataDir = path.dirname(this.STATE_FILE);
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    
+    // Загружаем активные позиции при старте
+    this.loadActivePositions();
+    
+    // Периодическое сохранение каждые 30 секунд
+    this.saveInterval = setInterval(() => {
+      this.saveActivePositions().catch(err => {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          message: `❌ PositionManager: Failed to save active positions: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      });
+    }, 30_000); // 30 секунд
     
     // Устанавливаем кошелек в BalanceManager если есть real trading adapter
     if (adapter.getMode() === 'real') {
@@ -2015,6 +2039,9 @@ export class PositionManager {
         // Remove from active positions
         this.positions.delete(position.token);
         position.status = 'abandoned';
+        
+        // Сохраняем состояние после удаления позиции
+        this.saveActivePositions().catch(() => {});
 
         // ⭐ MANDATORY LOGGING: Log abandoned position with all required metrics
         // Required fields: token mint, entry SOL, expected exit SOL, expected slippage %, estimated fees, netProfit, reason
@@ -2353,6 +2380,9 @@ export class PositionManager {
       // Удаляем из активных
       this.positions.delete(position.token);
       position.status = 'closed';
+      
+      // Сохраняем состояние после закрытия позиции
+      this.saveActivePositions().catch(() => {});
 
       // Пересчитываем multiplier для логирования (используем реальную цену или безопасную)
       // ⭐ FIX FOR PAPER TRADING: Используем realExitPrice если он был установлен
@@ -2401,6 +2431,9 @@ export class PositionManager {
     } catch (error) {
       this.positions.delete(position.token);
       position.status = 'closed';
+      
+      // Сохраняем состояние после закрытия позиции
+      this.saveActivePositions().catch(() => {});
     }
   }
 
@@ -2571,8 +2604,17 @@ export class PositionManager {
       }
     }
     
-    // Останавливаем трекинг abandoned токенов
-    this.abandonedTracker.stopTracking();
+    // Останавливаем трекинг abandoned токенов (с сохранением состояния)
+    this.abandonedTracker.stop();
+    
+    // Сохраняем активные позиции перед остановкой
+    this.saveActivePositions().catch(() => {});
+    
+    // Останавливаем периодическое сохранение
+    if (this.saveInterval) {
+      clearInterval(this.saveInterval);
+      this.saveInterval = null;
+    }
   }
   
   /**
@@ -2580,6 +2622,123 @@ export class PositionManager {
    */
   getAbandonedTracker(): AbandonedTokenTracker {
     return this.abandonedTracker;
+  }
+
+  /**
+   * Сохраняет активные позиции в файл
+   */
+  private async saveActivePositions(): Promise<void> {
+    try {
+      // Сохраняем только активные позиции (не closed, не abandoned)
+      const activePositions = Array.from(this.positions.values())
+        .filter(p => p.status === 'active' || p.status === 'closing');
+      
+      const data = activePositions.map(p => ({
+        token: p.token,
+        entryPrice: p.entryPrice,
+        executionPrice: p.executionPrice,
+        markPrice: p.markPrice,
+        investedSol: p.investedSol,
+        reservedAmount: p.reservedAmount,
+        entryTime: p.entryTime,
+        lastRealPriceUpdate: p.lastRealPriceUpdate,
+        peakPrice: p.peakPrice,
+        currentPrice: p.currentPrice,
+        status: p.status,
+        tier: p.tier,
+        tokensReceived: (p as any).tokensReceived, // Сохраняем реальное количество токенов
+      }));
+      
+      const json = JSON.stringify(data, null, 2);
+      fs.writeFileSync(this.STATE_FILE, json, 'utf8');
+    } catch (error) {
+      // Логируем ошибку, но не прерываем работу
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        message: `❌ PositionManager: Failed to save active positions to ${this.STATE_FILE}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  /**
+   * Загружает активные позиции из файла
+   * ВАЖНО: Позиции загружаются, но мониторинг НЕ возобновляется автоматически
+   * Это нужно делать вручную в index.ts после загрузки
+   */
+  private loadActivePositions(): void {
+    try {
+      if (!fs.existsSync(this.STATE_FILE)) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `📂 PositionManager: No active positions file found at ${this.STATE_FILE}, starting fresh`,
+        });
+        return;
+      }
+
+      const json = fs.readFileSync(this.STATE_FILE, 'utf8');
+      const data: any[] = JSON.parse(json);
+
+      if (!Array.isArray(data)) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'warning',
+          message: `⚠️ PositionManager: Invalid active positions file format, starting fresh`,
+        });
+        return;
+      }
+
+      // Восстанавливаем позиции
+      let loadedCount = 0;
+      for (const posData of data) {
+        if (posData.token && posData.entryPrice > 0) {
+          const position: Position = {
+            token: posData.token,
+            entryPrice: posData.entryPrice,
+            executionPrice: posData.executionPrice,
+            markPrice: posData.markPrice,
+            investedSol: posData.investedSol,
+            reservedAmount: posData.reservedAmount,
+            entryTime: posData.entryTime,
+            lastRealPriceUpdate: posData.lastRealPriceUpdate || posData.entryTime,
+            peakPrice: posData.peakPrice || posData.entryPrice,
+            currentPrice: posData.currentPrice || posData.entryPrice,
+            status: posData.status === 'active' ? 'active' : 'active', // Восстанавливаем как active
+            tier: posData.tier,
+          };
+          
+          // Восстанавливаем tokensReceived если есть
+          if (posData.tokensReceived) {
+            (position as any).tokensReceived = posData.tokensReceived;
+          }
+          
+          this.positions.set(posData.token, position);
+          loadedCount++;
+        }
+      }
+
+      if (loadedCount > 0) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `✅ PositionManager: Loaded ${loadedCount} active positions from ${this.STATE_FILE}. NOTE: Monitoring must be restarted manually.`,
+        });
+      }
+    } catch (error) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        message: `❌ PositionManager: Failed to load active positions from ${this.STATE_FILE}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  /**
+   * Получает список загруженных активных позиций (для восстановления мониторинга)
+   */
+  getLoadedActivePositions(): Position[] {
+    return Array.from(this.positions.values()).filter(p => p.status === 'active');
   }
 }
 

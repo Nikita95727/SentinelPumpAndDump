@@ -4,6 +4,8 @@ import { getCurrentTimestamp, sleep } from './utils';
 import { priceFetcher } from './price-fetcher';
 import { config } from './config';
 import { ITradingAdapter } from './trading/trading-adapter.interface';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * AbandonedTokenTracker
@@ -14,25 +16,49 @@ import { ITradingAdapter } from './trading/trading-adapter.interface';
  * - Если цена позволяет продать с прибылью или безубытком (с учетом slippage и fees) - продает
  * - Учитывает реальный slippage при расчете безубыточности
  */
+interface AbandonedTokenData {
+  token: string;
+  entryPrice: number;
+  investedSol: number;
+  positionSize: number;
+  entryTime: number;
+  abandonedTime: number;
+  tokensReceived?: number;
+}
+
 export class AbandonedTokenTracker {
   private connection: Connection;
   private adapter: ITradingAdapter;
-  private abandonedTokens = new Map<string, {
-    token: string;
-    entryPrice: number;
-    investedSol: number;
-    positionSize: number;
-    entryTime: number;
-    abandonedTime: number;
-    tokensReceived?: number; // Количество токенов, полученных при покупке
-  }>();
+  private abandonedTokens = new Map<string, AbandonedTokenData>();
   private isTracking = false;
   private trackingInterval: NodeJS.Timeout | null = null;
   private readonly CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 час
+  private readonly STATE_FILE = path.join(config.logDir, '..', 'data', 'abandoned-tokens.json');
+  private saveInterval: NodeJS.Timeout | null = null;
 
   constructor(connection: Connection, adapter: ITradingAdapter) {
     this.connection = connection;
     this.adapter = adapter;
+    
+    // Создаем директорию для данных, если её нет
+    const dataDir = path.dirname(this.STATE_FILE);
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    
+    // Загружаем состояние при старте
+    this.loadState();
+    
+    // Периодическое сохранение каждые 30 секунд
+    this.saveInterval = setInterval(() => {
+      this.saveState().catch(err => {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          message: `❌ AbandonedTokenTracker: Failed to save state: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      });
+    }, 30_000); // 30 секунд
   }
 
   /**
@@ -62,6 +88,15 @@ export class AbandonedTokenTracker {
       message: `📌 Abandoned token added to tracker: ${token.substring(0, 8)}... | entryPrice=${entryPrice.toFixed(8)}, investedSol=${investedSol.toFixed(6)}, positionSize=${positionSize.toFixed(6)}`,
     });
 
+    // Сохраняем состояние сразу после добавления
+    this.saveState().catch(err => {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        message: `❌ AbandonedTokenTracker: Failed to save state after adding token: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    });
+
     // Запускаем трекинг, если еще не запущен
     if (!this.isTracking) {
       this.startTracking();
@@ -78,6 +113,15 @@ export class AbandonedTokenTracker {
         type: 'info',
         token,
         message: `✅ Abandoned token removed from tracker: ${token.substring(0, 8)}... (sold or removed)`,
+      });
+      
+      // Сохраняем состояние сразу после удаления
+      this.saveState().catch(err => {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'error',
+          message: `❌ AbandonedTokenTracker: Failed to save state after removing token: ${err instanceof Error ? err.message : String(err)}`,
+        });
       });
     }
   }
@@ -135,6 +179,18 @@ export class AbandonedTokenTracker {
       type: 'info',
       message: `⏸️ AbandonedTokenTracker: Stopped tracking`,
     });
+  }
+  
+  /**
+   * Полная остановка с сохранением состояния
+   */
+  stop(): void {
+    this.stopTracking();
+    if (this.saveInterval) {
+      clearInterval(this.saveInterval);
+      this.saveInterval = null;
+    }
+    this.saveState().catch(() => {}); // Финальное сохранение
   }
 
   /**
@@ -314,11 +370,83 @@ export class AbandonedTokenTracker {
   clearAll(): void {
     const count = this.abandonedTokens.size;
     this.abandonedTokens.clear();
+    this.saveState().catch(() => {}); // Сохраняем пустое состояние
     logger.log({
       timestamp: getCurrentTimestamp(),
       type: 'info',
       message: `🔄 AbandonedTokenTracker: Cleared ${count} tracked tokens`,
     });
   }
+
+  /**
+   * Сохраняет состояние в файл
+   */
+  private async saveState(): Promise<void> {
+    try {
+      const data = Array.from(this.abandonedTokens.values());
+      const json = JSON.stringify(data, null, 2);
+      fs.writeFileSync(this.STATE_FILE, json, 'utf8');
+    } catch (error) {
+      // Логируем ошибку, но не прерываем работу
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        message: `❌ AbandonedTokenTracker: Failed to save state to ${this.STATE_FILE}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  /**
+   * Загружает состояние из файла
+   */
+  private loadState(): void {
+    try {
+      if (!fs.existsSync(this.STATE_FILE)) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          message: `📂 AbandonedTokenTracker: No state file found at ${this.STATE_FILE}, starting fresh`,
+        });
+        return;
+      }
+
+      const json = fs.readFileSync(this.STATE_FILE, 'utf8');
+      const data: AbandonedTokenData[] = JSON.parse(json);
+
+      if (!Array.isArray(data)) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'warning',
+          message: `⚠️ AbandonedTokenTracker: Invalid state file format, starting fresh`,
+        });
+        return;
+      }
+
+      // Восстанавливаем токены
+      for (const tokenData of data) {
+        if (tokenData.token && tokenData.entryPrice > 0) {
+          this.abandonedTokens.set(tokenData.token, tokenData);
+        }
+      }
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `✅ AbandonedTokenTracker: Loaded ${this.abandonedTokens.size} abandoned tokens from ${this.STATE_FILE}`,
+      });
+
+      // Если есть токены, запускаем трекинг
+      if (this.abandonedTokens.size > 0) {
+        this.startTracking();
+      }
+    } catch (error) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        message: `❌ AbandonedTokenTracker: Failed to load state from ${this.STATE_FILE}: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
 }
 
