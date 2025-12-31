@@ -738,10 +738,10 @@ export class PositionManager {
           const tierInfo = result.value.tierInfo;
           if (tierInfo) {
             this.pendingTierInfo.set(candidate.mint, tierInfo);
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'info',
-              token: candidate.mint,
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: candidate.mint,
               message: `✅ Simplified filters passed: Tier ${tierInfo.tier}, liquidity=$${result.value.details?.volumeUsd?.toFixed(2) || 'N/A'}, holders=${result.value.details?.uniqueBuyers || 'N/A'}, waiting for token readiness`,
             });
           } else {
@@ -844,7 +844,7 @@ export class PositionManager {
       );
       
       positionSize = this.safetyManager.applySafetyCaps(positionSize);
-
+      
       // ⭐ TIER-BASED SIZING: Адаптируем размер позиции в зависимости от Tier
       if (tierInfo) {
         if (tierInfo.tier === 2) {
@@ -1513,19 +1513,19 @@ export class PositionManager {
             });
             // Продолжаем мониторинг, не закрываем позицию
           } else {
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'error',
-              token: position.token,
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'error',
+            token: position.token,
               message: `🚨 FAILSAFE EXIT: no real price for ${silenceDuration}ms, elapsed=${(timeSinceEntry/1000).toFixed(1)}s since entry`,
-            });
+          });
 
-            await this.closePosition(
-              position,
-              'failsafe_no_price_feed',
-              fallbackPrice
-            );
-            return;
+          await this.closePosition(
+            position,
+            'failsafe_no_price_feed',
+            fallbackPrice
+          );
+          return;
           }
         }
       }
@@ -1938,7 +1938,18 @@ export class PositionManager {
           }
         }
       }
-      const currentMultiplier = position.entryPrice > 0 ? expectedExitPrice / position.entryPrice : 1;
+      // ⭐ КРИТИЧНО: Используем реальное количество токенов для расчета multiplier
+      // Если tokensReceived есть, используем его для более точного расчета
+      const tokensReceivedForMultiplier = (position as any).tokensReceived;
+      let currentMultiplier: number;
+      if (tokensReceivedForMultiplier && tokensReceivedForMultiplier > 0 && position.entryPrice > 0) {
+        // Более точный расчет: multiplier = (exitPrice * tokensReceived) / investedSol
+        // Это учитывает реальное количество токенов, полученных при покупке
+        currentMultiplier = (expectedExitPrice * tokensReceivedForMultiplier) / positionInvestedAmount;
+      } else {
+        // Fallback: используем стандартный расчет
+        currentMultiplier = position.entryPrice > 0 ? expectedExitPrice / position.entryPrice : 1;
+      }
       
       // ⭐ КРИТИЧНО: Если failsafe из-за отсутствия цены, и цена не обновлялась (fallback = entryPrice),
       // НЕ проверяем netProfit, так как реальная цена может быть выше
@@ -1961,7 +1972,9 @@ export class PositionManager {
       }
       
       // Calculate expected proceeds before slippage
-      const tokensReceived = positionInvestedAmount / position.entryPrice;
+      // ⭐ КРИТИЧНО: Используем реальное количество токенов из результата покупки, а не расчетное
+      // Это гарантирует правильный расчет multiplier и expectedProceeds
+      const tokensReceived = (position as any).tokensReceived || (positionInvestedAmount / position.entryPrice);
       const expectedProceedsBeforeSlippage = tokensReceived * effectiveExitPrice;
       
       // Estimate slippage based on current liquidity & historical slippage model
@@ -2133,15 +2146,15 @@ export class PositionManager {
           (position as any).sellSignature = sellResult.signature;
           (position as any).solReceived = sellResult.solReceived;
           (position as any).sellResult = sellResult; // Store full result for later use
-          
+
           // ⭐ FIX FOR PAPER TRADING: Используем реальную цену из executeSell для расчета multiplier
           // В paper mode executeSell возвращает markPrice и executionPrice из реального priceFetcher
           if (this.adapter.getMode() === 'paper' && sellResult.markPrice && sellResult.markPrice > 0) {
             realExitPrice = sellResult.markPrice;
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'info',
-              token: position.token,
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: position.token,
               message: `📄 PAPER MODE: Using markPrice from executeSell: ${sellResult.markPrice.toFixed(10)}, executionPrice: ${sellResult.executionPrice?.toFixed(10) || 'N/A'}, impact: ${((sellResult.estimatedImpact || 0) * 100).toFixed(2)}%`,
             });
           }
@@ -2191,10 +2204,10 @@ export class PositionManager {
             if (realExitPrice !== actualExitPrice) {
               realExitPrice = actualExitPrice;
             }
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'info',
-              token: position.token,
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            token: position.token,
               message: `📄 PAPER MODE: Using markPrice from executeSell: ${actualExitPrice.toFixed(10)}, solReceived=${solReceived.toFixed(6)} SOL`,
             });
           } else if (this.adapter.getMode() === 'real') {
