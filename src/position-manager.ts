@@ -2110,13 +2110,30 @@ export class PositionManager {
               message: `📄 PAPER MODE: Using markPrice from executeSell: ${actualExitPrice.toFixed(10)}, solReceived=${solReceived.toFixed(6)} SOL`,
             });
           } else if (this.adapter.getMode() === 'real') {
-            // Для real mode рассчитываем exitPrice из solReceived
-            actualExitPrice = (solReceived + exitFeeCheck) / positionInvestedAmount * position.entryPrice;
+            // Для real mode рассчитываем exitPrice из solReceived и tokensToSell
+            // ⭐ КРИТИЧНО: Правильная формула: exitPrice = solReceived / tokensSold
+            // tokensToSell был передан в executeSell и это точное количество проданных токенов
+            const tokensSold = tokensToSell; // Количество токенов, переданное в executeSell
+            
+            if (tokensSold > 0 && solReceived > 0) {
+              // Правильная формула: цена = SOL получено / токенов продано
+              actualExitPrice = solReceived / tokensSold;
+            } else {
+              // Fallback: используем markPrice из sellResult или exitPrice
+              actualExitPrice = sellResult.markPrice || exitPrice;
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'warning',
+                token: position.token,
+                message: `⚠️ Cannot calculate exitPrice from solReceived/tokensSold, using markPrice: ${actualExitPrice.toFixed(8)}`,
+              });
+            }
+            
             logger.log({
               timestamp: getCurrentTimestamp(),
               type: 'info',
               token: position.token,
-              message: `✅ Using real SELL price: solReceived=${solReceived.toFixed(6)} SOL, calculated exitPrice=${actualExitPrice.toFixed(8)} (instead of bonding curve price ${exitPrice.toFixed(8)})`,
+              message: `✅ Using real SELL price: solReceived=${solReceived.toFixed(6)} SOL, tokensSold=${tokensSold.toFixed(0)}, calculated exitPrice=${actualExitPrice.toFixed(8)} (instead of bonding curve price ${exitPrice.toFixed(8)})`,
             });
           }
         }
