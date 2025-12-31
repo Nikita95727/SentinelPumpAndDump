@@ -265,7 +265,7 @@ export class RealTradingAdapter implements ITradingAdapter {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `✅ REAL SELL SUCCESS: ${result.signature} | Sold: ${tokensToSell} tokens, Received: ${solReceived.toFixed(6)} SOL, MarkPrice: ${markPrice?.toFixed(10) || 'N/A'}, ExecutionPrice: ${executionPrice.toFixed(10)}, Duration: ${sellDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL, Explorer: https://solscan.io/tx/${result.signature}`,
+        message: `✅ REAL SELL SUCCESS: ${result.signature} | Sold: ${normalizedTokensSold.toFixed(6)} tokens (raw: ${tokensToSell}), Received: ${solReceived.toFixed(6)} SOL, MarkPrice: ${markPrice?.toFixed(10) || 'N/A'}, ExecutionPrice: ${executionPrice.toFixed(10)}, Duration: ${sellDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL, Explorer: https://solscan.io/tx/${result.signature}`,
       });
 
       return {
