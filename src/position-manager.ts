@@ -12,6 +12,7 @@ import { ITradingAdapter } from './trading/trading-adapter.interface';
 import { RealTradingAdapter } from './trading/real-trading-adapter';
 import { checkTokenReadiness } from './readiness-checker';
 import { BalanceManager } from './balance-manager';
+import { AbandonedTokenTracker } from './abandoned-token-tracker';
 
 // Используем config.maxOpenPositions вместо хардкода
 const MAX_HOLD_TIME = 45_000; // ⭐ 45 секунд (уменьшено с 90 для уменьшения slippage - SLIPPAGE_SOLUTIONS.md)
@@ -251,6 +252,7 @@ export class PositionManager {
   private tradeIdCounter: number = 0;
   private adapter: ITradingAdapter; // Trading adapter (real or paper)
   private balanceManager: BalanceManager; // Управление балансом и вывод излишка
+  private abandonedTracker: AbandonedTokenTracker; // Трекинг abandoned токенов
 
   constructor(connection: Connection, initialDeposit: number, adapter: ITradingAdapter) {
     this.connection = connection;
@@ -259,6 +261,7 @@ export class PositionManager {
     this.safetyManager = new SafetyManager(initialDeposit);
     this.adapter = adapter;
     this.balanceManager = new BalanceManager(connection);
+    this.abandonedTracker = new AbandonedTokenTracker(connection, adapter);
     
     // Устанавливаем кошелек в BalanceManager если есть real trading adapter
     if (adapter.getMode() === 'real') {
@@ -1990,6 +1993,17 @@ export class PositionManager {
           message: `✅ ABANDONED VERIFICATION: freeBalance=${freeBalanceAfter.toFixed(6)} SOL, totalBalance=${totalBalanceAfter.toFixed(6)} SOL, lockedBalance=${lockedBalanceAfter.toFixed(6)} SOL | investedSol=${investedSol.toFixed(6)} SOL permanently lost, slot freed`,
         });
 
+        // ⭐ КРИТИЧНО: Добавляем токен в трекер для мониторинга
+        // Токен может вырасти позже, и мы сможем продать его с прибылью или безубытком
+        const tokensReceived = (position as any).tokensReceived || (investedSol / position.entryPrice);
+        this.abandonedTracker.addAbandonedToken(
+          position.token,
+          position.entryPrice,
+          investedSol,
+          positionSize,
+          tokensReceived
+        );
+
         return; // DO NOT execute sell, DO NOT retry, DO NOT fallback, position is abandoned
       }
       
@@ -2495,6 +2509,16 @@ export class PositionManager {
         await this.closePosition(position, 'shutdown', exitPrice);
       }
     }
+    
+    // Останавливаем трекинг abandoned токенов
+    this.abandonedTracker.stopTracking();
+  }
+  
+  /**
+   * Получает трекер abandoned токенов (для доступа извне)
+   */
+  getAbandonedTracker(): AbandonedTokenTracker {
+    return this.abandonedTracker;
   }
 }
 
