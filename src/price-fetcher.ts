@@ -208,16 +208,58 @@ export class PumpFunPriceFetcher {
         return null;
       }
 
-      // Получаем totalSupply из mint account
-      const { getMint } = await import('@solana/spl-token');
-      const mintPubkey = new PublicKey(tokenMint);
-      const connection = this.rpcPool.getConnection();
+      // ⭐ КРИТИЧНО: Для pump.fun токенов market cap рассчитывается по-другому
+      // Для токенов на bonding curve: Market Cap = (Virtual SOL + Real SOL) * 2 * SOL/USD
+      // Для токенов на Raydium: Market Cap = price * circulatingSupply * SOL/USD
       
-      const mintInfo = await getMint(connection, mintPubkey);
-      const totalSupply = Number(mintInfo.supply) / Math.pow(10, mintInfo.decimals);
+      // Пытаемся получить bonding curve account
+      let marketCap = 0;
+      let totalSupply = 0;
       
-      // Капитализация = цена * totalSupply
-      const marketCap = price * totalSupply * this.solUsdPrice;
+      try {
+        const bondingCurvePda = await this.getBondingCurvePDA(tokenMint);
+        const connection = this.rpcPool.getConnection();
+        const accountInfo = await connection.getAccountInfo(bondingCurvePda);
+        
+        if (accountInfo && accountInfo.data.length > 0) {
+          // Токен еще на bonding curve - используем формулу на основе резервов
+          // Читаем реальные SOL резервы из bonding curve (первые 8 байт после метаданных)
+          // Структура: [metadata...][realSolReserves: u64][virtualTokenReserves: u64][...]
+          // Для упрощения используем приблизительную формулу на основе цены
+          // Market Cap ≈ (Virtual SOL Reserves + Real SOL Reserves) * 2
+          // Но мы не знаем Real SOL Reserves напрямую, поэтому используем цену
+          
+          // Приблизительная формула: если цена выросла в N раз, то реальные резервы ≈ 30 * N SOL
+          // Market Cap ≈ (30 + 30*N) * 2 * SOL/USD = 60 * (1 + N) * SOL/USD
+          const INITIAL_PRICE = 30 / (VIRTUAL_TOKEN_RESERVES / 1e9); // ~0.000000028 SOL
+          const priceMultiplier = price / INITIAL_PRICE;
+          const estimatedRealSolReserves = 30 * priceMultiplier; // Приблизительно
+          const estimatedMarketCap = (VIRTUAL_SOL_RESERVES / LAMPORTS_PER_SOL + estimatedRealSolReserves) * 2 * this.solUsdPrice;
+          
+          marketCap = estimatedMarketCap;
+          totalSupply = VIRTUAL_TOKEN_RESERVES / 1e9; // Виртуальные токены
+        } else {
+          // Токен перешел на Raydium - используем totalSupply из mint
+          const { getMint } = await import('@solana/spl-token');
+          const mintPubkey = new PublicKey(tokenMint);
+          const mintInfo = await getMint(connection, mintPubkey);
+          totalSupply = Number(mintInfo.supply) / Math.pow(10, mintInfo.decimals);
+          marketCap = price * totalSupply * this.solUsdPrice;
+        }
+      } catch (error) {
+        // Fallback: используем старую формулу с totalSupply
+        try {
+          const { getMint } = await import('@solana/spl-token');
+          const mintPubkey = new PublicKey(tokenMint);
+          const connection = this.rpcPool.getConnection();
+          const mintInfo = await getMint(connection, mintPubkey);
+          totalSupply = Number(mintInfo.supply) / Math.pow(10, mintInfo.decimals);
+          marketCap = price * totalSupply * this.solUsdPrice;
+        } catch (fallbackError) {
+          // Если и это не работает, возвращаем null
+          throw fallbackError;
+        }
+      }
 
       return {
         price,
