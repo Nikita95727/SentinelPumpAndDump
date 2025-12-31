@@ -137,22 +137,27 @@ export class RealTradingAdapter implements ITradingAdapter {
         });
       }
 
+      // ⭐ КРИТИЧНО: Нормализуем outAmount перед расчетом executionPrice
+      // outAmount возвращается в raw units (с учетом decimals токена, обычно 9 для pump.fun)
+      const TOKEN_DECIMALS = 9; // pump.fun tokens обычно имеют 9 decimals
+      const normalizedTokens = result.outAmount ? result.outAmount / Math.pow(10, TOKEN_DECIMALS) : 0;
+      
       // Рассчитываем execution price из фактического результата
-      const executionPrice = result.outAmount && result.outAmount > 0
-        ? amountSol / result.outAmount
+      const executionPrice = normalizedTokens > 0
+        ? amountSol / normalizedTokens
         : markPrice || 0;
 
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `✅ REAL BUY SUCCESS: ${result.signature} | Invested: ${amountSol} SOL, Tokens: ${result.outAmount}, MarkPrice: ${markPrice?.toFixed(10) || 'N/A'}, ExecutionPrice: ${executionPrice.toFixed(10)}, Duration: ${buyDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL, Explorer: https://solscan.io/tx/${result.signature}`,
+        message: `✅ REAL BUY SUCCESS: ${result.signature} | Invested: ${amountSol} SOL, Tokens (raw): ${result.outAmount}, Tokens (normalized): ${normalizedTokens.toFixed(6)}, MarkPrice: ${markPrice?.toFixed(10) || 'N/A'}, ExecutionPrice: ${executionPrice.toFixed(10)}, Duration: ${buyDuration}ms, Balance: ${balanceBefore.toFixed(6)} → ${balanceAfter.toFixed(6)} SOL, Explorer: https://solscan.io/tx/${result.signature}`,
       });
 
       return {
         success: true,
         signature: result.signature,
-        tokensReceived: result.outAmount,
+        tokensReceived: normalizedTokens, // ⭐ Возвращаем нормализованное количество токенов
         executionPrice,
         markPrice: markPrice || undefined,
         estimatedImpact,
