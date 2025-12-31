@@ -97,6 +97,7 @@ class PumpFunSniper {
           const candidate: TokenCandidate = {
             mint: position.token,
             signature: (position as any).buySignature || '',
+            createdAt: position.entryTime,
           };
           
           // Возобновляем мониторинг позиции
