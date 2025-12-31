@@ -1314,8 +1314,18 @@ export class PositionManager {
     }
 
     // Используем execution price из результата
-    const executionPrice = buyResult.executionPrice || actualEntryPrice;
+    // ⭐ КРИТИЧНО: Если executionPrice = 0, используем markPrice или actualEntryPrice
+    let executionPrice = buyResult.executionPrice;
+    if (!executionPrice || executionPrice <= 0) {
+      executionPrice = buyResult.markPrice || actualEntryPrice;
+    }
     const markPrice = buyResult.markPrice || entryPrice;
+    
+    // ⭐ КРИТИЧНО: Если executionPrice все еще 0, используем actualEntryPrice (цена из bonding curve)
+    if (!executionPrice || executionPrice <= 0) {
+      executionPrice = actualEntryPrice;
+    }
+    
     position.entryPrice = executionPrice;
     position.executionPrice = executionPrice;
     position.markPrice = markPrice;
@@ -1390,7 +1400,20 @@ export class PositionManager {
       if (silenceDuration >= PRICE_SILENCE_THRESHOLD) {
         const predicted = this.calculatePredictedPrice(position);
         const peak = position.peakPrice || position.entryPrice;
-        const fallbackPrice = position.currentPrice || position.entryPrice;
+        // ⭐ КРИТИЧНО: Если entryPrice = 0, используем markPrice или получаем цену заново
+        let fallbackPrice = position.currentPrice || position.entryPrice;
+        if (!fallbackPrice || fallbackPrice <= 0) {
+          fallbackPrice = position.markPrice || 0;
+          // Если все еще 0, пытаемся получить цену заново
+          if (!fallbackPrice || fallbackPrice <= 0) {
+            try {
+              const freshPrice = await priceFetcher.getPrice(position.token);
+              fallbackPrice = freshPrice || position.entryPrice || 0;
+            } catch (e) {
+              fallbackPrice = position.entryPrice || 0;
+            }
+          }
+        }
 
         const predictedCollapse =
           predicted !== null &&
@@ -1824,8 +1847,21 @@ export class PositionManager {
       const positionSize = positionInvestedAmount + entryFeeCheck; // Total invested (including entry fees)
       
       // Calculate expected exit price (use current exitPrice)
-      const expectedExitPrice = exitPrice;
-      const currentMultiplier = expectedExitPrice / position.entryPrice;
+      // ⭐ КРИТИЧНО: Если exitPrice = 0, используем currentPrice или entryPrice
+      let expectedExitPrice = exitPrice;
+      if (!expectedExitPrice || expectedExitPrice <= 0) {
+        expectedExitPrice = position.currentPrice || position.markPrice || position.entryPrice || 0;
+        // Если все еще 0, пытаемся получить цену заново
+        if (!expectedExitPrice || expectedExitPrice <= 0) {
+          try {
+            const freshPrice = await priceFetcher.getPrice(position.token);
+            expectedExitPrice = freshPrice || position.entryPrice || 0;
+          } catch (e) {
+            expectedExitPrice = position.entryPrice || 0;
+          }
+        }
+      }
+      const currentMultiplier = position.entryPrice > 0 ? expectedExitPrice / position.entryPrice : 1;
       
       // ⭐ КРИТИЧНО: Если failsafe из-за отсутствия цены, и цена не обновлялась (fallback = entryPrice),
       // НЕ проверяем netProfit, так как реальная цена может быть выше
