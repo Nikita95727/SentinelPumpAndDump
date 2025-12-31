@@ -88,6 +88,31 @@ class PumpFunSniper {
       );
       console.log(`✅ Position Manager initialized with ${initialDeposit.toFixed(6)} SOL`);
       
+      // ⭐ Восстанавливаем мониторинг загруженных активных позиций
+      const loadedPositions = this.positionManager.getLoadedActivePositions();
+      if (loadedPositions.length > 0) {
+        console.log(`🔄 Restoring monitoring for ${loadedPositions.length} active positions...`);
+        for (const position of loadedPositions) {
+          // Создаем TokenCandidate из загруженной позиции
+          const candidate: TokenCandidate = {
+            mint: position.token,
+            signature: (position as any).buySignature || '',
+            timestamp: position.entryTime,
+          };
+          
+          // Возобновляем мониторинг позиции
+          this.positionManager.tryOpenPosition(candidate).catch(err => {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'error',
+              token: position.token,
+              message: `❌ Failed to restore monitoring for position ${position.token.substring(0, 8)}...: ${err instanceof Error ? err.message : String(err)}`,
+            });
+          });
+        }
+        console.log(`✅ Monitoring restored for ${loadedPositions.length} positions`);
+      }
+      
       // ⭐ КРИТИЧНО: Очищаем pendingTierInfo в PositionManager
       // Это предотвращает использование старых данных о Tier между запусками
       this.positionManager.clearPendingTierInfo();
