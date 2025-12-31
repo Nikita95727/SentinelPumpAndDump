@@ -19,7 +19,7 @@ const TRAILING_STOP_PCT = 0.25;
 const CHECK_INTERVAL = 1000; // Проверка каждые 1 секунду (быстрее реагируем на волатильность)
 const PREDICTION_CHECK_INTERVAL = 200; // Проверка прогнозируемой цены каждые 200ms (быстрое обнаружение импульса)
 const MAX_PRICE_HISTORY = 3; // Храним последние 3 цены для расчета импульса
-const PRICE_SILENCE_THRESHOLD = 5_000; // ms — максимум без реальной цены
+const PRICE_SILENCE_THRESHOLD = 15_000; // ms — максимум без реальной цены (увеличено с 5 до 15 секунд для стабилизации цены после покупки)
 const FAILSAFE_DROP_FROM_PEAK = 0.30;  // 30% от пика
 
 /**
@@ -1399,19 +1399,34 @@ export class PositionManager {
         const noPrediction = predicted === null;
 
         if (predictedCollapse || noPrediction) {
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'error',
-            token: position.token,
-            message: `🚨 FAILSAFE EXIT: no real price for ${silenceDuration}ms`,
-          });
+          // ⭐ КРИТИЧНО: Если цена не обновлялась, но это недавно после покупки (< 20 секунд),
+          // НЕ закрываем позицию - даем время цене обновиться
+          const timeSinceEntry = Date.now() - position.entryTime;
+          const MIN_PRICE_UPDATE_WAIT = 20_000; // 20 секунд после покупки
+          
+          if (timeSinceEntry < MIN_PRICE_UPDATE_WAIT && !predictedCollapse) {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'warning',
+              token: position.token,
+              message: `⏳ FAILSAFE DELAYED: no real price for ${silenceDuration}ms, but only ${(timeSinceEntry/1000).toFixed(1)}s since entry. Waiting for price update...`,
+            });
+            // Продолжаем мониторинг, не закрываем позицию
+          } else {
+            logger.log({
+              timestamp: getCurrentTimestamp(),
+              type: 'error',
+              token: position.token,
+              message: `🚨 FAILSAFE EXIT: no real price for ${silenceDuration}ms, elapsed=${(timeSinceEntry/1000).toFixed(1)}s since entry`,
+            });
 
-          await this.closePosition(
-            position,
-            'failsafe_no_price_feed',
-            fallbackPrice
-          );
-          return;
+            await this.closePosition(
+              position,
+              'failsafe_no_price_feed',
+              fallbackPrice
+            );
+            return;
+          }
         }
       }
 
@@ -1812,16 +1827,36 @@ export class PositionManager {
       const expectedExitPrice = exitPrice;
       const currentMultiplier = expectedExitPrice / position.entryPrice;
       
+      // ⭐ КРИТИЧНО: Если failsafe из-за отсутствия цены, и цена не обновлялась (fallback = entryPrice),
+      // НЕ проверяем netProfit, так как реальная цена может быть выше
+      const isFailsafeNoPrice = reason === 'failsafe_no_price_feed';
+      const priceNotUpdated = Math.abs(expectedExitPrice - position.entryPrice) < position.entryPrice * 0.01; // Цена не изменилась более чем на 1%
+      
+      // Если failsafe из-за отсутствия цены И цена не обновлялась, используем минимальную прибыльную цену для расчета
+      // (предполагаем, что цена может быть выше, но не ниже entryPrice)
+      let effectiveExitPrice = expectedExitPrice;
+      if (isFailsafeNoPrice && priceNotUpdated) {
+        // Используем entryPrice * 1.1 (предполагаем минимальный рост 10%) для консервативного расчета
+        // Это предотвратит abandoned при отсутствии обновления цены
+        effectiveExitPrice = position.entryPrice * 1.1;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'warning',
+          token: position.token,
+          message: `⚠️ FAILSAFE NO PRICE: Using conservative exit price ${effectiveExitPrice.toFixed(10)} (entryPrice * 1.1) instead of ${expectedExitPrice.toFixed(10)} for profitability check`,
+        });
+      }
+      
       // Calculate expected proceeds before slippage
       const tokensReceived = positionInvestedAmount / position.entryPrice;
-      const expectedProceedsBeforeSlippage = tokensReceived * expectedExitPrice;
+      const expectedProceedsBeforeSlippage = tokensReceived * effectiveExitPrice;
       
       // Estimate slippage based on current liquidity & historical slippage model
       const sellSizeSol = expectedProceedsBeforeSlippage;
       const estimatedImpact = this.adapter.estimateImpact(sellSizeSol);
       
       // Calculate expected exit price after slippage
-      const expectedExitPriceAfterSlippage = expectedExitPrice * (1 - estimatedImpact);
+      const expectedExitPriceAfterSlippage = effectiveExitPrice * (1 - estimatedImpact);
       const expectedProceedsAfterSlippage = tokensReceived * expectedExitPriceAfterSlippage;
       
       // Calculate all fees (DEX fees, priority fees, network fees)
@@ -1831,7 +1866,8 @@ export class PositionManager {
       const netProfit = expectedProceedsAfterSlippage - positionSize - allFees;
       
       // ⭐ HARD RULE: IF netProfit <= 0 THEN abandon position
-      if (netProfit <= 0) {
+      // ИСКЛЮЧЕНИЕ: Если failsafe из-за отсутствия цены И цена не обновлялась, НЕ abandoned (ждем обновления цены)
+      if (netProfit <= 0 && !(isFailsafeNoPrice && priceNotUpdated)) {
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'warning',
