@@ -255,6 +255,11 @@ class PumpFunSniper {
 
       // ⭐ Отправляем в очередь для торговли (манипуляторы, гемы и обычные токены)
       if (this.positionManager && !this.isShuttingDown) {
+        // ⭐ КРИТИЧНО: Сохраняем tierInfo в pendingTierInfo перед вызовом tryOpenPosition
+        // Это необходимо, так как tierInfo используется в openPositionWithReadinessCheck
+        if (filterResult.tierInfo) {
+          this.positionManager.setPendingTierInfo(candidate.mint, filterResult.tierInfo);
+        }
         await this.positionManager.tryOpenPosition(candidate);
       }
     } catch (error) {

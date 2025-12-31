@@ -235,6 +235,16 @@ export class PositionManager {
   private positions = new Map<string, Position>();
   private pendingTierInfo = new Map<string, TierInfo | null>(); // Сохраняем tierInfo для токенов, прошедших фильтры;
   private connection: Connection;
+  
+  /**
+   * Сохраняет tierInfo для токена перед попыткой открытия позиции
+   * Вызывается из index.ts после прохождения simplifiedFilter
+   */
+  public setPendingTierInfo(mint: string, tierInfo: TierInfo | null): void {
+    if (tierInfo) {
+      this.pendingTierInfo.set(mint, tierInfo);
+    }
+  }
   private filters: TokenFilters;
   private account: Account; // Single source of truth for balance
   private safetyManager: SafetyManager;
