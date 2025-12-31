@@ -561,54 +561,10 @@ export class PositionManager {
       const isReady = await checkTokenReadiness(this.connection, candidate.mint);
       
       if (isReady) {
-          // ⭐ MANDATORY: Market cap filter with different thresholds based on token type
-          // MANIPULATOR tokens: >= $1500 USD (early entry is important)
-          // GEM and other tokens: >= $2000 USD (more conservative)
-          // ⭐ ВАЖНО: Market cap уже проверен в simplifiedFilter, но проверяем еще раз для надежности
-          // Если не получается получить market cap (rate limiting), используем fallback - пропускаем проверку
-          try {
-            // Use tokenType from candidate (set by simplifiedFilter)
-            const tokenType = candidate.tokenType || 'REGULAR';
-            const marketCapThreshold = tokenType === 'MANIPULATOR' ? 1500 : 2000;
-            
-            const marketData = await priceFetcher.getMarketData(candidate.mint);
-            if (!marketData) {
-              // ⭐ FALLBACK: Если не удалось получить market cap (rate limiting), но токен уже прошел simplifiedFilter
-              // Пропускаем проверку - токен уже был проверен ранее
-              logger.log({
-                timestamp: getCurrentTimestamp(),
-                type: 'warning',
-                token: candidate.mint,
-                message: `⚠️ MARKET CAP FILTER: Could not get market cap (rate limiting?), but token already passed simplifiedFilter, allowing entry`,
-              });
-            } else if (marketData.marketCap < marketCapThreshold) {
-              // Если market cap получен, но ниже threshold - отклоняем
-              logger.log({
-                timestamp: getCurrentTimestamp(),
-                type: 'info',
-                token: candidate.mint,
-                message: `❌ MARKET CAP FILTER: marketCap=$${marketData.marketCap.toFixed(2)} < $${marketCapThreshold} USD (${tokenType}), ignoring token completely`,
-              });
-              return false; // Ignore token completely if market cap below threshold
-            } else {
-              logger.log({
-                timestamp: getCurrentTimestamp(),
-                type: 'info',
-                token: candidate.mint,
-                message: `✅ MARKET CAP FILTER PASSED: marketCap=$${marketData.marketCap.toFixed(2)} USD >= $${marketCapThreshold} USD (${tokenType})`,
-              });
-            }
-          } catch (error) {
-            // ⭐ FALLBACK: При ошибке (rate limiting, network issues) пропускаем проверку
-            // Токен уже прошел simplifiedFilter, где market cap был проверен
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'warning',
-              token: candidate.mint,
-              message: `⚠️ MARKET CAP FILTER: Error checking market cap (${error instanceof Error ? error.message : String(error)}), but token already passed simplifiedFilter, allowing entry`,
-            });
-            // Не возвращаем false - продолжаем обработку токена
-          }
+          // ⭐ Market cap уже проверен в simplifiedFilter перед попаданием токена в очередь
+          // Между simplifiedFilter и tryOpenPosition проходит очень мало времени (секунды)
+          // Market cap не может существенно измениться за это время, поэтому повторная проверка не нужна
+          // Пропускаем проверку market cap здесь - она уже выполнена в simplifiedFilter
 
           // ⭐ КРИТИЧНО: Проверка multiplier перед входом (гарантирует прибыльность)
           // Для pump.fun токенов начальная цена = виртуальные резервы (30 SOL / 1.073e15 токенов)
