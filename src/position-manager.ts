@@ -1361,6 +1361,23 @@ export class PositionManager {
     // Generate trade ID and store in position
     const tradeId = this.generateTradeId();
     (position as any).tradeId = tradeId;
+    
+    // Сохраняем в Redis сразу после создания позиции (до покупки)
+    await redisState.saveActivePosition(candidate.mint, {
+      token: position.token,
+      entryPrice: position.entryPrice,
+      executionPrice: position.executionPrice,
+      markPrice: position.markPrice,
+      investedSol: position.investedSol,
+      reservedAmount: position.reservedAmount,
+      entryTime: position.entryTime,
+      lastRealPriceUpdate: position.lastRealPriceUpdate,
+      peakPrice: position.peakPrice,
+      currentPrice: position.currentPrice,
+      status: position.status,
+      tier: position.tier,
+      tokensReceived: (position as any).tokensReceived,
+    });
 
     // ⭐ Выполняем покупку через адаптер (real или paper)
       logger.log({
@@ -1432,6 +1449,23 @@ export class PositionManager {
       // Store transaction signature for tracking
       (position as any).buySignature = buyResult.signature;
       (position as any).tokensReceived = buyResult.tokensReceived;
+      
+      // Обновляем в Redis после получения реальных данных о покупке
+      await redisState.saveActivePosition(candidate.mint, {
+        token: position.token,
+        entryPrice: position.entryPrice,
+        executionPrice: position.executionPrice,
+        markPrice: position.markPrice,
+        investedSol: position.investedSol,
+        reservedAmount: position.reservedAmount,
+        entryTime: position.entryTime,
+        lastRealPriceUpdate: position.lastRealPriceUpdate,
+        peakPrice: position.peakPrice,
+        currentPrice: position.currentPrice,
+        status: position.status,
+        tier: position.tier,
+        tokensReceived: (position as any).tokensReceived,
+      });
 
       logger.log({
         timestamp: getCurrentTimestamp(),
