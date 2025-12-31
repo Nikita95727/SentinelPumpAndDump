@@ -1259,6 +1259,30 @@ export class TokenFilters {
       }
 
       details.tokenType = tokenType;
+      
+      // ⭐ КРИТИЧНО: Проверяем market cap ЗДЕСЬ, до того как токен попадет в очередь
+      // Это предотвращает ситуацию, когда токен проходит фильтры, но потом отклоняется в tryOpenPosition
+      const marketCapThreshold = tokenType === 'MANIPULATOR' ? 1500 : 2000;
+      if (!marketData || marketCap < marketCapThreshold) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `❌ MARKET CAP FILTER (simplifiedFilter): marketCap=$${marketCap.toFixed(2) || 'N/A'} < $${marketCapThreshold} USD (${tokenType}), rejecting token`,
+        });
+        return {
+          passed: false,
+          reason: `Market cap too low: $${marketCap.toFixed(2) || 'N/A'} < $${marketCapThreshold} USD`,
+          details,
+        };
+      }
+      
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `✅ MARKET CAP FILTER PASSED (simplifiedFilter): marketCap=$${marketCap.toFixed(2)} USD >= $${marketCapThreshold} USD (${tokenType})`,
+      });
 
       // 4. Классификация по Tier (для манипуляторов и гемов требования мягче)
       let tierInfo: TierInfo | null = null;
