@@ -203,6 +203,8 @@ export class PumpFunPriceFetcher {
     try {
       const price = await this.getPrice(tokenMint);
       if (price <= 0) {
+        // ⭐ ЛОГИРУЕМ: цена <= 0
+        console.warn(`[PriceFetcher] getMarketData: price <= 0 for ${tokenMint.substring(0, 8)}... (price=${price})`);
         return null;
       }
 
@@ -223,7 +225,10 @@ export class PumpFunPriceFetcher {
         totalSupply,
       };
     } catch (error) {
-      // При ошибке возвращаем null
+      // ⭐ ЛОГИРУЕМ: ошибка при получении market data
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorName = error instanceof Error ? error.name : 'UnknownError';
+      console.warn(`[PriceFetcher] getMarketData failed for ${tokenMint.substring(0, 8)}...: ${errorName}: ${errorMessage}`);
       return null;
     }
   }
