@@ -11,7 +11,8 @@ export class TokenScanner {
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 20;
-  private reconnectDelay = 5000;
+  private baseReconnectDelay = 2000; // Минимальная задержка 2 сек
+  private maxReconnectDelay = 60000; // Максимальная задержка 60 сек
   private isShuttingDown = false;
   private onNewTokenCallback: (candidate: TokenCandidate) => void;
   private tokenQueue: TokenCandidate[] = [];
@@ -164,7 +165,13 @@ export class TokenScanner {
         });
         if (!this.isShuttingDown && this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++;
-          setTimeout(() => this.connect(), this.reconnectDelay);
+          const delay = this.calculateReconnectDelay();
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'info',
+            message: `🔄 Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`,
+          });
+          setTimeout(() => this.connect(), delay);
         }
       });
 
@@ -172,9 +179,27 @@ export class TokenScanner {
       console.error('Failed to connect to PumpPortal:', error);
       if (!this.isShuttingDown && this.reconnectAttempts < this.maxReconnectAttempts) {
         this.reconnectAttempts++;
-        setTimeout(() => this.connect(), this.reconnectDelay);
+        const delay = this.calculateReconnectDelay();
+        setTimeout(() => this.connect(), delay);
       }
     }
+  }
+
+  /**
+   * Расчет задержки с использованием экспоненциального отката и jitter
+   */
+  private calculateReconnectDelay(): number {
+    // Формула: min(base * 2^n, max)
+    let delay = Math.min(
+      this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
+      this.maxReconnectDelay
+    );
+
+    // Добавляем Jitter (+/- 20%)
+    const jitter = delay * 0.2;
+    const randomJitter = (Math.random() * 2 - 1) * jitter;
+
+    return Math.floor(delay + randomJitter);
   }
 
   private subscribe(): void {
