@@ -825,8 +825,19 @@ export class PositionManager {
 
       positionSize = this.safetyManager.applySafetyCaps(positionSize);
 
+      // ⭐ VIRAL ALPHA SIZING: Use fixed smaller size for very early entries
+      if (candidate.tokenType === 'VIRAL_ALPHA') {
+        positionSize = config.viralPositionSizeSol;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `🔥 VIRAL ALPHA: Using specialized position size ${positionSize.toFixed(6)} SOL`,
+        });
+      }
+
       // ⭐ TIER-BASED SIZING: Адаптируем размер позиции в зависимости от Tier
-      if (tierInfo) {
+      if (tierInfo && candidate.tokenType !== 'VIRAL_ALPHA') {
         if (tierInfo.tier === 2) {
           // Tier 2: уменьшаем размер позиции в 2 раза
           positionSize = positionSize * tierInfo.positionSizeMultiplier;
@@ -991,6 +1002,7 @@ export class PositionManager {
         reservedAmount: totalReservedAmount,
         estimatedImpact: buyResult.estimatedImpact,
         tier: positionTier, // ⭐ Сохраняем tier в позиции
+        tokenType: candidate.tokenType, // ⭐ Сохраняем тип токена в позиции
       };
 
       this.positions.set(candidate.mint, position);
@@ -1014,6 +1026,7 @@ export class PositionManager {
         currentPrice: position.currentPrice,
         status: position.status,
         tier: position.tier,
+        tokenType: position.tokenType,
         tokensReceived: (position as any).tokensReceived,
       });
 
@@ -1446,6 +1459,11 @@ export class PositionManager {
     let stallStartTime = 0; // Время начала "зависания" цены
     let highestPrice = position.entryPrice; // Для Trailing Stop
 
+    // ⭐ VIRAL ALPHA: More aggressive settings
+    const isViral = position.tokenType === 'VIRAL_ALPHA';
+    const effectiveTrailingStopPct = isViral ? Math.min(config.trailingStopPct, 20.0) : config.trailingStopPct;
+    const effectiveMomentumSensitivity = isViral ? Math.max(config.momentumExitSensitivity, 0.8) : config.momentumExitSensitivity;
+
     while (position.status === 'active') {
       // Проверяем, существует ли позиция (могла быть закрыта из другого места)
       if (!this.positions.has(position.token)) {
@@ -1508,7 +1526,7 @@ export class PositionManager {
               // Чувствительность: чем выше sensitivity, тем быстрее выходим
               // Sensitivity 0.5 -> ~3 сек stalls
               // Sensitivity 0.8 -> ~1.8 сек stalls
-              const maxStallDuration = 4000 * (1.1 - config.momentumExitSensitivity);
+              const maxStallDuration = 4000 * (1.1 - effectiveMomentumSensitivity);
 
               if (stallDuration > maxStallDuration) {
                 logger.log({
@@ -1530,8 +1548,8 @@ export class PositionManager {
         // 4. Trailing Stop Checking
         const trailingDropPct = ((highestPrice - currentPrice) / highestPrice) * 100;
 
-        // Стандартный Trailing Stop (из конфига)
-        if (trailingDropPct >= config.trailingStopPct) {
+        // Стандартный Trailing Stop (из константы или конфига)
+        if (trailingDropPct >= effectiveTrailingStopPct) {
           logger.log({
             timestamp: getCurrentTimestamp(),
             type: 'sell_signal',
@@ -2273,6 +2291,7 @@ export class PositionManager {
             currentPrice: posData.currentPrice || posData.entryPrice,
             status: posData.status === 'active' ? 'active' : 'active', // Восстанавливаем как active
             tier: posData.tier,
+            tokenType: posData.tokenType,
           };
 
           // Восстанавливаем tokensReceived если есть

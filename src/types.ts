@@ -9,7 +9,7 @@ export interface TierInfo {
   minEffectiveMultiplier?: number; // Минимальный эффективный multiplier для входа (для Tier 2/3)
 }
 
-export type TokenType = 'MANIPULATOR' | 'GEM' | 'REGULAR';
+export type TokenType = 'MANIPULATOR' | 'GEM' | 'REGULAR' | 'VIRAL_ALPHA';
 
 export interface TokenCandidate {
   mint: string;
@@ -39,6 +39,7 @@ export interface Position {
   slippage?: number; // использованный slippage (опционально)
   estimatedImpact?: number; // Оценка impact при входе
   tier?: Tier; // Tier токена при входе (1, 2, 3 или null)
+  tokenType?: TokenType; // Тип токена (MANIPULATOR, GEM, VIRAL_ALPHA, REGULAR)
   status: 'active' | 'closing' | 'closed' | 'abandoned'; // abandoned = write-off
   errorCount?: number;
   // Price history for momentum calculation
@@ -137,9 +138,10 @@ export interface Config {
   filterCheckDelay: number;
   rateLimitRetryDelay: number;
   notificationProcessDelay: number;
-  heliusWsUrl: string;
-  heliusHttpUrl: string;
+  primaryRpcWsUrl: string;
+  primaryRpcHttpUrl: string;
   secondaryRpcUrls?: string[];
+  pumpPortalWsUrl?: string;
   redisHost?: string;
   redisPort?: number;
   redisPassword?: string;
@@ -172,6 +174,12 @@ export interface Config {
 
   // Write-off threshold
   writeOffThresholdPct: number;
+
+  // Viral Alpha strategy
+  minViralUniqueBuyers: number;
+  minViralVolumeUsd: number;
+  viralPositionSizeSol: number;
+  viralMaxAgeSeconds: number;
 
   // Network configuration
   testnetMode: boolean;

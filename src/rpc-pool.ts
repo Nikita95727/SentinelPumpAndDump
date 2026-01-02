@@ -18,10 +18,10 @@ export class RpcConnectionPool {
   }
 
   private initializeConnections(): void {
-    // Основные соединения (Helius)
+    // Основные соединения (Primary RPC)
     for (let i = 0; i < this.poolSize; i++) {
       this.primaryConnections.push(
-        new Connection(config.heliusHttpUrl, {
+        new Connection(config.primaryRpcHttpUrl, {
           commitment: 'confirmed',
         })
       );
@@ -40,7 +40,7 @@ export class RpcConnectionPool {
   }
 
   /**
-   * Получает основное соединение (Helius)
+   * Получает основное соединение (Primary RPC)
    */
   getConnection(): Connection {
     const connection = this.primaryConnections[this.primaryIndex];

@@ -51,7 +51,7 @@ export function formatUsd(sol: number): number {
 }
 
 export async function getConnection(): Promise<Connection> {
-  const connection = new Connection(config.heliusHttpUrl, {
+  const connection = new Connection(config.primaryRpcHttpUrl, {
     commitment: 'confirmed',
   });
   return connection;

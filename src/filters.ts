@@ -1,11 +1,12 @@
 import { Connection, PublicKey, ParsedAccountData } from '@solana/web3.js';
 import { getMint, getAccount, unpackAccount } from '@solana/spl-token';
 import { config } from './config';
-import { TokenCandidate, Tier, TierInfo } from './types';
+import { TokenCandidate, Tier, TierInfo, TokenType } from './types';
 import { logger } from './logger';
 import { getCurrentTimestamp, formatSol, formatUsd, sleep } from './utils';
 import { getRpcPool } from './rpc-pool';
 import { cache } from './cache';
+import { earlyActivityTracker } from './early-activity-tracker';
 
 export class TokenFilters {
   private connection: Connection;
@@ -230,6 +231,21 @@ export class TokenFilters {
    * Проверяем что токен можно продать (есть успешные продажи) и есть разные покупатели
    */
   private async checkHoneypotAndScam(mint: string, isPriority: boolean = false): Promise<{ isHoneypot: boolean; uniqueBuyers: number; hasSells: boolean }> {
+    // ⭐ ОПТИМИЗАЦИЯ: Сначала проверяем данные из WebSocket (PumpPortal)
+    const metrics = earlyActivityTracker.getMetrics(mint);
+
+    // Если мы уже видели продажи и более 5 уникальных покупателей - это не honeypot
+    // Для новых токенов (до 60 сек) этого обычно достаточно для быстрого входа
+    if (metrics && metrics.uniqueBuyers >= 5 && metrics.hasSells) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `⚡ Honeypot check passed via in-memory metrics: ${metrics.uniqueBuyers} unique buyers, sells detected`,
+      });
+      return { isHoneypot: false, uniqueBuyers: metrics.uniqueBuyers, hasSells: true };
+    }
+
     try {
       const mintPubkey = new PublicKey(mint);
 
@@ -552,6 +568,18 @@ export class TokenFilters {
   }
 
   private async getPurchaseCount(mint: string, isPriority: boolean = false): Promise<number> {
+    // ⭐ ОПТИМИЗАЦИЯ: Сначала проверяем данные из WebSocket (PumpPortal)
+    const metrics = earlyActivityTracker.getMetrics(mint);
+    if (metrics && metrics.buyCount >= config.minPurchases) {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `⚡ Filter hit in-memory metrics: ${metrics.buyCount} purchases`,
+      });
+      return metrics.buyCount;
+    }
+
     const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
@@ -560,7 +588,7 @@ export class TokenFilters {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `Getting purchase count for ${mint.substring(0, 8)}...`,
+        message: `Getting purchase count for ${mint.substring(0, 8)}... (RPC Fallback)`,
       });
 
       // Получаем подписи для mint адреса
@@ -676,6 +704,19 @@ export class TokenFilters {
    * Публичный метод для использования в gem-tracker
    */
   async getTradingVolume(mint: string, isPriority: boolean = false): Promise<number> {
+    // ⭐ ОПТИМИЗАЦИЯ: Сначала проверяем данные из WebSocket (PumpPortal)
+    const metrics = earlyActivityTracker.getMetrics(mint);
+    if (metrics && (metrics.volumeSol * config.solUsdRate) >= config.minVolumeUsd) {
+      const volumeUsd = metrics.volumeSol * config.solUsdRate;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: mint,
+        message: `⚡ Filter hit in-memory metrics: $${volumeUsd.toFixed(2)} volume`,
+      });
+      return volumeUsd;
+    }
+
     const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
@@ -684,7 +725,7 @@ export class TokenFilters {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `Getting trading volume for ${mint.substring(0, 8)}...`,
+        message: `Getting trading volume for ${mint.substring(0, 8)}... (RPC Fallback)`,
       });
 
       // Получаем все транзакции
@@ -1371,7 +1412,39 @@ export class TokenFilters {
     }
   }
 
-  async simplifiedFilter(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any; tierInfo?: TierInfo | null; tokenType?: 'MANIPULATOR' | 'GEM' | 'REGULAR' }> {
+  async simplifiedFilter(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any; tierInfo?: TierInfo | null; tokenType?: TokenType }> {
+    // 0. ⭐ VIRAL ALPHA CHECK: Моментальная детекция хайпа
+    const momentum = earlyActivityTracker.getMomentum(candidate.mint);
+    if (momentum && momentum.ageSeconds <= config.viralMaxAgeSeconds &&
+      momentum.uniqueBuyers >= config.minViralUniqueBuyers &&
+      (momentum.volumeSol * config.solUsdRate) >= config.minViralVolumeUsd) {
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `🔥 VIRAL ALPHA DETECTED: ${candidate.mint.substring(0, 8)}... | Buyers: ${momentum.uniqueBuyers} | Vol: $${(momentum.volumeSol * config.solUsdRate).toFixed(2)} | Age: ${momentum.ageSeconds.toFixed(1)}s`,
+      });
+
+      const details = {
+        uniqueBuyers: momentum.uniqueBuyers,
+        volumeUsd: momentum.volumeSol * config.solUsdRate,
+        age: momentum.ageSeconds,
+        hasSells: momentum.hasSells
+      };
+
+      const tierInfo: TierInfo = {
+        tier: 1, // Viral Alpha имеет приоритет Tier 1
+        liquidity: details.volumeUsd,
+        holders: momentum.uniqueBuyers,
+        positionSizeMultiplier: 1.0, // Базовый множитель, реальный размер будет в PositionManager
+        allowsPartialSells: true,
+        minEffectiveMultiplier: 1.1, // Низкий порог для раннего входа
+      };
+
+      return { passed: true, details, tierInfo, tokenType: 'VIRAL_ALPHA' };
+    }
+
     // ВЫЗОВ FAST FILTER ЕСЛИ ВКЛЮЧЕН РЕЖИМ IMMEDIATE ENTRY
     if (config.immediateEntry) {
       return this.fastFilterManipulator(candidate);

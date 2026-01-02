@@ -18,8 +18,8 @@ const PUMP_FUN_TESTNET_CONFIG = {
  */
 const PUMP_FUN_MAINNET_CONFIG = {
   programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-  wsUrl: process.env.HELIUS_WS_URL || '',
-  httpUrl: process.env.HELIUS_HTTP_URL || process.env.HELIUS_WS_URL?.replace('wss://', 'https://').replace('ws://', 'http://') || '',
+  wsUrl: process.env.PRIMARY_RPC_WS_URL || process.env.HELIUS_WS_URL || '',
+  httpUrl: process.env.PRIMARY_RPC_HTTP_URL || process.env.HELIUS_HTTP_URL || (process.env.PRIMARY_RPC_WS_URL || process.env.HELIUS_WS_URL)?.replace('wss://', 'https://').replace('ws://', 'http://') || '',
 };
 
 /**
@@ -65,7 +65,7 @@ const getNetworkConfig = () => {
 
   // Проверяем mainnet конфигурацию
   if (!PUMP_FUN_MAINNET_CONFIG.wsUrl) {
-    throw new Error('HELIUS_WS_URL is required in .env file for mainnet mode');
+    throw new Error('PRIMARY_RPC_WS_URL/HELIUS_WS_URL is required in .env file for mainnet mode');
   }
 
   return PUMP_FUN_MAINNET_CONFIG;
@@ -102,7 +102,7 @@ export const config: Config = {
   slippageMax: 0.03,
   exitSlippageMin: 0.20, // ⭐ Минимальный slippage при выходе (20% для токенов с хорошей ликвидностью)
   exitSlippageMax: 0.35, // ⭐ Максимальный slippage при выходе (35% для токенов с низкой ликвидностью)
-  // Rate limiting: Helius free tier ~100-200 req/sec
+  // Rate limiting: Primary RPC tier limits
   // Увеличенные задержки для стабильной работы в пределах лимитов
   // ~3-5 req/sec для безопасной работы с запасом
   rpcRequestDelay: parseInt(process.env.RPC_REQUEST_DELAY || '250', 10), // ms между RPC запросами (было 80)
@@ -110,9 +110,10 @@ export const config: Config = {
   rateLimitRetryDelay: parseInt(process.env.RATE_LIMIT_RETRY_DELAY || '2000', 10), // ms при 429 ошибке (было 1000)
   notificationProcessDelay: parseInt(process.env.NOTIFICATION_PROCESS_DELAY || '500', 10), // ms между обработкой уведомлений
   // Используем конфигурацию из текущего режима (testnet/mainnet)
-  heliusWsUrl: networkConfig.wsUrl,
-  heliusHttpUrl: networkConfig.httpUrl,
+  primaryRpcWsUrl: networkConfig.wsUrl,
+  primaryRpcHttpUrl: networkConfig.httpUrl,
   secondaryRpcUrls: process.env.SECONDARY_RPC_URLS ? process.env.SECONDARY_RPC_URLS.split(',').map(u => u.trim()) : [],
+  pumpPortalWsUrl: 'wss://pumpportal.fun/api/data',
   redisHost: process.env.REDIS_HOST,
   redisPort: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT, 10) : undefined,
   redisPassword: process.env.REDIS_PASSWORD || undefined,
@@ -147,6 +148,12 @@ export const config: Config = {
   // Write-off threshold
   writeOffThresholdPct: parseFloat(process.env.WRITE_OFF_THRESHOLD_PCT || '0.3'), // Если ожидаемые proceeds < 30% от invested, write-off
 
+  // Viral Alpha strategy
+  minViralUniqueBuyers: 12, // Уникальных покупателей за период
+  minViralVolumeUsd: 600,   // Объем в USD за период
+  viralPositionSizeSol: 0.02, // Уменьшенный размер для раннего входа
+  viralMaxAgeSeconds: 20,   // Возраст токена для "вирального" входа
+
   // Network configuration
   testnetMode: isTestnetMode(),
 };
@@ -164,8 +171,8 @@ export const getNetworkInfo = () => {
   return {
     mode: useTestnet ? 'testnet' : 'mainnet',
     programId: PUMP_FUN_PROGRAM_ID,
-    wsUrl: config.heliusWsUrl,
-    httpUrl: config.heliusHttpUrl,
+    wsUrl: config.primaryRpcWsUrl,
+    httpUrl: config.primaryRpcHttpUrl,
   };
 };
 

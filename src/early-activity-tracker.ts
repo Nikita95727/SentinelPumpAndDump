@@ -7,35 +7,27 @@
 interface TokenObservation {
   mint: string;
   detectedAt: number;
-  activityCount: number; // Number of transactions seen for this token
+  activityCount: number; // Total transactions seen for this token
+  buyCount: number;      // Number of 'buy' transactions
+  volumeSol: number;    // Total SOL volume from buys
+  uniqueBuyers: Set<string>; // Set of unique buyer public keys
+  hasSells: boolean;    // Whether at least one sell transaction was seen
   hasActivity: boolean;
 }
 
 export class EarlyActivityTracker {
   private observations = new Map<string, TokenObservation>();
-  private readonly OBSERVATION_WINDOW_MS = 500; // 500ms observation window
-  private readonly MIN_ACTIVITY_COUNT = 1; // At least 1 transaction = activity
+  private readonly OBSERVATION_WINDOW_MS = 60000; // Increased to 60s for filter data collection
+  private readonly MIN_ACTIVITY_COUNT = 1;
 
   /**
    * Start observing a token when first detected
-   * Returns true if token should be allowed (has activity or window not expired)
    */
   startObservation(mint: string): boolean {
     const now = Date.now();
     const existing = this.observations.get(mint);
 
     if (existing) {
-      // Token already being observed
-      // If we've seen activity, allow immediately
-      if (existing.hasActivity) {
-        return true;
-      }
-      // If window expired and no activity, reject
-      if (now - existing.detectedAt > this.OBSERVATION_WINDOW_MS) {
-        this.observations.delete(mint);
-        return false;
-      }
-      // Still in window, continue observing
       return true;
     }
 
@@ -44,25 +36,54 @@ export class EarlyActivityTracker {
       mint,
       detectedAt: now,
       activityCount: 0,
+      buyCount: 0,
+      volumeSol: 0,
+      uniqueBuyers: new Set<string>(),
+      hasSells: false,
       hasActivity: false,
     });
 
-    // Allow entry immediately (we'll observe in background)
-    // If no activity is seen, we'll reject on next check
     return true;
   }
 
   /**
-   * Record activity for a token (called when we see another transaction)
+   * Record activity for a token
    */
-  recordActivity(mint: string): void {
+  recordActivity(mint: string, trader?: string, solAmount?: number, txType?: string): void {
     const observation = this.observations.get(mint);
     if (observation) {
       observation.activityCount++;
-      if (observation.activityCount >= this.MIN_ACTIVITY_COUNT) {
-        observation.hasActivity = true;
+      observation.hasActivity = true;
+
+      // Tracking advanced metrics for filtering
+      if (txType === 'buy') {
+        observation.buyCount++;
+        if (solAmount) {
+          observation.volumeSol += solAmount;
+        }
+        if (trader) {
+          observation.uniqueBuyers.add(trader);
+        }
+      } else if (txType === 'sell') {
+        observation.hasSells = true;
       }
     }
+  }
+
+  /**
+   * Get metrics for a token
+   */
+  getMetrics(mint: string) {
+    const obs = this.observations.get(mint);
+    if (!obs) return null;
+
+    return {
+      buyCount: obs.buyCount,
+      volumeSol: obs.volumeSol,
+      uniqueBuyers: obs.uniqueBuyers.size,
+      hasSells: obs.hasSells,
+      ageMs: Date.now() - obs.detectedAt,
+    };
   }
 
   /**
@@ -94,6 +115,30 @@ export class EarlyActivityTracker {
     // Still in observation window, no activity yet - allow for now
     // Will check again on next attempt
     return true;
+  }
+
+  /**
+   * Get momentum metrics (velocity) for a token
+   */
+  getMomentum(mint: string) {
+    const obs = this.observations.get(mint);
+    if (!obs) return null;
+
+    const now = Date.now();
+    const elapsedSec = (now - obs.detectedAt) / 1000;
+
+    if (elapsedSec < 1) return null; // Avoid division by zero or jitter
+
+    return {
+      mint,
+      uniqueBuyers: obs.uniqueBuyers.size,
+      volumeSol: obs.volumeSol,
+      buyCount: obs.buyCount,
+      buyersPerSec: obs.uniqueBuyers.size / elapsedSec,
+      volumeSolPerSec: obs.volumeSol / elapsedSec,
+      ageSeconds: elapsedSec,
+      hasSells: obs.hasSells
+    };
   }
 
   /**
