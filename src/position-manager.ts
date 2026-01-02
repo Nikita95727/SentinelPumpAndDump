@@ -574,7 +574,7 @@ export class PositionManager {
 
         if (!config.immediateEntry) {
           try {
-            const currentPrice = await priceFetcher.getPrice(candidate.mint);
+            const currentPrice = await priceFetcher.getPrice(candidate.mint, true);
             if (currentPrice <= 0) {
               // Если цены нет, ждем немного
               await sleep(50);
@@ -1456,8 +1456,8 @@ export class PositionManager {
       try {
         const now = Date.now();
 
-        // 1. Получаем текущую цену
-        const currentPrice = await priceFetcher.getPrice(position.token);
+        // 1. Получаем текущую цену (используем вторичный RPC для мониторинга)
+        const currentPrice = await priceFetcher.getPrice(position.token, true);
 
         if (currentPrice <= 0) {
           // Если цены нет, ждем и пробуем снова. 
@@ -1645,6 +1645,7 @@ export class PositionManager {
         // Если все еще 0, пытаемся получить цену заново
         if (!expectedExitPrice || expectedExitPrice <= 0) {
           try {
+            // Для финального решения о продаже используем первичный RPC для точности
             const freshPrice = await priceFetcher.getPrice(position.token);
             expectedExitPrice = freshPrice || position.entryPrice || 0;
           } catch (e) {
