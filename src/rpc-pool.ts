@@ -6,8 +6,10 @@ import { config } from './config';
  * Использует round-robin для распределения запросов между соединениями
  */
 export class RpcConnectionPool {
-  private connections: Connection[] = [];
-  private currentIndex = 0;
+  private primaryConnections: Connection[] = [];
+  private secondaryConnections: Connection[] = [];
+  private primaryIndex = 0;
+  private secondaryIndex = 0;
   private poolSize: number;
 
   constructor(poolSize: number = 3) {
@@ -16,29 +18,53 @@ export class RpcConnectionPool {
   }
 
   private initializeConnections(): void {
+    // Основные соединения (Helius)
     for (let i = 0; i < this.poolSize; i++) {
-      this.connections.push(
+      this.primaryConnections.push(
         new Connection(config.heliusHttpUrl, {
           commitment: 'confirmed',
         })
       );
     }
+
+    // Вторичные соединения (Fallback/Free)
+    if (config.secondaryRpcUrls && config.secondaryRpcUrls.length > 0) {
+      for (const url of config.secondaryRpcUrls) {
+        this.secondaryConnections.push(
+          new Connection(url, {
+            commitment: 'confirmed',
+          })
+        );
+      }
+    }
   }
 
   /**
-   * Получает следующее соединение из пула (round-robin)
+   * Получает основное соединение (Helius)
    */
   getConnection(): Connection {
-    const connection = this.connections[this.currentIndex];
-    this.currentIndex = (this.currentIndex + 1) % this.poolSize;
+    const connection = this.primaryConnections[this.primaryIndex];
+    this.primaryIndex = (this.primaryIndex + 1) % this.primaryConnections.length;
     return connection;
   }
 
   /**
-   * Получает все соединения (для batch запросов)
+   * Получает вторичное соединение (если есть), иначе основное
+   */
+  getSecondaryConnection(): Connection {
+    if (this.secondaryConnections.length > 0) {
+      const connection = this.secondaryConnections[this.secondaryIndex];
+      this.secondaryIndex = (this.secondaryIndex + 1) % this.secondaryConnections.length;
+      return connection;
+    }
+    return this.getConnection();
+  }
+
+  /**
+   * Получает все основные соединения
    */
   getAllConnections(): Connection[] {
-    return this.connections;
+    return this.primaryConnections;
   }
 
   /**

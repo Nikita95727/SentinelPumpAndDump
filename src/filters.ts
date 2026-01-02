@@ -236,7 +236,7 @@ export class TokenFilters {
       // Получаем транзакции токена
       // Для приоритетных очередей - минимальная задержка
       await sleep(isPriority ? 50 : config.rpcRequestDelay);
-      const connection = this.rpcPool.getConnection(); // Используем пул соединений
+      const connection = this.rpcPool.getSecondaryConnection(); // Используем вторичный пул для анализа
       const signatures = await connection.getSignaturesForAddress(mintPubkey, {
         limit: 50,
       });
@@ -256,7 +256,7 @@ export class TokenFilters {
           try {
             // Для приоритетных очередей - минимальная задержка
             await sleep(isPriority ? 30 : config.rpcRequestDelay);
-            const connection = this.rpcPool.getConnection(); // Используем пул соединений
+            const connection = this.rpcPool.getSecondaryConnection(); // Используем вторичный пул
             return await connection.getTransaction(sigInfo.signature, {
               commitment: 'confirmed',
               maxSupportedTransactionVersion: 0,
@@ -568,7 +568,7 @@ export class TokenFilters {
       // Ищем транзакции покупки через getSignaturesForAddress
 
       const sigStartTime = Date.now();
-      const connection = this.rpcPool.getConnection(); // Используем пул соединений
+      const connection = this.rpcPool.getSecondaryConnection(); // Используем пул соединений
       const signatures = await connection.getSignaturesForAddress(mintPubkey, {
         limit: 100,
       });
@@ -601,7 +601,7 @@ export class TokenFilters {
               // Для приоритетных очередей - минимальная задержка
               await sleep(isPriority ? 30 : config.rpcRequestDelay);
             }
-            const connection = this.rpcPool.getConnection(); // Используем пул соединений
+            const connection = this.rpcPool.getSecondaryConnection(); // Используем пул соединений
             return await connection.getTransaction(sigInfo.signature, {
               commitment: 'confirmed',
               maxSupportedTransactionVersion: 0,
@@ -689,7 +689,7 @@ export class TokenFilters {
 
       // Получаем все транзакции
       const sigStartTime = Date.now();
-      const connection = this.rpcPool.getConnection(); // Используем пул соединений
+      const connection = this.rpcPool.getSecondaryConnection(); // Используем пул соединений
       const signatures = await connection.getSignaturesForAddress(mintPubkey, {
         limit: 100,
       });
@@ -713,7 +713,7 @@ export class TokenFilters {
             await sleep(isPriority ? 30 : config.rpcRequestDelay);
           }
 
-          const connection = this.rpcPool.getConnection(); // Используем пул соединений
+          const connection = this.rpcPool.getSecondaryConnection(); // Используем пул соединений
           const tx = await connection.getTransaction(sigInfo.signature, {
             commitment: 'confirmed',
             maxSupportedTransactionVersion: 0,
@@ -793,7 +793,7 @@ export class TokenFilters {
       } else {
         // Получаем информацию о mint
         const rpcStartTime = Date.now();
-        const connection = this.rpcPool.getConnection(); // Используем пул соединений
+        const connection = this.rpcPool.getSecondaryConnection(); // Используем пул соединений
         mintInfo = await getMint(connection, mintPubkey);
         const rpcDuration = Date.now() - rpcStartTime;
 
@@ -862,7 +862,7 @@ export class TokenFilters {
         mintInfo = { mintAuthority: cached.mintAuthority ? new PublicKey(cached.mintAuthority) : null } as any;
       } else {
         await sleep(config.rpcRequestDelay);
-        const connection = this.rpcPool.getConnection(); // Используем пул соединений
+        const connection = this.rpcPool.getSecondaryConnection(); // Используем пул соединений
         const rpcStartTime = Date.now();
         mintInfo = await getMint(connection, mintPubkey);
         const rpcDuration = Date.now() - rpcStartTime;
@@ -919,7 +919,7 @@ export class TokenFilters {
   } | null> {
     try {
       const mintPubkey = new PublicKey(mint);
-      const connection = this.rpcPool.getConnection();
+      const connection = this.rpcPool.getSecondaryConnection();
 
       // Получаем топ-5 холдеров
       const largestAccounts = await connection.getTokenLargestAccounts(mintPubkey);
@@ -980,7 +980,7 @@ export class TokenFilters {
       } else {
         // Получаем топ-5 холдеров через getTokenLargestAccounts
         const accountsStartTime = Date.now();
-        const connection = this.rpcPool.getConnection(); // Используем пул соединений
+        const connection = this.rpcPool.getSecondaryConnection(); // Используем пул соединений
         largestAccounts = await connection.getTokenLargestAccounts(mintPubkey);
         const accountsDuration = Date.now() - accountsStartTime;
 
@@ -1014,7 +1014,7 @@ export class TokenFilters {
         await sleep(config.rpcRequestDelay);
         // Получаем общий supply токена
         const mintStartTime = Date.now();
-        const mintConnection = this.rpcPool.getConnection(); // Используем пул соединений
+        const mintConnection = this.rpcPool.getSecondaryConnection(); // Используем пул соединений
         mintInfo = await getMint(mintConnection, mintPubkey);
         const mintDuration = Date.now() - mintStartTime;
         totalSupply = Number(mintInfo.supply);
@@ -1044,7 +1044,7 @@ export class TokenFilters {
 
       // Используем batch запрос getMultipleAccountsInfo вместо множества getAccount
       await sleep(config.rpcRequestDelay);
-      const connection = this.rpcPool.getConnection(); // Используем пул соединений
+      const connection = this.rpcPool.getSecondaryConnection(); // Используем пул соединений
       const accountStartTime = Date.now();
       const accountInfos = await connection.getMultipleAccountsInfo(accountAddresses);
       const accountDuration = Date.now() - accountStartTime;
@@ -1210,7 +1210,7 @@ export class TokenFilters {
       // 1. FAST HONEYPOT CHECK: Freeze Authority + Minimal Tx Scan
       // Параллельно запускаем проверку Mint Info и последних транзакций
       const mintPubkey = new PublicKey(candidate.mint);
-      const connection = this.rpcPool.getConnection();
+      const connection = this.rpcPool.getSecondaryConnection();
 
       const [mintInfo, signatures] = await Promise.all([
         connection.getParsedAccountInfo(mintPubkey),
@@ -1302,7 +1302,7 @@ export class TokenFilters {
       // Лучше получить цену и капу от price-fetcher, который уже оптимизирован.
       const { priceFetcher } = await import('./price-fetcher');
       // Используем true для skipCache если нужно супер-свежее, но priceFetcher кэширует на 1с, это ок.
-      const currentPrice = await priceFetcher.getPrice(candidate.mint);
+      const currentPrice = await priceFetcher.getPrice(candidate.mint, true);
       const marketData = await priceFetcher.getMarketData(candidate.mint);
       const marketCap = marketData?.marketCap || 0;
 
@@ -1419,7 +1419,7 @@ export class TokenFilters {
 
       // Проверяем признаки гема (быстрый рост цены, объема, держателей)
       const { priceFetcher } = await import('./price-fetcher');
-      const currentPrice = await priceFetcher.getPrice(candidate.mint);
+      const currentPrice = await priceFetcher.getPrice(candidate.mint, true);
       const marketData = await priceFetcher.getMarketData(candidate.mint);
       const marketCap = marketData?.marketCap || 0;
 
@@ -1575,7 +1575,7 @@ export class TokenFilters {
         // Получаем цену напрямую из bonding curve контракта pump.fun
         // НЕ используем Jupiter API - новые токены не индексируются сразу
         const { priceFetcher } = await import('./price-fetcher');
-        const price = await priceFetcher.getPrice(mint);
+        const price = await priceFetcher.getPrice(mint, true);
 
         if (price > 0) {
           logger.log({

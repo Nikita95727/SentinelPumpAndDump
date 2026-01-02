@@ -139,6 +139,7 @@ export interface Config {
   notificationProcessDelay: number;
   heliusWsUrl: string;
   heliusHttpUrl: string;
+  secondaryRpcUrls?: string[];
   redisHost?: string;
   redisPort?: number;
   redisPassword?: string;

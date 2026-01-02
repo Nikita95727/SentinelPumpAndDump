@@ -41,13 +41,13 @@ export class PumpFunPriceFetcher {
   /**
    * Получает цену одного токена в SOL
    */
-  async getPrice(tokenMint: string): Promise<number> {
+  async getPrice(tokenMint: string, useSecondary: boolean = false): Promise<number> {
     // Микро-кеш для повторных запросов в пределах 100ms
     const microCached = this.microPriceCache.get(tokenMint);
     if (microCached && microCached.expiry > Date.now()) {
       return microCached.price;
     }
-    
+
     const cached = this.priceCache.get(tokenMint);
     if (cached && (Date.now() - cached.timestamp) < this.CACHE_TTL) {
       // Обновляем микро-кеш
@@ -57,9 +57,9 @@ export class PumpFunPriceFetcher {
 
     try {
       const bondingCurvePda = await this.getBondingCurvePDA(tokenMint);
-      const connection = this.rpcPool.getConnection();
+      const connection = useSecondary ? this.rpcPool.getSecondaryConnection() : this.rpcPool.getConnection();
       const accountInfo = await connection.getAccountInfo(bondingCurvePda);
-      
+
       if (!accountInfo) {
         const fallbackPrice = this.calculateFallbackPrice();
         this.microPriceCache.set(tokenMint, { price: fallbackPrice, expiry: Date.now() + this.MICRO_CACHE_TTL });
@@ -67,13 +67,13 @@ export class PumpFunPriceFetcher {
       }
 
       const price = this.parseBondingCurvePrice(accountInfo.data);
-      
+
       this.priceCache.set(tokenMint, {
         priceInSol: price,
         priceInUsd: price * this.solUsdPrice,
         timestamp: Date.now()
       });
-      
+
       this.microPriceCache.set(tokenMint, { price, expiry: Date.now() + this.MICRO_CACHE_TTL });
 
       return price;
@@ -90,7 +90,7 @@ export class PumpFunPriceFetcher {
   async getPricesBatch(tokenMints: string[]): Promise<Map<string, number>> {
     const prices = new Map<string, number>();
     const toFetch: string[] = [];
-    
+
     // 1. Проверяем кэш
     for (const mint of tokenMints) {
       const cached = this.priceCache.get(mint);
@@ -104,7 +104,7 @@ export class PumpFunPriceFetcher {
     // 2. Запрашиваем только те что не в кэше
     if (toFetch.length > 0) {
       const results = await Promise.allSettled(
-        toFetch.map(mint => this.getPrice(mint))
+        toFetch.map(mint => this.getPrice(mint, true)) // Батчевые запросы для очереди всегда через secondary
       );
 
       results.forEach((result, index) => {
@@ -143,7 +143,7 @@ export class PumpFunPriceFetcher {
       // Структура данных bonding curve (примерно):
       // offset 24: realTokenReserves (u64)
       // offset 32: realSolReserves (u64)
-      
+
       const realTokenReserves = Number(data.readBigUInt64LE(24));
       const realSolReserves = Number(data.readBigUInt64LE(32));
 
@@ -181,7 +181,7 @@ export class PumpFunPriceFetcher {
         'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd',
         { signal: AbortSignal.timeout(5000) }
       );
-      
+
       if (response.ok) {
         const data = await response.json() as { solana?: { usd?: number } };
         if (data.solana?.usd) {
@@ -199,9 +199,9 @@ export class PumpFunPriceFetcher {
    * Получает рыночные данные токена (цена + капитализация)
    * ⭐ НОВОЕ: Получает капитализацию для мониторинга
    */
-  async getMarketData(tokenMint: string): Promise<TokenMarketData | null> {
+  async getMarketData(tokenMint: string, useSecondary: boolean = false): Promise<TokenMarketData | null> {
     try {
-      const price = await this.getPrice(tokenMint);
+      const price = await this.getPrice(tokenMint, useSecondary);
       if (price <= 0) {
         // ⭐ ЛОГИРУЕМ: цена <= 0
         console.warn(`[PriceFetcher] getMarketData: price <= 0 for ${tokenMint.substring(0, 8)}... (price=${price})`);
@@ -211,22 +211,22 @@ export class PumpFunPriceFetcher {
       // ⭐ КРИТИЧНО: Для pump.fun токенов market cap рассчитывается по-другому
       // Для токенов на bonding curve: Market Cap = (Virtual SOL + Real SOL) * 2 * SOL/USD
       // Для токенов на Raydium: Market Cap = price * circulatingSupply * SOL/USD
-      
+
       // Пытаемся получить bonding curve account
       let marketCap = 0;
       let totalSupply = 0;
-      
+
       try {
         const bondingCurvePda = await this.getBondingCurvePDA(tokenMint);
-        const connection = this.rpcPool.getConnection();
+        const connection = useSecondary ? this.rpcPool.getSecondaryConnection() : this.rpcPool.getConnection();
         const accountInfo = await connection.getAccountInfo(bondingCurvePda);
-        
+
         if (accountInfo && accountInfo.data.length > 0) {
           // Токен еще на bonding curve - читаем реальные резервы из bonding curve
           // Структура: offset 24: realTokenReserves (u64), offset 32: realSolReserves (u64)
           const realTokenReserves = Number(accountInfo.data.readBigUInt64LE(24));
           const realSolReserves = Number(accountInfo.data.readBigUInt64LE(32));
-          
+
           if (realSolReserves > 0 && realTokenReserves > 0) {
             // Market Cap = (Virtual SOL + Real SOL) * 2 * SOL/USD
             // Формула: (30 + realSolReserves) * 2 * SOL/USD

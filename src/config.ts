@@ -112,6 +112,7 @@ export const config: Config = {
   // Используем конфигурацию из текущего режима (testnet/mainnet)
   heliusWsUrl: networkConfig.wsUrl,
   heliusHttpUrl: networkConfig.httpUrl,
+  secondaryRpcUrls: process.env.SECONDARY_RPC_URLS ? process.env.SECONDARY_RPC_URLS.split(',').map(u => u.trim()) : [],
   redisHost: process.env.REDIS_HOST,
   redisPort: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT, 10) : undefined,
   redisPassword: process.env.REDIS_PASSWORD || undefined,
@@ -133,10 +134,11 @@ export const config: Config = {
   partialSellDelayMs: parseInt(process.env.PARTIAL_SELL_DELAY_MS || '15000', 10),
 
   // Impact/Slippage model (для paper и оценки в real)
-  paperImpactThresholdSol: parseFloat(process.env.PAPER_IMPACT_THRESHOLD_SOL || '0.0037'),
-  paperImpactPower: parseFloat(process.env.PAPER_IMPACT_POWER || '2.2'),
-  paperImpactBase: parseFloat(process.env.PAPER_IMPACT_BASE || '0.05'),
-  paperImpactK: parseFloat(process.env.PAPER_IMPACT_K || '0.30'),
+  // ⭐ ПРАВКА: Увеличиваем threshold и снижаем базовый impact для имитации Jito (1-2% вместо 50%)
+  paperImpactThresholdSol: parseFloat(process.env.PAPER_IMPACT_THRESHOLD_SOL || '0.1'), // Было 0.0037
+  paperImpactPower: parseFloat(process.env.PAPER_IMPACT_POWER || '2.0'),
+  paperImpactBase: parseFloat(process.env.PAPER_IMPACT_BASE || '0.005'), // 0.5% base
+  paperImpactK: parseFloat(process.env.PAPER_IMPACT_K || '0.05'), // 5% scale
 
   // Risk-aware sizing
   maxExpectedImpact: parseFloat(process.env.MAX_EXPECTED_IMPACT || '0.25'), // Максимальный допустимый impact (25%)
