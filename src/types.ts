@@ -146,28 +146,32 @@ export interface Config {
   maxPositionSize: number;
   personalWalletAddress: string;
   maxReservePercent: number;
+  jitoEnabled: boolean;
+  jitoTipAmount: number;
+  primaryRpcHttpUrl: string;
+  secondaryRpcUrls: string[];
   // Trading mode configuration
   tradingMode: 'real' | 'paper';
   realTradingEnabled: boolean; // Legacy
   walletMnemonic: string;
-  
+
   // Sell strategy
   sellStrategy: 'single' | 'partial_50_50';
   partialSellDelayMs: number;
-  
+
   // Impact/Slippage model
   paperImpactThresholdSol: number;
   paperImpactPower: number;
   paperImpactBase: number;
   paperImpactK: number;
-  
+
   // Risk-aware sizing
   maxExpectedImpact: number;
   skipIfImpactTooHigh: boolean;
-  
+
   // Write-off threshold
   writeOffThresholdPct: number;
-  
+
   // Network configuration
   testnetMode: boolean;
 }
