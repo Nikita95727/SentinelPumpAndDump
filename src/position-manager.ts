@@ -12,7 +12,7 @@ import { ITradingAdapter } from './trading/trading-adapter.interface';
 import { RealTradingAdapter } from './trading/real-trading-adapter';
 import { checkTokenReadiness } from './readiness-checker';
 import { BalanceManager } from './balance-manager';
-import { AbandonedTokenTracker } from './abandoned-token-tracker';
+
 import { redisState } from './redis-state';
 
 // Используем config.maxOpenPositions вместо хардкода
@@ -253,7 +253,7 @@ export class PositionManager {
   private tradeIdCounter: number = 0;
   private adapter: ITradingAdapter; // Trading adapter (real or paper)
   private balanceManager: BalanceManager; // Управление балансом и вывод излишка
-  private abandonedTracker: AbandonedTokenTracker; // Трекинг abandoned токенов
+
 
   constructor(connection: Connection, initialDeposit: number, adapter: ITradingAdapter) {
     this.connection = connection;
@@ -262,7 +262,7 @@ export class PositionManager {
     this.safetyManager = new SafetyManager(initialDeposit);
     this.adapter = adapter;
     this.balanceManager = new BalanceManager(connection);
-    this.abandonedTracker = new AbandonedTokenTracker(connection, adapter);
+
 
     // Загружаем активные позиции при старте (из Redis)
     this.loadActivePositions();
@@ -1764,82 +1764,16 @@ export class PositionManager {
 
       // ⭐ HARD RULE: IF netProfit <= 0 THEN abandon position
       // ИСКЛЮЧЕНИЕ: Если failsafe из-за отсутствия цены И цена не обновлялась, НЕ abandoned (ждем обновления цены)
+      // ⭐ UPDATED LOGIC: ALWAYS SELL, even if netProfit <= 0
+      // We rely on Stop Loss / Momentum Exit to save capital. Better -15% than -100%.
+
       if (netProfit <= 0 && !(isFailsafeNoPrice && priceNotUpdated)) {
         logger.log({
           timestamp: getCurrentTimestamp(),
-          type: 'warning',
+          type: 'info', // Changed from warning/error to info, as this is expected behavior for Stop Loss
           token: position.token,
-          message: `💀 EXIT NOT PROFITABLE: ${position.token.substring(0, 12)}... | expectedExitPrice=${expectedExitPrice.toFixed(10)}, expectedExitPriceAfterSlippage=${expectedExitPriceAfterSlippage.toFixed(10)}, expectedProceedsAfterSlippage=${expectedProceedsAfterSlippage.toFixed(6)} SOL, positionSize=${positionSize.toFixed(6)} SOL, allFees=${allFees.toFixed(6)} SOL, netProfit=${netProfit.toFixed(6)} SOL (<= 0). Abandoning position without sell.`,
+          message: `📉 SELLING AT LOSS: ${position.token.substring(0, 12)}... | expectedExitPrice=${expectedExitPrice.toFixed(10)}, netProfit=${netProfit.toFixed(6)} SOL, reason=${reason}. Executing FORCE SELL to preserve capital.`,
         });
-
-        // ⭐ КРИТИЧНО: Abandon position - НЕ выполнять SELL, НЕ возвращать средства
-        const reservedAmount = position.reservedAmount || positionSize;
-        const investedSol = positionSize; // Полный размер позиции (уже включает entry fees)
-
-        // ⭐ КРИТИЧНО: Используем commitLoss вместо release
-        // commitLoss:
-        // - Освобождает lockedBalance (освобождает слот)
-        // - Списывает investedSol из totalBalance (убыток навсегда)
-        // - НЕ возвращает средства в freeBalance
-        this.account.commitLoss(reservedAmount, investedSol);
-
-        // Remove from active positions
-        this.positions.delete(position.token);
-        position.status = 'abandoned';
-
-        // Удаляем из Redis
-        await redisState.removeActivePosition(position.token);
-
-        // ⭐ MANDATORY LOGGING: Log abandoned position with all required metrics
-        // Required fields: token mint, entry SOL, expected exit SOL, expected slippage %, estimated fees, netProfit, reason
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'sell',
-          token: position.token,
-          exitPrice: expectedExitPrice,
-          multiplier: currentMultiplier,
-          profitSol: -investedSol, // Full loss (investedSol списан из totalBalance)
-          reason: 'abandoned_unprofitable_exit',
-          message: `💀 POSITION ABANDONED: ${position.token.substring(0, 12)}... | entrySOL=${investedSol.toFixed(6)}, expectedExitSOL=${expectedProceedsAfterSlippage.toFixed(6)}, expectedSlippage=${(estimatedImpact * 100).toFixed(2)}%, estimatedFees=${allFees.toFixed(6)} SOL, netProfit=${netProfit.toFixed(6)} SOL (<= 0), reason=abandoned_unprofitable_exit | investedSol=${investedSol.toFixed(6)} SOL permanently lost, totalBalance decreased by ${investedSol.toFixed(6)} SOL`,
-        });
-
-        // ⭐ MANDATORY: Log to trade logger for statistical analysis
-        tradeLogger.logTradeClose({
-          tradeId: (position as any).tradeId || `abandoned-${position.token}`,
-          token: position.token,
-          exitPrice: expectedExitPrice,
-          multiplier: currentMultiplier,
-          profitSol: -investedSol, // Full loss (100% loss)
-          reason: 'abandoned_unprofitable_exit',
-        });
-
-        // ⭐ MANDATORY: Additional detailed logging for abandoned positions (for future analysis)
-        console.log(`[ABANDONED POSITION] ${position.token.substring(0, 12)}... | entrySOL: ${investedSol.toFixed(6)}, expectedExitSOL: ${expectedProceedsAfterSlippage.toFixed(6)}, expectedSlippage: ${(estimatedImpact * 100).toFixed(2)}%, estimatedFees: ${allFees.toFixed(6)} SOL, netProfit: ${netProfit.toFixed(6)} SOL, reason: abandoned_unprofitable_exit | investedSol=${investedSol.toFixed(6)} SOL permanently lost`);
-
-        // ⭐ ИНВАРИАНТ: Проверяем что freeBalance НЕ увеличился
-        const freeBalanceAfter = this.account.getFreeBalance();
-        const totalBalanceAfter = this.account.getTotalBalance();
-        const lockedBalanceAfter = this.account.getLockedBalance();
-
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          token: position.token,
-          message: `✅ ABANDONED VERIFICATION: freeBalance=${freeBalanceAfter.toFixed(6)} SOL, totalBalance=${totalBalanceAfter.toFixed(6)} SOL, lockedBalance=${lockedBalanceAfter.toFixed(6)} SOL | investedSol=${investedSol.toFixed(6)} SOL permanently lost, slot freed`,
-        });
-
-        // ⭐ КРИТИЧНО: Добавляем токен в трекер для мониторинга
-        // Токен может вырасти позже, и мы сможем продать его с прибылью или безубытком
-        const tokensReceived = (position as any).tokensReceived || (investedSol / position.entryPrice);
-        await this.abandonedTracker.addAbandonedToken(
-          position.token,
-          position.entryPrice,
-          investedSol,
-          positionSize,
-          tokensReceived
-        );
-
-        return; // DO NOT execute sell, DO NOT retry, DO NOT fallback, position is abandoned
       }
 
       // netProfit > 0: Proceed with normal SELL execution
@@ -2352,15 +2286,13 @@ export class PositionManager {
     }
 
     // Останавливаем трекинг abandoned токенов (состояние уже в Redis)
-    this.abandonedTracker.stop();
+
   }
 
   /**
    * Получает трекер abandoned токенов (для доступа извне)
    */
-  getAbandonedTracker(): AbandonedTokenTracker {
-    return this.abandonedTracker;
-  }
+
 
   /**
    * Загружает активные позиции из Redis
