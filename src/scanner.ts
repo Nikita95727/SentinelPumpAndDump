@@ -155,13 +155,21 @@ export class TokenScanner {
         wsUrl = wsUrl.replace('https://', 'wss://').replace('http://', 'ws://');
       }
 
-      console.log(`Connecting to WebSocket: ${wsUrl.substring(0, 60)}...`);
-
-      this.ws = new WebSocket(wsUrl, {
-        headers: {
+      const options: any = {};
+      if (wsUrl.includes('helius')) {
+        options.headers = {
           'Origin': 'https://helius.dev',
-        },
+        };
+      }
+
+      console.log(`Connecting to WebSocket: ${wsUrl.substring(0, 60)}...`);
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `🔄 WebSocket connection attempt ${this.reconnectAttempts + 1} to: ${wsUrl.substring(0, 60)}...`,
       });
+
+      this.ws = new WebSocket(wsUrl, options);
 
       this.ws.on('open', () => {
         const networkMode = config.testnetMode ? 'Testnet' : 'Mainnet';
