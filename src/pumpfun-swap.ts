@@ -285,11 +285,12 @@ export class PumpFunSwap {
           logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Sending Jito Bundle for BUY (Tip: ${config.jitoTipAmount} SOL)...` });
 
           const bundleId = await jitoService.sendBundle([serialized]);
+          const jitoSendTime = Date.now();
 
           if (bundleId) {
             const jitoSignature = bs58.encode(versionedTx.signatures[0]);
             signature = jitoSignature;
-            logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Jito Bundle sent. Sig: ${signature}` });
+            logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Jito Bundle ACCEPTED. ID: ${bundleId} | Signature: ${signature}` });
 
             // Ждем подтверждения
             const confirmation = await this.connection.confirmTransaction({

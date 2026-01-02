@@ -849,17 +849,21 @@ export class PositionManager {
         }
       }
 
-      // ⭐ ADAPTIVE SIZING: Оцениваем impact и корректируем размер позиции
       // ⭐ ADAPTIVE SIZING: Оцениваем impact, но не блокируем
       // Jito позволяет заходить даже с высоким impact, так как мы гарантируем транзакцию
       const estimatedImpact = this.adapter.estimateImpact(positionSize);
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `📊 Entry Audit: Jito Tip=${config.jitoTipAmount} SOL | Estimated Impact: ${(estimatedImpact * 100).toFixed(2)}% | Multiplier: ${tierInfo?.tier === 1 ? '1.3x goal' : 'adaptive'}`,
+      });
       if (estimatedImpact > config.maxExpectedImpact) {
-        // Просто логируем, не уменьшаем и не блокируем
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: candidate.mint,
-          message: `📊 High Impact Alert: Estimated impact ${(estimatedImpact * 100).toFixed(2)}% > ${(config.maxExpectedImpact * 100).toFixed(2)}%. Proceeding with Jito.`,
+          message: `⚠️ HIGH IMPACT: ${(estimatedImpact * 100).toFixed(2)}% > expected ${(config.maxExpectedImpact * 100).toFixed(2)}%. Jito bypass active.`,
         });
       }
 
@@ -1590,11 +1594,12 @@ export class PositionManager {
 
         // Логируем состояние раз в 5 секунд (или чаще если движ)
         if (now % 5000 < 1000) {
+          const maxTrailingDrop = highestPrice > currentPrice ? ((highestPrice - currentPrice) / highestPrice) * 100 : 0;
           logger.log({
             timestamp: getCurrentTimestamp(),
             type: 'info',
             token: position.token,
-            message: `👀 Monitor: ${priceChangePct.toFixed(2)}% PnL | High ${highestPrice.toFixed(9)} | Stall ${(stallStartTime > 0 ? (now - stallStartTime) / 1000 : 0).toFixed(1)}s`,
+            message: `👀 Monitor: ${priceChangePct.toFixed(2)}% PnL | Peak: ${(highestPrice / position.entryPrice).toFixed(2)}x | Stop: -${adaptiveStopPct}% (Current drop: -${maxTrailingDrop.toFixed(2)}%) | Stall: ${(stallStartTime > 0 ? (now - stallStartTime) / 1000 : 0).toFixed(1)}s`,
           });
         }
 

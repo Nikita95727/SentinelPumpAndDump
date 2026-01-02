@@ -117,10 +117,10 @@ export const config: Config = {
   redisPassword: process.env.REDIS_PASSWORD || undefined,
   logDir: process.env.LOG_DIR || './logs',
   // Safety mechanisms
-  maxSolPerTrade: parseFloat(process.env.MAX_SOL_PER_TRADE || '0.05'), // Hard cap per trade (stealth) - безопасный размер, не влияет на цену
-  maxTradingBalance: parseFloat(process.env.MAX_TRADING_BALANCE || '0.3'), // Максимальный торговый баланс (излишек выводится)
-  minPositionSize: parseFloat(process.env.MIN_POSITION_SIZE || '0.004'), // Минимальный размер позиции: 0.004 SOL
-  maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.004'), // Максимальный размер позиции: 0.004 SOL (равен минимальному)
+  maxSolPerTrade: parseFloat(process.env.MAX_SOL_PER_TRADE || '0.1'), // Hard cap per trade (stealth) - безопасный размер, не влияет на цену
+  maxTradingBalance: parseFloat(process.env.MAX_TRADING_BALANCE || '0.8'), // Максимальный торговый баланс (излишек выводится)
+  minPositionSize: parseFloat(process.env.MIN_POSITION_SIZE || '0.01'), // Минимальный размер позиции: 0.01 SOL
+  maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.1'), // Максимальный размер позиции: 0.1 SOL (позволяет 0.055)
   personalWalletAddress: process.env.PERSONAL_WALLET_ADDRESS || '', // Адрес личного кошелька для вывода излишка
   maxReservePercent: parseFloat(process.env.MAX_RESERVE_PERCENT || '1.0'), // Max % of reserves per trade (if data available)
   // Trading mode configuration
