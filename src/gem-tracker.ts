@@ -22,23 +22,23 @@ interface GemObservation {
   initialVolume: number; // Начальный объем (USD)
   initialHolders: number; // Начальное количество держателей
   initialMarketCap: number; // Начальная капитализация (USD)
-
+  
   // Текущие значения
   currentPrice: number;
   currentVolume: number;
   currentHolders: number;
   currentMarketCap: number;
-
+  
   // История цен для расчета импульса
   priceHistory: Array<{ price: number; timestamp: number }>;
-
+  
   // Индикаторы
   priceMomentum: number; // Скорость роста цены (x/сек)
   volumeGrowth: number; // Рост объема (%)
   holderGrowth: number; // Рост держателей (%)
   marketCapGrowth: number; // Рост капитализации (%)
   gemScore: number; // Комбинированный индикатор самородка (0-1)
-
+  
   // Статус
   isGem: boolean; // Является ли самородком
   entryTriggered: boolean; // Был ли триггер входа
@@ -58,7 +58,7 @@ export class GemTracker {
   constructor(
     private connection: Connection,
     private filters: TokenFilters
-  ) { }
+  ) {}
 
   /**
    * Устанавливает callback для уведомления о найденных самородках
@@ -79,7 +79,7 @@ export class GemTracker {
 
     try {
       // Получаем начальные значения
-      const initialPrice = await priceFetcher.getPrice(candidate.mint, true);
+      const initialPrice = await priceFetcher.getPrice(candidate.mint);
       if (initialPrice <= 0) {
         logger.log({
           timestamp: getCurrentTimestamp(),
@@ -159,7 +159,7 @@ export class GemTracker {
 
       try {
         // Получаем текущие значения
-        const currentPrice = await priceFetcher.getPrice(candidate.mint, true);
+        const currentPrice = await priceFetcher.getPrice(candidate.mint);
         if (currentPrice <= 0) {
           await sleep(this.MONITORING_INTERVAL_MS);
           continue;
@@ -252,7 +252,7 @@ export class GemTracker {
       const recentPrices = observation.priceHistory.slice(-3); // Последние 3 цены
       const priceChange = recentPrices[recentPrices.length - 1].price - recentPrices[0].price;
       const timeChange = (recentPrices[recentPrices.length - 1].timestamp - recentPrices[0].timestamp) / 1000; // секунды
-
+      
       if (timeChange > 0) {
         const currentMultiplier = observation.currentPrice / observation.initialPrice;
         observation.priceMomentum = (currentMultiplier - 1) / timeElapsed; // x/сек
@@ -346,11 +346,11 @@ export class GemTracker {
       const connection = this.filters['connection'] || this.connection;
       const { PublicKey } = await import('@solana/web3.js');
       const mintPubkey = new PublicKey(mint);
-
+      
       const signatures = await connection.getSignaturesForAddress(mintPubkey, {
         limit: 30,
       });
-
+      
       // Для упрощения считаем количество уникальных подписей как индикатор активности
       // В реальности нужно анализировать транзакции, но это медленно
       // Используем количество транзакций как приблизительный индикатор

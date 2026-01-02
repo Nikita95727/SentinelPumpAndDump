@@ -94,7 +94,7 @@ export class ConcentratedLiquidityTracker {
   private readonly TRACKING_DURATION = 24 * 60 * 60 * 1000; // 24 часа
   private readonly SNAPSHOT_INTERVAL = 30 * 1000; // Снимок каждые 30 секунд
   private readonly PRICE_CHECK_INTERVAL = 10 * 1000; // Проверка цены каждые 10 секунд
-
+  
   // Метрики для анализа паттернов
   private readonly MIN_SNAPSHOTS_FOR_PATTERN = 10; // Минимум снимков для анализа паттерна
   private readonly PATTERN_ANALYSIS_INTERVAL = 5 * 60 * 1000; // Анализ паттернов каждые 5 минут
@@ -125,7 +125,7 @@ export class ConcentratedLiquidityTracker {
     }
 
     const now = Date.now();
-    const initialPrice = await priceFetcher.getPrice(mint, true);
+    const initialPrice = await priceFetcher.getPrice(mint);
 
     // ⭐ Получаем начальную капитализацию
     let initialMarketCap = 0;
@@ -266,7 +266,7 @@ export class ConcentratedLiquidityTracker {
    */
   private async updateTokenSnapshot(mint: string, tokenData: ConcentratedTokenData): Promise<void> {
     const now = Date.now();
-
+    
     // Проверяем, нужно ли делать новый снимок
     const lastSnapshot = tokenData.snapshots[tokenData.snapshots.length - 1];
     if (lastSnapshot && now - lastSnapshot.timestamp < this.SNAPSHOT_INTERVAL) {
@@ -274,7 +274,7 @@ export class ConcentratedLiquidityTracker {
     }
 
     // Получаем текущую цену
-    const currentPrice = await priceFetcher.getPrice(mint, true);
+    const currentPrice = await priceFetcher.getPrice(mint);
     if (currentPrice <= 0) {
       return; // Не удалось получить цену
     }
@@ -401,17 +401,17 @@ export class ConcentratedLiquidityTracker {
 
     // Средние длительности фаз
     const avgPhaseDurations: Record<ManipulationPhase, number> = {
-      accumulation: phaseDurations.accumulation.length > 0
-        ? phaseDurations.accumulation.reduce((a, b) => a + b, 0) / phaseDurations.accumulation.length
+      accumulation: phaseDurations.accumulation.length > 0 
+        ? phaseDurations.accumulation.reduce((a, b) => a + b, 0) / phaseDurations.accumulation.length 
         : 0,
-      pump: phaseDurations.pump.length > 0
-        ? phaseDurations.pump.reduce((a, b) => a + b, 0) / phaseDurations.pump.length
+      pump: phaseDurations.pump.length > 0 
+        ? phaseDurations.pump.reduce((a, b) => a + b, 0) / phaseDurations.pump.length 
         : 0,
-      dump: phaseDurations.dump.length > 0
-        ? phaseDurations.dump.reduce((a, b) => a + b, 0) / phaseDurations.dump.length
+      dump: phaseDurations.dump.length > 0 
+        ? phaseDurations.dump.reduce((a, b) => a + b, 0) / phaseDurations.dump.length 
         : 0,
-      recovery: phaseDurations.recovery.length > 0
-        ? phaseDurations.recovery.reduce((a, b) => a + b, 0) / phaseDurations.recovery.length
+      recovery: phaseDurations.recovery.length > 0 
+        ? phaseDurations.recovery.reduce((a, b) => a + b, 0) / phaseDurations.recovery.length 
         : 0,
       unknown: 0,
     };
@@ -566,11 +566,11 @@ export class ConcentratedLiquidityTracker {
     // Чем больше ликвидность, тем меньше slippage
     const positionSizeUsd = positionSizeSol * 170; // Примерная цена SOL
     const liquidityRatio = positionSizeUsd / liquidityUsd;
-
+    
     // Базовый slippage + влияние размера позиции
     const baseSlippage = 0.05; // 5% базовый
     const impactSlippage = Math.min(liquidityRatio * 0.5, 0.3); // Максимум 30% impact
-
+    
     return baseSlippage + impactSlippage;
   }
 
@@ -587,16 +587,16 @@ export class ConcentratedLiquidityTracker {
     // Используем пиковую капитализацию как индикатор максимальной ликвидности
     // Обычно ликвидность составляет 10-30% от капитализации
     const estimatedPeakLiquidity = peakMarketCap * 0.2; // Берем 20% как среднее
-
+    
     // Используем минимум из текущей ликвидности и оцененной пиковой
     // Если капитализация упала, ликвидность тоже могла упасть
     const effectiveLiquidity = Math.min(currentLiquidity, estimatedPeakLiquidity);
-
+    
     // Если ликвидность очень низкая, используем текущую
     if (effectiveLiquidity < 100) {
       return this.calculateEstimatedSlippage(currentLiquidity, positionSizeSol);
     }
-
+    
     // Рассчитываем slippage на основе эффективной ликвидности
     return this.calculateEstimatedSlippage(effectiveLiquidity, positionSizeSol);
   }
@@ -644,7 +644,7 @@ export class ConcentratedLiquidityTracker {
     // Обновляем текущую фазу если изменилась
     if (detectedPhase !== tokenData.currentPhase) {
       const now = Date.now();
-
+      
       // Завершаем предыдущую фазу
       if (tokenData.phaseHistory.length > 0) {
         const lastPhase = tokenData.phaseHistory[tokenData.phaseHistory.length - 1];
@@ -759,7 +759,7 @@ export class ConcentratedLiquidityTracker {
       if (!existing) {
         const estimatedSlippage = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
         const safetyScore = this.calculateEntrySafety(tokenData.currentPhase, snapshot);
-
+        
         tokenData.entryOpportunities.push({
           timestamp: snapshot.timestamp,
           price: currentPrice,
@@ -789,18 +789,18 @@ export class ConcentratedLiquidityTracker {
           opp => Math.abs(opp.timestamp - snapshot.timestamp) < 60000
         );
         if (!existing) {
-          const estimatedSlippage = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
-          const safetyScore = this.calculateEntrySafety(tokenData.currentPhase, snapshot);
-
-          tokenData.entryOpportunities.push({
-            timestamp: snapshot.timestamp,
-            price: currentPrice,
-            liquidity: snapshot.liquidity,
-            reason: `Liquidity increased ${liquidityChange.toFixed(1)}% (manipulator adding liquidity?)`,
-            estimatedSlippage,
-            safetyScore,
-            marketCap: snapshot.marketCap, // ⭐ Капитализация на момент возможности входа
-          });
+        const estimatedSlippage = this.calculateEstimatedSlippage(snapshot.liquidity, 0.003);
+        const safetyScore = this.calculateEntrySafety(tokenData.currentPhase, snapshot);
+        
+        tokenData.entryOpportunities.push({
+          timestamp: snapshot.timestamp,
+          price: currentPrice,
+          liquidity: snapshot.liquidity,
+          reason: `Liquidity increased ${liquidityChange.toFixed(1)}% (manipulator adding liquidity?)`,
+          estimatedSlippage,
+          safetyScore,
+          marketCap: snapshot.marketCap, // ⭐ Капитализация на момент возможности входа
+        });
           await this.logEvent(mint, 'ENTRY_OPPORTUNITY', {
             price: currentPrice,
             liquidityChange,
@@ -821,14 +821,14 @@ export class ConcentratedLiquidityTracker {
       );
       if (!existing) {
         const urgency = this.calculateExitUrgency(tokenData.currentPhase, snapshot);
-
+        
         // ⭐ Рассчитываем ожидаемый slippage при выходе на основе пиковой капитализации
         const estimatedExitSlippage = this.calculateExitSlippageByMarketCap(
           tokenData.peakMarketCap,
           snapshot.liquidity,
           0.003
         );
-
+        
         tokenData.exitOpportunities.push({
           timestamp: snapshot.timestamp,
           price: currentPrice,
@@ -861,24 +861,24 @@ export class ConcentratedLiquidityTracker {
           opp => Math.abs(opp.timestamp - snapshot.timestamp) < 60000
         );
         if (!existing) {
-          const urgency = this.calculateExitUrgency(tokenData.currentPhase, snapshot);
-
-          // ⭐ Рассчитываем ожидаемый slippage при выходе на основе пиковой капитализации
-          const estimatedExitSlippage = this.calculateExitSlippageByMarketCap(
-            tokenData.peakMarketCap,
-            snapshot.liquidity,
-            0.003
-          );
-
-          tokenData.exitOpportunities.push({
-            timestamp: snapshot.timestamp,
-            price: currentPrice,
-            multiplier,
-            reason: `Liquidity dropped ${Math.abs(liquidityChange).toFixed(1)}% (manipulator withdrawing? Exit now!)`,
-            urgency,
-            marketCap: snapshot.marketCap, // ⭐ Капитализация на момент возможности выхода
-            estimatedExitSlippage, // ⭐ Ожидаемый slippage при выходе
-          });
+        const urgency = this.calculateExitUrgency(tokenData.currentPhase, snapshot);
+        
+        // ⭐ Рассчитываем ожидаемый slippage при выходе на основе пиковой капитализации
+        const estimatedExitSlippage = this.calculateExitSlippageByMarketCap(
+          tokenData.peakMarketCap,
+          snapshot.liquidity,
+          0.003
+        );
+        
+        tokenData.exitOpportunities.push({
+          timestamp: snapshot.timestamp,
+          price: currentPrice,
+          multiplier,
+          reason: `Liquidity dropped ${Math.abs(liquidityChange).toFixed(1)}% (manipulator withdrawing? Exit now!)`,
+          urgency,
+          marketCap: snapshot.marketCap, // ⭐ Капитализация на момент возможности выхода
+          estimatedExitSlippage, // ⭐ Ожидаемый slippage при выходе
+        });
           await this.logEvent(mint, 'EXIT_OPPORTUNITY', {
             price: currentPrice,
             multiplier,
@@ -1003,7 +1003,7 @@ export class ConcentratedLiquidityTracker {
       exitOpportunities: tokenData.exitOpportunities,
       finalPrice: tokenData.snapshots[tokenData.snapshots.length - 1]?.price || 0,
       initialPrice: tokenData.snapshots[0]?.price || 0,
-      totalReturn: tokenData.snapshots[0]?.price
+      totalReturn: tokenData.snapshots[0]?.price 
         ? ((tokenData.snapshots[tokenData.snapshots.length - 1]?.price || 0) / tokenData.snapshots[0].price - 1) * 100
         : 0,
       manipulationPhases: tokenData.manipulationPhases,
@@ -1043,17 +1043,17 @@ export class ConcentratedLiquidityTracker {
     }
 
     return {
-      accumulation: phaseDurations.accumulation.length > 0
-        ? phaseDurations.accumulation.reduce((a, b) => a + b, 0) / phaseDurations.accumulation.length
+      accumulation: phaseDurations.accumulation.length > 0 
+        ? phaseDurations.accumulation.reduce((a, b) => a + b, 0) / phaseDurations.accumulation.length 
         : 0,
-      pump: phaseDurations.pump.length > 0
-        ? phaseDurations.pump.reduce((a, b) => a + b, 0) / phaseDurations.pump.length
+      pump: phaseDurations.pump.length > 0 
+        ? phaseDurations.pump.reduce((a, b) => a + b, 0) / phaseDurations.pump.length 
         : 0,
-      dump: phaseDurations.dump.length > 0
-        ? phaseDurations.dump.reduce((a, b) => a + b, 0) / phaseDurations.dump.length
+      dump: phaseDurations.dump.length > 0 
+        ? phaseDurations.dump.reduce((a, b) => a + b, 0) / phaseDurations.dump.length 
         : 0,
-      recovery: phaseDurations.recovery.length > 0
-        ? phaseDurations.recovery.reduce((a, b) => a + b, 0) / phaseDurations.recovery.length
+      recovery: phaseDurations.recovery.length > 0 
+        ? phaseDurations.recovery.reduce((a, b) => a + b, 0) / phaseDurations.recovery.length 
         : 0,
       unknown: 0,
     };

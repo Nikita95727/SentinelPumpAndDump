@@ -22,13 +22,9 @@ interface PaperPosition {
 export class PaperTradingAdapter implements ITradingAdapter {
   private positions = new Map<string, PaperPosition>();
   private solBalance: number;
+  private readonly entryFees = config.priorityFee + config.signatureFee; // 0.001005 SOL
+  private readonly exitFees = config.priorityFee + config.signatureFee; // 0.001005 SOL
   private impactModel = getImpactModel();
-
-  private getEffectiveFees(): number {
-    const standardFee = config.priorityFee + config.signatureFee;
-    const jitoTip = config.jitoEnabled ? config.jitoTipAmount : 0;
-    return standardFee + jitoTip;
-  }
 
   constructor(private connection: Connection, initialBalance: number) {
     this.solBalance = initialBalance;
@@ -63,15 +59,12 @@ export class PaperTradingAdapter implements ITradingAdapter {
 
       // Рассчитываем ожидаемый impact
       const estimatedImpact = this.estimateImpact(amountSol);
-
-      // Рассчитываем текущие комиссии (включая Jito Tip если включен)
-      const currentFees = this.getEffectiveFees();
-
+      
       // Рассчитываем execution price (с учетом impact)
       const executionPrice = calculateExecutionPrice(markPrice, estimatedImpact, true);
-
+      
       // Рассчитываем количество токенов (с учетом fees и impact)
-      const tokensReceived = calculateTokensReceived(amountSol, markPrice, estimatedImpact, currentFees);
+      const tokensReceived = calculateTokensReceived(amountSol, markPrice, estimatedImpact, this.entryFees);
 
       // Обновляем баланс
       this.solBalance -= amountSol;
@@ -93,7 +86,7 @@ export class PaperTradingAdapter implements ITradingAdapter {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `📄 PAPER BUY: ${mint} | Invested: ${amountSol.toFixed(6)} SOL (Fee: ${currentFees.toFixed(6)} SOL) ${config.jitoEnabled ? '🌩️ Jito Simulated' : ''} | MarkPrice: ${markPrice.toFixed(10)}, ExecutionPrice: ${executionPrice.toFixed(10)}, Impact: ${(estimatedImpact * 100).toFixed(2)}%, Tokens: ${tokensReceived.toFixed(2)}, Signature: ${fakeSignature}, Duration: ${duration}ms, Balance: ${this.solBalance.toFixed(6)} SOL`,
+        message: `📄 PAPER BUY: ${mint} | Invested: ${amountSol.toFixed(6)} SOL, MarkPrice: ${markPrice.toFixed(10)}, ExecutionPrice: ${executionPrice.toFixed(10)}, Impact: ${(estimatedImpact * 100).toFixed(2)}%, Tokens: ${tokensReceived.toFixed(2)}, Signature: ${fakeSignature}, Duration: ${duration}ms, Balance: ${this.solBalance.toFixed(6)} SOL`,
       });
 
       return {
@@ -151,15 +144,12 @@ export class PaperTradingAdapter implements ITradingAdapter {
       // Impact зависит от размера продажи в SOL эквиваленте
       const sellSizeSol = tokensToSell * markPrice;
       const estimatedImpact = this.estimateImpact(sellSizeSol);
-
-      // Рассчитываем текущие комиссии (включая Jito Tip если включен)
-      const currentFees = this.getEffectiveFees();
-
+      
       // Рассчитываем execution price (с учетом impact)
       const executionPrice = calculateExecutionPrice(markPrice, estimatedImpact, false);
-
+      
       // Рассчитываем SOL полученный (с учетом fees и impact)
-      const solReceived = calculateSolReceived(tokensToSell, markPrice, estimatedImpact, currentFees);
+      const solReceived = calculateSolReceived(tokensToSell, markPrice, estimatedImpact, this.exitFees);
 
       // Обновляем баланс
       this.solBalance += solReceived;
@@ -179,7 +169,7 @@ export class PaperTradingAdapter implements ITradingAdapter {
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
-        message: `📄 PAPER SELL: ${mint} | Sold: ${tokensToSell.toFixed(2)} tokens (Fee: ${currentFees.toFixed(6)} SOL) ${config.jitoEnabled ? '🌩️ Jito Simulated' : ''} | MarkPrice: ${markPrice.toFixed(10)}, ExecutionPrice: ${executionPrice.toFixed(10)}, Impact: ${(estimatedImpact * 100).toFixed(2)}%, Received: ${solReceived.toFixed(6)} SOL, Signature: ${fakeSignature}, Duration: ${duration}ms, Balance: ${this.solBalance.toFixed(6)} SOL`,
+        message: `📄 PAPER SELL: ${mint} | Sold: ${tokensToSell.toFixed(2)} tokens, MarkPrice: ${markPrice.toFixed(10)}, ExecutionPrice: ${executionPrice.toFixed(10)}, Impact: ${(estimatedImpact * 100).toFixed(2)}%, Received: ${solReceived.toFixed(6)} SOL, Signature: ${fakeSignature}, Duration: ${duration}ms, Balance: ${this.solBalance.toFixed(6)} SOL`,
       });
 
       return {

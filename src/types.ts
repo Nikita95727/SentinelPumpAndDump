@@ -9,7 +9,7 @@ export interface TierInfo {
   minEffectiveMultiplier?: number; // Минимальный эффективный multiplier для входа (для Tier 2/3)
 }
 
-export type TokenType = 'MANIPULATOR' | 'GEM' | 'REGULAR' | 'VIRAL_ALPHA';
+export type TokenType = 'MANIPULATOR' | 'GEM' | 'REGULAR';
 
 export interface TokenCandidate {
   mint: string;
@@ -39,7 +39,6 @@ export interface Position {
   slippage?: number; // использованный slippage (опционально)
   estimatedImpact?: number; // Оценка impact при входе
   tier?: Tier; // Tier токена при входе (1, 2, 3 или null)
-  tokenType?: TokenType; // Тип токена (MANIPULATOR, GEM, VIRAL_ALPHA, REGULAR)
   status: 'active' | 'closing' | 'closed' | 'abandoned'; // abandoned = write-off
   errorCount?: number;
   // Price history for momentum calculation
@@ -66,7 +65,7 @@ export interface Batch {
 
 export interface TradeLog {
   timestamp: string;
-  type: 'buy' | 'sell' | 'batch_complete' | 'batch_start' | 'error' | 'warning' | 'info' | 'token_received' | 'filter_check' | 'filter_passed' | 'filter_failed' | 'token_added' | 'token_rejected' | 'filter_warning' | 'sell_signal';
+  type: 'buy' | 'sell' | 'batch_complete' | 'batch_start' | 'error' | 'warning' | 'info' | 'token_received' | 'filter_check' | 'filter_passed' | 'filter_failed' | 'token_added' | 'token_rejected';
   batchId?: number;
   token?: string;
   investedSol?: number;
@@ -121,15 +120,11 @@ export interface Config {
   minLiquidityUsd: number; // ⭐ Минимальная базовая ликвидность для входа
   maxSingleHolderPct: number; // ⭐ Максимальный % токенов у одного держателя
   minEntryMultiplier: number; // ⭐ КРИТИЧНО: Минимальный multiplier для входа
-  immediateEntry?: boolean;
   takeProfitMultiplier: number;
   exitTimerSeconds: number;
-  momentumExitSensitivity: number; // ⭐ Чувствительность выхода по импульсу (0.1 - 1.0)
   trailingStopPct: number;
   priorityFee: number;
   signatureFee: number;
-  jitoEnabled: boolean;
-  jitoTipAmount: number;
   slippageMin: number;
   slippageMax: number;
   exitSlippageMin: number; // ⭐ Минимальный slippage при выходе
@@ -138,10 +133,8 @@ export interface Config {
   filterCheckDelay: number;
   rateLimitRetryDelay: number;
   notificationProcessDelay: number;
-  primaryRpcWsUrl: string;
-  primaryRpcHttpUrl: string;
-  secondaryRpcUrls?: string[];
-  pumpPortalWsUrl?: string;
+  heliusWsUrl: string;
+  heliusHttpUrl: string;
   redisHost?: string;
   redisPort?: number;
   redisPassword?: string;
@@ -157,30 +150,24 @@ export interface Config {
   tradingMode: 'real' | 'paper';
   realTradingEnabled: boolean; // Legacy
   walletMnemonic: string;
-
+  
   // Sell strategy
   sellStrategy: 'single' | 'partial_50_50';
   partialSellDelayMs: number;
-
+  
   // Impact/Slippage model
   paperImpactThresholdSol: number;
   paperImpactPower: number;
   paperImpactBase: number;
   paperImpactK: number;
-
+  
   // Risk-aware sizing
   maxExpectedImpact: number;
   skipIfImpactTooHigh: boolean;
-
+  
   // Write-off threshold
   writeOffThresholdPct: number;
-
-  // Viral Alpha strategy
-  minViralUniqueBuyers: number;
-  minViralVolumeUsd: number;
-  viralPositionSizeSol: number;
-  viralMaxAgeSeconds: number;
-
+  
   // Network configuration
   testnetMode: boolean;
 }
