@@ -88,8 +88,8 @@ export const config: Config = {
   minVolumeUsd: 2000,
   minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '5000'), // ⭐ Минимальная базовая ликвидность для входа (увеличено до $5000 для снижения slippage)
   maxSingleHolderPct: parseFloat(process.env.MAX_SINGLE_HOLDER_PCT || '50'), // ⭐ Максимальный % токенов у одного держателя (защита от надутой ликвидности)
-  minEntryMultiplier: parseFloat(process.env.MIN_ENTRY_MULTIPLIER || '2.5'), // ⭐ КРИТИЧНО: Минимальный multiplier для входа (гарантирует прибыль даже с slippage 35%)
-  takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '2.0'), // Снижено до 2.0x для безубыточности с учетом комиссий
+  minEntryMultiplier: parseFloat(process.env.MIN_ENTRY_MULTIPLIER || '1.12'), // ⭐ КРИТИЧНО: Минимальный multiplier для входа (гарантирует прибыль даже с slippage 35%)
+  takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '1.35'), // Снижено до 2.0x для безубыточности с учетом комиссий
   exitTimerSeconds: 45, // ⭐ Уменьшено с 90 до 45 секунд для уменьшения slippage (SLIPPAGE_SOLUTIONS.md)
   trailingStopPct: 25,
   priorityFee: 0.001,
