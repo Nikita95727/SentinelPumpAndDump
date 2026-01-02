@@ -850,21 +850,17 @@ export class PositionManager {
       }
 
       // ⭐ ADAPTIVE SIZING: Оцениваем impact и корректируем размер позиции
+      // ⭐ ADAPTIVE SIZING: Оцениваем impact, но не блокируем
+      // Jito позволяет заходить даже с высоким impact, так как мы гарантируем транзакцию
       const estimatedImpact = this.adapter.estimateImpact(positionSize);
       if (estimatedImpact > config.maxExpectedImpact) {
-        // Impact слишком высокий - уменьшаем размер позиции
-        const maxSafeSize = this.findMaxSafePositionSize(entryPrice, entryFees);
-        if (maxSafeSize >= config.minPositionSize) {
-          positionSize = maxSafeSize;
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            token: candidate.mint,
-            message: `📊 Adaptive sizing: Reduced position size from ${positionSize.toFixed(6)} to ${maxSafeSize.toFixed(6)} SOL due to high impact (${(estimatedImpact * 100).toFixed(2)}% > ${(config.maxExpectedImpact * 100).toFixed(2)}%)`,
-          });
-        } else if (config.skipIfImpactTooHigh) {
-          throw new Error(`Impact too high (${(estimatedImpact * 100).toFixed(2)}%) and cannot reduce to safe size, skipping token`);
-        }
+        // Просто логируем, не уменьшаем и не блокируем
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `📊 High Impact Alert: Estimated impact ${(estimatedImpact * 100).toFixed(2)}% > ${(config.maxExpectedImpact * 100).toFixed(2)}%. Proceeding with Jito.`,
+        });
       }
 
       // ⭐ TIER-BASED MIN SIZE: Для Tier 3 минимальный размер может быть меньше
@@ -876,67 +872,9 @@ export class PositionManager {
         positionSize = MIN_POSITION_SIZE;
       }
 
-      // ⭐ EXIT SIMULATION для ВСЕХ Tier (включая Tier 1)
-      // ⭐ КРИТИЧНО: Проверяем exit slippage перед входом для всех токенов
-      if (tierInfo) {
-        const exitSimulation = await this.simulateExit(entryPrice, positionSize, tierInfo);
-
-        // Проверяем минимальный эффективный multiplier
-        const minEffectiveMultiplier = tierInfo.minEffectiveMultiplier || 1.15;
-        if (exitSimulation.effectiveMultiplier < minEffectiveMultiplier) {
-          throw new Error(
-            `Exit simulation failed: effectiveMultiplier=${exitSimulation.effectiveMultiplier.toFixed(3)} < ${minEffectiveMultiplier} (Tier ${tierInfo.tier})`
-          );
-        }
-
-        // ⭐ ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Если predicted slippage слишком высокий (> 50%), отклоняем токен
-        const MAX_ACCEPTABLE_EXIT_SLIPPAGE = 0.50; // 50% - максимально допустимый slippage
-        if (exitSimulation.predictedSlippage > MAX_ACCEPTABLE_EXIT_SLIPPAGE) {
-          throw new Error(
-            `Exit slippage too high: ${(exitSimulation.predictedSlippage * 100).toFixed(1)}% > ${(MAX_ACCEPTABLE_EXIT_SLIPPAGE * 100).toFixed(0)}% (Tier ${tierInfo.tier})`
-          );
-        }
-
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          token: candidate.mint,
-          message: `✅ Exit simulation passed (Tier ${tierInfo.tier}): effectiveMultiplier=${exitSimulation.effectiveMultiplier.toFixed(3)}, predictedProceeds=${exitSimulation.predictedProceeds.toFixed(6)} SOL, predictedSlippage=${(exitSimulation.predictedSlippage * 100).toFixed(1)}%`,
-        });
-      } else {
-        // ⭐ ДЛЯ REGULAR токенов (без tierInfo) также проверяем exit slippage
-        // Используем максимальный slippage для безопасности
-        const exitFees = config.priorityFee + config.signatureFee;
-        const investedAmount = positionSize - (config.priorityFee + config.signatureFee);
-        const expectedProceedsAtTakeProfit = investedAmount * config.takeProfitMultiplier;
-        const estimatedExitSlippage = config.exitSlippageMax; // 35% для REGULAR токенов
-        const slippageAmount = expectedProceedsAtTakeProfit * estimatedExitSlippage;
-        const predictedProceeds = expectedProceedsAtTakeProfit - slippageAmount - exitFees;
-        const effectiveMultiplier = predictedProceeds / investedAmount;
-
-        // Проверяем минимальный эффективный multiplier (1.15 для REGULAR)
-        const minEffectiveMultiplier = 1.15;
-        if (effectiveMultiplier < minEffectiveMultiplier) {
-          throw new Error(
-            `Exit simulation failed for REGULAR token: effectiveMultiplier=${effectiveMultiplier.toFixed(3)} < ${minEffectiveMultiplier}`
-          );
-        }
-
-        // Проверяем максимальный slippage
-        const MAX_ACCEPTABLE_EXIT_SLIPPAGE = 0.50; // 50%
-        if (estimatedExitSlippage > MAX_ACCEPTABLE_EXIT_SLIPPAGE) {
-          throw new Error(
-            `Exit slippage too high for REGULAR token: ${(estimatedExitSlippage * 100).toFixed(1)}% > ${(MAX_ACCEPTABLE_EXIT_SLIPPAGE * 100).toFixed(0)}%`
-          );
-        }
-
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          token: candidate.mint,
-          message: `✅ Exit simulation passed (REGULAR): effectiveMultiplier=${effectiveMultiplier.toFixed(3)}, predictedProceeds=${predictedProceeds.toFixed(6)} SOL, predictedSlippage=${(estimatedExitSlippage * 100).toFixed(1)}%`,
-        });
-      }
+      // ⭐ EXIT SIMULATION DISABLED
+      // Removed conservative exit simulation to allow Jito to capitalize on high-volatility opportunities.
+      // We rely on Stop Loss and Momentum Exit to manage risk.
 
       const exitFees = config.priorityFee + config.signatureFee;
       const investedAmount = positionSize - entryFees;

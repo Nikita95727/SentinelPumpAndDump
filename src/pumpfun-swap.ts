@@ -147,9 +147,9 @@ export class PumpFunSwap {
       const userPubkey = wallet.publicKey;
       const solAmountBN = new BN(Math.floor(amountSol * LAMPORTS_PER_SOL));
 
-      // ✅ FIX: Используем slippage из конфига (SDK ожидает проценты, напр. 1 = 1%)
-      // config.slippageMax это 0.03 (3%), значит умножаем на 100
-      const slippagePercent = config.slippageMax * 100;
+      // ✅ FIX: Если Jito включен, ставим высокий slippage (50%), так как мы защищены от MEV через приватный бандл
+      // Это предотвращает revert транзакции из-за волатильности пока бандл летит
+      const slippagePercent = config.jitoEnabled ? 50 : (config.slippageMax * 100);
 
       // ✅ FIX: Используем Priority Fee из конфига
       const priorityFeeMicroLamports = Math.floor(config.priorityFee * 1_000_000_000);
@@ -563,9 +563,8 @@ export class PumpFunSwap {
       const userPubkey = wallet.publicKey;
       const sellTokenAmount = new BN(Math.floor(amountTokens));
 
-      // ✅ FIX: Используем exitSlippageMax из конфига для выхода (напр. 35%)
-      // Преобразуем 0.35 -> 35 для SDK
-      const slippagePercent = (config.exitSlippageMax || 0.35) * 100;
+      // ✅ FIX: Если Jito включен, ставим высокий slippage (50%) для ГАРАНТИРОВАННОГО выхода
+      const slippagePercent = config.jitoEnabled ? 50 : ((config.exitSlippageMax || 0.35) * 100);
 
       // ✅ FIX: Используем Priority Fee из конфига
       const priorityFeeMicroLamports = Math.floor((config.priorityFee || 0.000001) * 1_000_000_000); // Default to 0.000001 SOL if not provided
