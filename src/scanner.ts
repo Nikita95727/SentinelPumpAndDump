@@ -100,10 +100,10 @@ export class TokenScanner {
   private startQueueCleanup(): void {
     setInterval(() => {
       if (this.isShuttingDown) return;
-      
+
       const now = Date.now();
       const initialLength = this.tokenQueue.length;
-      
+
       // Удаляем токены старше MAX_QUEUE_AGE_MS
       this.tokenQueue = this.tokenQueue.filter(candidate => {
         const age = now - candidate.createdAt;
@@ -118,7 +118,7 @@ export class TokenScanner {
         }
         return true; // Оставляем токен
       });
-      
+
       const removed = initialLength - this.tokenQueue.length;
       if (removed > 0) {
         logger.log({
@@ -134,16 +134,29 @@ export class TokenScanner {
     if (this.isShuttingDown) return;
 
     try {
-      let wsUrl = config.heliusWsUrl;
+      // Собираем список всех возможных WS URL (основной + производные от вторичных)
+      const wsUrls = [config.heliusWsUrl];
+      if (config.secondaryRpcUrls) {
+        for (const httpUrl of config.secondaryRpcUrls) {
+          wsUrls.push(httpUrl.replace('https://', 'wss://').replace('http://', 'ws://'));
+        }
+      }
+
+      // Добавляем общедоступный fallback если его еще нет
+      if (!wsUrls.includes('wss://api.mainnet-beta.solana.com')) {
+        wsUrls.push('wss://api.mainnet-beta.solana.com');
+      }
+
+      // Используем текущую попытку для выбора URL (round-robin)
+      const currentWsUrl = wsUrls[this.reconnectAttempts % wsUrls.length];
+      let wsUrl = currentWsUrl;
+
       if (!wsUrl.startsWith('wss://') && !wsUrl.startsWith('ws://')) {
         wsUrl = wsUrl.replace('https://', 'wss://').replace('http://', 'ws://');
       }
-      if (wsUrl.startsWith('https://')) {
-        wsUrl = wsUrl.replace('https://', 'wss://');
-      }
-      
+
       console.log(`Connecting to WebSocket: ${wsUrl.substring(0, 60)}...`);
-      
+
       this.ws = new WebSocket(wsUrl, {
         headers: {
           'Origin': 'https://helius.dev',
@@ -207,7 +220,7 @@ export class TokenScanner {
         type: 'error',
         message: `Failed to connect WebSocket: ${error instanceof Error ? error.message : String(error)}`,
       });
-      
+
       if (!this.isShuttingDown && this.reconnectAttempts < this.maxReconnectAttempts) {
         this.reconnectAttempts++;
         setTimeout(() => this.connect(), this.reconnectDelay);
@@ -220,7 +233,7 @@ export class TokenScanner {
 
     try {
       const programId = new PublicKey(PUMP_FUN_PROGRAM_ID);
-      
+
       const subscribeMessage = {
         jsonrpc: '2.0',
         id: 1,
@@ -268,7 +281,7 @@ export class TokenScanner {
       if (message.method === 'logsNotification' && message.params) {
         const notification = message.params;
         const logs = notification.result?.value?.logs || [];
-        
+
         // Check for early activity (buy/swap transactions)
         const hasBuySwapActivity = logs.some((log: string) => {
           const lowerLog = log.toLowerCase();
@@ -279,14 +292,14 @@ export class TokenScanner {
             lowerLog.includes('instruction: swap')
           );
         });
-        
+
         if (hasBuySwapActivity) {
           for (const log of logs) {
             const mintMatches = log.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/g);
             if (mintMatches) {
               for (const potentialMint of mintMatches) {
                 if (potentialMint === '11111111111111111111111111111111' ||
-                    potentialMint === 'So11111111111111111111111111111111111111112') {
+                  potentialMint === 'So11111111111111111111111111111111111111112') {
                   continue;
                 }
                 earlyActivityTracker.recordActivity(potentialMint);
@@ -294,7 +307,7 @@ export class TokenScanner {
             }
           }
         }
-        
+
         // Проверяем наличие событий создания токена
         const hasTokenCreation = logs.some((log: string) => {
           const lowerLog = log.toLowerCase();
@@ -306,11 +319,11 @@ export class TokenScanner {
             (lowerLog.includes('mint') && lowerLog.includes('authority'))
           );
         });
-        
+
         if (!hasTokenCreation) {
           return; // Не создание токена - пропускаем
         }
-        
+
         // Обрабатываем уведомление и добавляем в единую очередь
         void this.processLogNotification(notification);
       }
@@ -367,7 +380,7 @@ export class TokenScanner {
             }
           }
         })();
-        
+
         processingPromises.push({ promise, index: currentIndex });
       }
 
@@ -434,7 +447,7 @@ export class TokenScanner {
         }
 
         const mintAddress = this.extractMintFromTransaction(tx);
-        
+
         if (mintAddress) {
           // Deduplication по mint
           const lastMintProcessed = this.processedMints.get(mintAddress);
@@ -453,10 +466,10 @@ export class TokenScanner {
 
           // Start early activity observation
           earlyActivityTracker.startObservation(mintAddress);
-          
+
           // Используем время транзакции как время создания токена
           const txTime = tx.blockTime ? tx.blockTime * 1000 : Date.now();
-          
+
           const candidate: TokenCandidate = {
             mint: mintAddress,
             createdAt: txTime,
@@ -488,14 +501,14 @@ export class TokenScanner {
 
           // ✅ УБРАНА ЛОГИКА ПО ВОЗРАСТУ: Добавляем токен в единую очередь без фильтрации по возрасту
           this.tokenQueue.push(candidate);
-          
+
           logger.log({
             timestamp: getCurrentTimestamp(),
             type: 'info',
             token: mintAddress,
             message: `Token ${mintAddress.substring(0, 8)}... added to queue (queue size: ${this.tokenQueue.length})`,
           });
-          
+
           // Запускаем обработку очереди если она еще не запущена
           if (!this.isProcessingQueue) {
             this.processTokenQueue();
@@ -555,23 +568,23 @@ export class TokenScanner {
 
       // Приоритет 3: instruction accounts
       const accountKeys = tx.transaction?.message?.accountKeys || [];
-      const accountKeysArray = accountKeys.map((acc: any) => 
+      const accountKeysArray = accountKeys.map((acc: any) =>
         typeof acc === 'string' ? acc : acc.pubkey
       );
       const instructions = tx.transaction?.message?.instructions || [];
       for (const instruction of instructions) {
-        const programId = typeof instruction.programId === 'string' 
-          ? instruction.programId 
+        const programId = typeof instruction.programId === 'string'
+          ? instruction.programId
           : instruction.programId?.toString();
-        
+
         if (programId === PUMP_FUN_PROGRAM_ID) {
           const accounts = instruction.accounts || [];
           for (const accountIndex of accounts) {
             if (typeof accountIndex === 'number' && accountKeysArray[accountIndex]) {
               const potentialMint = accountKeysArray[accountIndex];
-              if (potentialMint && 
-                  potentialMint !== '11111111111111111111111111111111' &&
-                  potentialMint !== 'So11111111111111111111111111111111111111112') {
+              if (potentialMint &&
+                potentialMint !== '11111111111111111111111111111111' &&
+                potentialMint !== 'So11111111111111111111111111111111111111112') {
                 return potentialMint;
               }
             }
@@ -590,13 +603,13 @@ export class TokenScanner {
   private cleanupDedupCache(): void {
     const now = Date.now();
     const cutoff = now - this.DEDUP_TTL_MS;
-    
+
     for (const [key, timestamp] of this.processedSignatures.entries()) {
       if (timestamp < cutoff) {
         this.processedSignatures.delete(key);
       }
     }
-    
+
     for (const [key, timestamp] of this.processedMints.entries()) {
       if (timestamp < cutoff) {
         this.processedMints.delete(key);
