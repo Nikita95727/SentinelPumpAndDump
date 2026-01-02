@@ -51,7 +51,7 @@ export const isTestnetMode = (): boolean => {
  */
 const getNetworkConfig = () => {
   const useTestnet = isTestnetMode();
-  
+
   if (useTestnet) {
     // Проверяем, что testnet конфигурация установлена
     if (!PUMP_FUN_TESTNET_CONFIG.programId || !PUMP_FUN_TESTNET_CONFIG.wsUrl) {
@@ -62,12 +62,12 @@ const getNetworkConfig = () => {
     }
     return PUMP_FUN_TESTNET_CONFIG;
   }
-  
+
   // Проверяем mainnet конфигурацию
   if (!PUMP_FUN_MAINNET_CONFIG.wsUrl) {
     throw new Error('HELIUS_WS_URL is required in .env file for mainnet mode');
   }
-  
+
   return PUMP_FUN_MAINNET_CONFIG;
 };
 
@@ -75,25 +75,29 @@ const getNetworkConfig = () => {
 const networkConfig = getNetworkConfig();
 
 export const config: Config = {
-  initialDeposit: parseFloat(process.env.INITIAL_DEPOSIT || '0.03'),
+  initialDeposit: parseFloat(process.env.INITIAL_DEPOSIT || '0.55'),
   solUsdRate: parseFloat(process.env.SOL_USD_RATE || '170'),
-  maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || '5', 10), // Ограничено до 5 для максимально селективного подхода при позиции 0.004 SOL (резерв 0.01 SOL)
+  maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS || '10', 10),
   maxDrawdownPct: parseFloat(process.env.MAX_DRAWDOWN_PCT || '25'),
-      batchSize: 10,
-      minDelaySeconds: 10,
-      maxDelaySeconds: 30,
-      // ✅ ЕДИНАЯ ОЧЕРЕДЬ: Все токены обрабатываются через одну очередь
-      // Фильтрация и readiness check определяют момент входа
+  batchSize: 10,
+  minDelaySeconds: 10,
+  maxDelaySeconds: 30,
+  // ✅ ЕДИНАЯ ОЧЕРЕДЬ: Все токены обрабатываются через одну очередь
+  // Фильтрация и readiness check определяют момент входа
   minPurchases: 5,
   minVolumeUsd: 2000,
   minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '5000'), // ⭐ Минимальная базовая ликвидность для входа (увеличено до $5000 для снижения slippage)
   maxSingleHolderPct: parseFloat(process.env.MAX_SINGLE_HOLDER_PCT || '50'), // ⭐ Максимальный % токенов у одного держателя (защита от надутой ликвидности)
   minEntryMultiplier: parseFloat(process.env.MIN_ENTRY_MULTIPLIER || '2.5'), // ⭐ КРИТИЧНО: Минимальный multiplier для входа (гарантирует прибыль даже с slippage 35%)
-      takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '2.0'), // Снижено до 2.0x для безубыточности с учетом комиссий
+  immediateEntry: process.env.IMMEDIATE_ENTRY === 'true', // true по умолчанию для стратегии
+  takeProfitMultiplier: 50.0, // ⭐ ОТКЛЮЧАЕМ ЖЕСТКИЙ ЛИМИТ (было 2.0). Теперь выход только по Trailing Stop или Momentum.
   exitTimerSeconds: 45, // ⭐ Уменьшено с 90 до 45 секунд для уменьшения slippage (SLIPPAGE_SOLUTIONS.md)
+  momentumExitSensitivity: 0.9, // 0.9 = Очень высокая чувствительность (1-1.5 сек stall)
   trailingStopPct: 25,
   priorityFee: 0.001,
   signatureFee: 0.000005,
+  jitoEnabled: true, // ⭐ Включаем Jito по умолчанию для защиты от сэндвичей
+  jitoTipAmount: 0.001, // 0.001 SOL чаевые за быстрый выход
   slippageMin: 0.01,
   slippageMax: 0.03,
   exitSlippageMin: 0.20, // ⭐ Минимальный slippage при выходе (20% для токенов с хорошей ликвидностью)
@@ -123,24 +127,24 @@ export const config: Config = {
   tradingMode: (process.env.TRADING_MODE || 'paper') as 'real' | 'paper', // По умолчанию paper mode
   realTradingEnabled: process.env.REAL_TRADING_ENABLED === 'true', // Legacy, для обратной совместимости (не используется в логике)
   walletMnemonic: process.env.WALLET_MNEMONIC || '', // Seed-фраза для кошелька (опционально, для реальной торговли)
-  
+
   // Sell strategy
   sellStrategy: (process.env.SELL_STRATEGY || 'single') as 'single' | 'partial_50_50',
   partialSellDelayMs: parseInt(process.env.PARTIAL_SELL_DELAY_MS || '15000', 10),
-  
+
   // Impact/Slippage model (для paper и оценки в real)
   paperImpactThresholdSol: parseFloat(process.env.PAPER_IMPACT_THRESHOLD_SOL || '0.0037'),
   paperImpactPower: parseFloat(process.env.PAPER_IMPACT_POWER || '2.2'),
   paperImpactBase: parseFloat(process.env.PAPER_IMPACT_BASE || '0.05'),
   paperImpactK: parseFloat(process.env.PAPER_IMPACT_K || '0.30'),
-  
+
   // Risk-aware sizing
   maxExpectedImpact: parseFloat(process.env.MAX_EXPECTED_IMPACT || '0.25'), // Максимальный допустимый impact (25%)
   skipIfImpactTooHigh: process.env.SKIP_IF_IMPACT_TOO_HIGH === 'true',
-  
+
   // Write-off threshold
   writeOffThresholdPct: parseFloat(process.env.WRITE_OFF_THRESHOLD_PCT || '0.3'), // Если ожидаемые proceeds < 30% от invested, write-off
-  
+
   // Network configuration
   testnetMode: isTestnetMode(),
 };

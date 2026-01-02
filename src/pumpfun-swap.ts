@@ -20,6 +20,8 @@ import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token
 import BN from 'bn.js';
 import { logger } from './logger';
 import { getCurrentTimestamp } from './utils';
+import { config } from './config';
+import bs58 from 'bs58';
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
@@ -40,7 +42,7 @@ export class PumpFunSwap {
       type: 'info',
       message: `✅ PumpFunSwap initialized with official @pump-fun/pump-sdk`,
     });
-    
+
     // 🔍 ДИАГНОСТИКА: Проверяем programId из SDK
     logger.log({
       timestamp: getCurrentTimestamp(),
@@ -144,12 +146,18 @@ export class PumpFunSwap {
       const mintPubkey = new PublicKey(tokenMint);
       const userPubkey = wallet.publicKey;
       const solAmountBN = new BN(Math.floor(amountSol * LAMPORTS_PER_SOL));
-      const slippage = 20; // 20% slippage
+
+      // ✅ FIX: Используем slippage из конфига (SDK ожидает проценты, напр. 1 = 1%)
+      // config.slippageMax это 0.03 (3%), значит умножаем на 100
+      const slippagePercent = config.slippageMax * 100;
+
+      // ✅ FIX: Используем Priority Fee из конфига
+      const priorityFeeMicroLamports = Math.floor(config.priorityFee * 1_000_000_000);
 
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: `🔄 Pump.fun BUY (Official SDK) attempt ${attempt}: ${amountSol} SOL → ${tokenMint}`,
+        message: `🔄 Pump.fun BUY (Official SDK) attempt ${attempt}: ${amountSol} SOL → ${tokenMint} | Slippage: ${slippagePercent}% | PriorityFee: ${config.priorityFee} SOL`,
       });
 
       // Получаем глобальное состояние и feeConfig
@@ -193,7 +201,7 @@ export class PumpFunSwap {
         user: userPubkey,
         amount: tokenAmount,
         solAmount: solAmountBN,
-        slippage,
+        slippage: slippagePercent,
         tokenProgram: TOKEN_PROGRAM_ID,
       });
 
@@ -202,7 +210,7 @@ export class PumpFunSwap {
       // Это вызывает IncorrectProgramId в симуляции, когда ATA Program вызывает TOKEN_PROGRAM
       buyInstructions = buyInstructions.map((ix) => {
         const programId = ix.programId.toString();
-        
+
         // Если это ATA Create инструкция и у неё есть data, убираем её
         if (programId === ASSOCIATED_TOKEN_PROGRAM_ID.toString() && ix.data.length > 0) {
           logger.log({
@@ -211,7 +219,7 @@ export class PumpFunSwap {
             token: tokenMint,
             message: `🔧 FIX: Removing data from ATA Create instruction (SDK added ${ix.data.length} bytes, should be empty)`,
           });
-          
+
           // Создаем новую инструкцию без data
           return new TransactionInstruction({
             programId: ix.programId,
@@ -219,7 +227,7 @@ export class PumpFunSwap {
             data: Buffer.alloc(0), // Пустой data
           });
         }
-        
+
         return ix;
       });
 
@@ -230,7 +238,7 @@ export class PumpFunSwap {
         token: tokenMint,
         message: `🔍 BUY Instructions Debug: ${buyInstructions.length} instructions`,
       });
-      
+
       buyInstructions.forEach((ix, idx) => {
         const programId = ix.programId.toString();
         const keys = ix.keys.map(k => k.pubkey.toString()).join(', ');
@@ -242,7 +250,87 @@ export class PumpFunSwap {
         });
       });
 
-      // Создаем транзакцию
+      // СТРАТЕГИЯ ВХОДА: JITO VS STANDARD
+      let jitoConfirmed = false;
+      let signature: string | null = null;
+
+      if (config.jitoEnabled) {
+        try {
+          const { jitoService } = await import('./jito');
+
+          // Собираем инструкции для Jito
+          const allBuyInstructions = [
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports }), // Также оставляем priority fee
+            ...buyInstructions
+          ];
+
+          // Добавляем Tip для Jito
+          const tipLamports = Math.floor(config.jitoTipAmount * 1_000_000_000);
+          const tipInstruction = jitoService.createTipInstruction(wallet.publicKey, tipLamports);
+          allBuyInstructions.push(tipInstruction);
+
+          const { blockhash, lastValidBlockHeight } = await this.connection.getLatestBlockhash('processed');
+
+          const messageV0 = new TransactionMessage({
+            payerKey: wallet.publicKey,
+            recentBlockhash: blockhash,
+            instructions: allBuyInstructions,
+          }).compileToV0Message();
+
+          const versionedTx = new VersionedTransaction(messageV0);
+          versionedTx.sign([wallet]);
+
+          const serialized = Buffer.from(versionedTx.serialize()).toString('base64');
+          logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Sending Jito Bundle for BUY (Tip: ${config.jitoTipAmount} SOL)...` });
+
+          const bundleId = await jitoService.sendBundle([serialized]);
+
+          if (bundleId) {
+            const jitoSignature = bs58.encode(versionedTx.signatures[0]);
+            signature = jitoSignature;
+            logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Jito Bundle sent. Sig: ${signature}` });
+
+            // Ждем подтверждения
+            const confirmation = await this.connection.confirmTransaction({
+              signature: jitoSignature,
+              blockhash,
+              lastValidBlockHeight
+            }, 'confirmed');
+
+            if (!confirmation.value.err) {
+              jitoConfirmed = true;
+              logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Jito BUY Execution CONFIRMED! 🚀` });
+
+              const buyEndTime = Date.now();
+              const buyDuration = buyEndTime - buyStartTime;
+
+              // Возвращаем результат
+              return {
+                success: true,
+                signature: signature || undefined,
+                outAmount: tokenAmount.toNumber() // Примерное кол-во
+              };
+            } else {
+              logger.log({ timestamp: getCurrentTimestamp(), type: 'warning', token: tokenMint, message: `⚠️ Jito BUY tx landed but failed: ${JSON.stringify(confirmation.value.err)}` });
+              // Если упало с 3012/3031, нужно вернуть это как ошибку, чтобы сработал Retry
+              const errStr = JSON.stringify(confirmation.value.err);
+              if (errStr.includes('3012') || errStr.includes('3031')) {
+                return { success: false, error: `Custom:${errStr.includes('3012') ? '3012' : '3031'}` };
+              }
+            }
+          }
+        } catch (e: any) {
+          logger.log({ timestamp: getCurrentTimestamp(), type: 'error', token: tokenMint, message: `⚠️ Jito BUY execution error, falling back to standard: ${e.message}` });
+        }
+      }
+
+      // FALLBACK: Если Jito выключен или не сработал — идем по стандартному пути
+      if (config.jitoEnabled && !jitoConfirmed) {
+        logger.log({ timestamp: getCurrentTimestamp(), type: 'warning', token: tokenMint, message: `🔄 Falling back to Standard RPC BUY execution...` });
+      }
+
+      // Создаем транзакцию (STANDARD)
       const transaction = new Transaction();
 
       // Compute budget
@@ -337,7 +425,7 @@ export class PumpFunSwap {
       transaction.feePayer = wallet.publicKey;
 
       // Отправляем (skipPreflight=true т.к. уже симулировали)
-      const signature = await sendAndConfirmTransaction(
+      signature = await sendAndConfirmTransaction(
         this.connection,
         transaction,
         [wallet],
@@ -361,7 +449,7 @@ export class PumpFunSwap {
 
       return {
         success: true,
-        signature,
+        signature: signature || undefined,
         outAmount: tokenAmount.toNumber(),
       };
     } catch (error: any) {
@@ -474,12 +562,18 @@ export class PumpFunSwap {
       const mintPubkey = new PublicKey(tokenMint);
       const userPubkey = wallet.publicKey;
       const sellTokenAmount = new BN(Math.floor(amountTokens));
-      const slippage = 50; // 50% slippage - увеличен для токенов с низкой ликвидностью
+
+      // ✅ FIX: Используем exitSlippageMax из конфига для выхода (напр. 35%)
+      // Преобразуем 0.35 -> 35 для SDK
+      const slippagePercent = (config.exitSlippageMax || 0.35) * 100;
+
+      // ✅ FIX: Используем Priority Fee из конфига
+      const priorityFeeMicroLamports = Math.floor((config.priorityFee || 0.000001) * 1_000_000_000); // Default to 0.000001 SOL if not provided
 
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: `🔄 Pump.fun SELL (Official SDK) attempt ${attempt}: ${amountTokens} tokens → ${tokenMint}`,
+        message: `🔄 Pump.fun SELL (Official SDK) attempt ${attempt}: ${amountTokens} tokens → ${tokenMint} | Slippage: ${slippagePercent}% | PriorityFee: ${config.priorityFee} SOL`,
       });
 
       // Получаем глобальное состояние и feeConfig
@@ -508,7 +602,7 @@ export class PumpFunSwap {
         user: userPubkey,
         amount: sellTokenAmount,
         solAmount: minSolOutput,
-        slippage,
+        slippage: slippagePercent,
         tokenProgram: TOKEN_PROGRAM_ID,
         mayhemMode: false,
       });
@@ -520,7 +614,7 @@ export class PumpFunSwap {
         token: tokenMint,
         message: `🔍 SELL Instructions Debug: ${sellInstructions.length} instructions`,
       });
-      
+
       sellInstructions.forEach((ix, idx) => {
         const programId = ix.programId.toString();
         const keys = ix.keys.map(k => k.pubkey.toString()).join(', ');
@@ -537,7 +631,7 @@ export class PumpFunSwap {
 
       transaction.add(
         ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
-        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 150_000 })
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports })
       );
 
       // Добавляем инструкции из SDK
@@ -550,7 +644,7 @@ export class PumpFunSwap {
       // Собираем все инструкции
       const allSellInstructions = [
         ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
-        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 150_000 }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports }),
         ...sellInstructions,
       ];
 
@@ -596,21 +690,98 @@ export class PumpFunSwap {
         return { success: false, error: `Preflight failed: ${simError}` };
       }
 
-      // ✅ Симуляция успешна — отправляем транзакцию
-      // Устанавливаем blockhash для legacy Transaction
-      transaction.recentBlockhash = blockhash;
-      transaction.feePayer = wallet.publicKey;
+      // СТРАТЕГИЯ ОТПРАВКИ: JITO VS STANDARD
+      let signature: string | null = null;
+      let jitoConfirmed = false;
 
-      const signature = await sendAndConfirmTransaction(
-        this.connection,
-        transaction,
-        [wallet],
-        {
-          commitment: 'processed',
-          skipPreflight: true, // Уже симулировали выше
-          maxRetries: 3,
+      if (config.jitoEnabled) {
+        try {
+          const { jitoService } = await import('./jito');
+
+          // Собираем инструкции для Jito (Sell + Tip)
+          const allInstructions = [
+            ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports }),
+            ...sellInstructions
+          ];
+
+          // Добавляем Tip Instruction для Jito
+          const tipLamports = Math.floor(config.jitoTipAmount * 1_000_000_000);
+          const tipInstruction = jitoService.createTipInstruction(wallet.publicKey, tipLamports);
+          allInstructions.push(tipInstruction);
+
+          // Создаем VersionedTransaction
+          const messageV0 = new TransactionMessage({
+            payerKey: wallet.publicKey,
+            recentBlockhash: blockhash,
+            instructions: allInstructions,
+          }).compileToV0Message();
+
+          const versionedTx = new VersionedTransaction(messageV0);
+          versionedTx.sign([wallet]);
+
+          // Сериализуем и отправляем в Jito
+          const serialized = Buffer.from(versionedTx.serialize()).toString('base64');
+          logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Sending Jito Bundle for SELL (Tip: ${config.jitoTipAmount} SOL)...` });
+
+          const bundleId = await jitoService.sendBundle([serialized]);
+
+          if (bundleId) {
+            // Jito отправляет через свой engine.
+            // Но signature мы знаем заранее (это подпись нашей транзакции)
+            // Мы уверены, что signatures[0] существует, так как вызвали sign()
+            const jitoSignature = bs58.encode(versionedTx.signatures[0]);
+            signature = jitoSignature;
+
+            logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Jito Bundle sent. Sig: ${signature}` });
+
+            // Ждем подтверждения (стандартным способом, так как она должна попасть в блок)
+            // Даем Jito немного времени (например 5-10 сек), если нет - фоллбек
+            const confirmation = await this.connection.confirmTransaction({
+              signature: jitoSignature,
+              blockhash: blockhash,
+              lastValidBlockHeight: (await this.connection.getLatestBlockhash()).lastValidBlockHeight
+            }, 'confirmed');
+
+            if (!confirmation.value.err) {
+              jitoConfirmed = true;
+              logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Jito Execution CONFIRMED! 🚀` });
+            } else {
+              logger.log({ timestamp: getCurrentTimestamp(), type: 'warning', token: tokenMint, message: `⚠️ Jito tx landed but failed: ${JSON.stringify(confirmation.value.err)}` });
+              // Если она зафейлилась в блокчейне, то переотправлять смысла может и нет (слипейдж?), но попробуем стандартный метод если ошибка странная
+              // Но вообще если confirmTransaction вернул err, значит она в блоке.
+              return { success: false, error: `Jito execution failed: ${JSON.stringify(confirmation.value.err)}` };
+            }
+          } else {
+            logger.log({ timestamp: getCurrentTimestamp(), type: 'warning', token: tokenMint, message: `⚠️ Jito sendBundle returned null (engine error?)` });
+          }
+        } catch (e: any) {
+          logger.log({ timestamp: getCurrentTimestamp(), type: 'error', token: tokenMint, message: `⚠️ Jito execution error, falling back to standard: ${e.message}` });
         }
-      );
+      }
+
+      // FALLBACK / STANDARD EXECUTION (Если Jito не подтвердил или выключен)
+      // Если Jito был успешен, пропускаем этот блок
+      if (!jitoConfirmed) {
+        if (config.jitoEnabled) {
+          logger.log({ timestamp: getCurrentTimestamp(), type: 'warning', token: tokenMint, message: `🔄 Falling back to Standard RPC execution...` });
+        }
+
+        // Устанавливаем blockhash для legacy Transaction
+        transaction.recentBlockhash = blockhash;
+        transaction.feePayer = wallet.publicKey;
+
+        signature = await sendAndConfirmTransaction(
+          this.connection,
+          transaction,
+          [wallet],
+          {
+            commitment: 'processed',
+            skipPreflight: true, // Уже симулировали выше
+            maxRetries: 3,
+          }
+        );
+      }
 
       const sellEndTime = Date.now();
       const sellDuration = sellEndTime - sellStartTime;
@@ -627,7 +798,7 @@ export class PumpFunSwap {
 
       return {
         success: true,
-        signature,
+        signature: signature || undefined,
         solReceived,
       };
     } catch (error: any) {

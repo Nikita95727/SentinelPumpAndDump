@@ -1,4 +1,4 @@
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey, ParsedAccountData } from '@solana/web3.js';
 import { getMint, getAccount, unpackAccount } from '@solana/spl-token';
 import { config } from './config';
 import { TokenCandidate, Tier, TierInfo } from './types';
@@ -17,7 +17,7 @@ export class TokenFilters {
 
   async filterCandidate(candidate: TokenCandidate): Promise<boolean> {
     const filterDetails: any = {};
-    
+
     try {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -30,7 +30,7 @@ export class TokenFilters {
       // 1. Проверка задержки (10-30 секунд)
       const age = (Date.now() - candidate.createdAt) / 1000;
       filterDetails.age = age;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'filter_check',
@@ -59,7 +59,7 @@ export class TokenFilters {
       // 2. Проверка количества покупок (минимум 5-10)
       const purchaseCount = await this.getPurchaseCount(candidate.mint);
       filterDetails.purchaseCount = purchaseCount;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'filter_check',
@@ -88,7 +88,7 @@ export class TokenFilters {
       // 3. Проверка объема торгов (>= 2000 USD)
       const volumeUsd = await this.getTradingVolume(candidate.mint);
       filterDetails.volumeUsd = volumeUsd;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'filter_check',
@@ -117,7 +117,7 @@ export class TokenFilters {
       // 4. Проверка LP burned и mint renounced
       const isLpBurned = await this.isLpBurned(candidate.mint);
       filterDetails.isLpBurned = isLpBurned;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'filter_check',
@@ -144,7 +144,7 @@ export class TokenFilters {
 
       const isMintRenounced = await this.isMintRenounced(candidate.mint);
       filterDetails.isMintRenounced = isMintRenounced;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'filter_check',
@@ -172,7 +172,7 @@ export class TokenFilters {
       // 5. Проверка на снайперов (топ-5 холдеров, никто не держит >20%)
       const hasSnipers = await this.hasSnipers(candidate.mint);
       filterDetails.hasSnipers = hasSnipers;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'filter_check',
@@ -207,7 +207,7 @@ export class TokenFilters {
       return true;
     } catch (error: any) {
       console.error(`Error filtering candidate ${candidate.mint}:`, error);
-      
+
       // Обработка rate limiting
       if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
         await sleep(config.rateLimitRetryDelay * 2);
@@ -232,7 +232,7 @@ export class TokenFilters {
   private async checkHoneypotAndScam(mint: string, isPriority: boolean = false): Promise<{ isHoneypot: boolean; uniqueBuyers: number; hasSells: boolean }> {
     try {
       const mintPubkey = new PublicKey(mint);
-      
+
       // Получаем транзакции токена
       // Для приоритетных очередей - минимальная задержка
       await sleep(isPriority ? 50 : config.rpcRequestDelay);
@@ -247,10 +247,10 @@ export class TokenFilters {
       // Батчинг getTransaction запросов для скорости (до 5 одновременно)
       const signaturesToCheck = signatures.slice(0, Math.min(signatures.length, 30));
       const batchSize = 5;
-      
+
       for (let i = 0; i < signaturesToCheck.length; i += batchSize) {
         const batch = signaturesToCheck.slice(i, i + batchSize);
-        
+
         // Параллельно получаем транзакции батча
         const txPromises = batch.map(async (sigInfo) => {
           try {
@@ -281,8 +281,8 @@ export class TokenFilters {
           // Проверяем логи на наличие продажи
           const hasSellLog = logs.some((log: string) => {
             const lowerLog = log.toLowerCase();
-            return lowerLog.includes('sell') || 
-                   (lowerLog.includes('swap') && lowerLog.includes('out'));
+            return lowerLog.includes('sell') ||
+              (lowerLog.includes('swap') && lowerLog.includes('out'));
           });
 
           if (hasSellLog) {
@@ -316,10 +316,10 @@ export class TokenFilters {
           }
 
           accountKeys.forEach((address: string) => {
-            if (address && 
-                address !== mint && 
-                address !== '11111111111111111111111111111111' &&
-                address !== 'So11111111111111111111111111111111111111112') {
+            if (address &&
+              address !== mint &&
+              address !== '11111111111111111111111111111111' &&
+              address !== 'So11111111111111111111111111111111111111112') {
               buyerAddresses.add(address);
             }
           });
@@ -353,7 +353,7 @@ export class TokenFilters {
    */
   async filterQueue1Candidate(candidate: TokenCandidate): Promise<boolean> {
     const filterDetails: any = {};
-    
+
     try {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -442,7 +442,7 @@ export class TokenFilters {
    */
   async filterQueue2Candidate(candidate: TokenCandidate): Promise<boolean> {
     const filterDetails: any = {};
-    
+
     try {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -555,25 +555,25 @@ export class TokenFilters {
     const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
         message: `Getting purchase count for ${mint.substring(0, 8)}...`,
       });
-      
+
       // Получаем подписи для mint адреса
       // pump.fun использует определенные программы для торговли
       // Ищем транзакции покупки через getSignaturesForAddress
-      
+
       const sigStartTime = Date.now();
       const connection = this.rpcPool.getConnection(); // Используем пул соединений
       const signatures = await connection.getSignaturesForAddress(mintPubkey, {
         limit: 100,
       });
       const sigDuration = Date.now() - sigStartTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -590,10 +590,10 @@ export class TokenFilters {
       // Батчинг getTransaction запросов для скорости (до 3 одновременно)
       const batchSize = 3;
       const signaturesToCheck = signatures.slice(skipFirst ? 1 : 0, Math.min(signatures.length, 50));
-      
+
       for (let i = 0; i < signaturesToCheck.length; i += batchSize) {
         const batch = signaturesToCheck.slice(i, i + batchSize);
-        
+
         // Параллельно получаем транзакции батча
         const txPromises = batch.map(async (sigInfo) => {
           try {
@@ -634,7 +634,7 @@ export class TokenFilters {
           if (tx.meta.err) continue;
 
           // Проверяем наличие изменений в балансах токенов (признак покупки/продажи)
-          const hasTokenBalanceChanges = 
+          const hasTokenBalanceChanges =
             (tx.meta.postTokenBalances && tx.meta.postTokenBalances.length > 0) ||
             (tx.meta.preTokenBalances && tx.meta.preTokenBalances.length > 0);
 
@@ -679,14 +679,14 @@ export class TokenFilters {
     const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
         message: `Getting trading volume for ${mint.substring(0, 8)}...`,
       });
-      
+
       // Получаем все транзакции
       const sigStartTime = Date.now();
       const connection = this.rpcPool.getConnection(); // Используем пул соединений
@@ -694,7 +694,7 @@ export class TokenFilters {
         limit: 100,
       });
       const sigDuration = Date.now() - sigStartTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -742,7 +742,7 @@ export class TokenFilters {
 
       const volumeUsd = formatUsd(totalVolumeSol);
       const totalDuration = Date.now() - startTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -776,13 +776,13 @@ export class TokenFilters {
 
       // В pump.fun LP токены обычно сжигаются после создания
       // Проверяем, что LP аккаунт не существует или имеет нулевой баланс
-      
+
       const mintPubkey = new PublicKey(mint);
-      
+
       // Кеширование: mint info не меняется часто
       const cacheKey = `mint:${mint}`;
       const cached = await cache.get<{ supply: string; mintAuthority: string | null; decimals: number }>(cacheKey);
-      
+
       let mintInfo;
       if (cached) {
         mintInfo = {
@@ -796,7 +796,7 @@ export class TokenFilters {
         const connection = this.rpcPool.getConnection(); // Используем пул соединений
         mintInfo = await getMint(connection, mintPubkey);
         const rpcDuration = Date.now() - rpcStartTime;
-        
+
         // Кешируем результат на 10 секунд
         await cache.set(cacheKey, {
           supply: mintInfo.supply.toString(),
@@ -804,22 +804,22 @@ export class TokenFilters {
           decimals: mintInfo.decimals,
         }, 10);
       }
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
         message: `Mint info received for LP check`,
       });
-      
+
       // Проверяем связанные аккаунты
       // В pump.fun после создания токена LP обычно сжигается
       // Это упрощенная проверка, в реальности нужно проверять конкретные аккаунты pump.fun
-      
+
       // Для MVP считаем, что если токен существует и mint authority null, то LP burned
       const result = true; // Упрощенная проверка для MVP
       const totalDuration = Date.now() - startTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -852,11 +852,11 @@ export class TokenFilters {
       });
 
       const mintPubkey = new PublicKey(mint);
-      
+
       // Кеширование: mint authority не меняется
       const cacheKey = `mint:${mint}`;
       const cached = await cache.get<{ mintAuthority: string | null }>(cacheKey);
-      
+
       let mintInfo;
       if (cached) {
         mintInfo = { mintAuthority: cached.mintAuthority ? new PublicKey(cached.mintAuthority) : null } as any;
@@ -866,17 +866,17 @@ export class TokenFilters {
         const rpcStartTime = Date.now();
         mintInfo = await getMint(connection, mintPubkey);
         const rpcDuration = Date.now() - rpcStartTime;
-        
+
         // Кешируем результат на 10 секунд
         await cache.set(cacheKey, {
           mintAuthority: mintInfo.mintAuthority?.toString() || null,
         }, 10);
       }
-      
+
       // Если mintAuthority === null, то mint renounced
       const result = mintInfo.mintAuthority === null;
       const totalDuration = Date.now() - startTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -920,7 +920,7 @@ export class TokenFilters {
     try {
       const mintPubkey = new PublicKey(mint);
       const connection = this.rpcPool.getConnection();
-      
+
       // Получаем топ-5 холдеров
       const largestAccounts = await connection.getTokenLargestAccounts(mintPubkey);
       if (largestAccounts.value.length === 0) {
@@ -964,11 +964,11 @@ export class TokenFilters {
 
       await sleep(config.rpcRequestDelay);
       const mintPubkey = new PublicKey(mint);
-      
+
       // Кеширование: largest accounts меняются редко
       const cacheKey = `largest:${mint}`;
       const cached = await cache.get<Array<{ address: string; amount: string }>>(cacheKey);
-      
+
       let largestAccounts;
       if (cached) {
         largestAccounts = {
@@ -983,21 +983,21 @@ export class TokenFilters {
         const connection = this.rpcPool.getConnection(); // Используем пул соединений
         largestAccounts = await connection.getTokenLargestAccounts(mintPubkey);
         const accountsDuration = Date.now() - accountsStartTime;
-        
+
         // Кешируем результат на 5 секунд
         await cache.set(cacheKey, largestAccounts.value.map(acc => ({
           address: acc.address.toString(),
           amount: acc.amount.toString(),
         })), 5);
       }
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
         message: `Largest accounts received: ${largestAccounts.value.length}`,
       });
-      
+
       if (largestAccounts.value.length === 0) {
         return false;
       }
@@ -1005,7 +1005,7 @@ export class TokenFilters {
       // Кеширование для supply
       const mintCacheKey = `mint:${mint}`;
       const mintCached = await cache.get<{ supply: string }>(mintCacheKey);
-      
+
       let mintInfo;
       let totalSupply;
       if (mintCached) {
@@ -1018,7 +1018,7 @@ export class TokenFilters {
         mintInfo = await getMint(mintConnection, mintPubkey);
         const mintDuration = Date.now() - mintStartTime;
         totalSupply = Number(mintInfo.supply);
-        
+
         // Кешируем результат на 10 секунд
         await cache.set(mintCacheKey, {
           supply: mintInfo.supply.toString(),
@@ -1026,7 +1026,7 @@ export class TokenFilters {
           decimals: mintInfo.decimals,
         }, 10);
       }
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -1041,32 +1041,32 @@ export class TokenFilters {
       // BATCH ЗАПРОСЫ: Получаем все аккаунты за один раз через getMultipleAccountsInfo
       const accountsToCheck = largestAccounts.value.slice(0, Math.min(5, largestAccounts.value.length));
       const accountAddresses = accountsToCheck.map((acc: any) => acc.address);
-      
+
       // Используем batch запрос getMultipleAccountsInfo вместо множества getAccount
       await sleep(config.rpcRequestDelay);
       const connection = this.rpcPool.getConnection(); // Используем пул соединений
       const accountStartTime = Date.now();
       const accountInfos = await connection.getMultipleAccountsInfo(accountAddresses);
       const accountDuration = Date.now() - accountStartTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
         message: `Batch accounts fetched: ${accountInfos.length}, RPC duration: ${accountDuration}ms`,
       });
-      
+
       // Проверяем, не держит ли кто-то >20%
       for (let idx = 0; idx < accountsToCheck.length; idx++) {
         const accountInfo = accountInfos[idx];
         if (!accountInfo) continue;
-        
+
         try {
           // Парсим данные аккаунта из batch результата
           const tokenAccount = unpackAccount(accountAddresses[idx], accountInfo);
           const balance = Number(tokenAccount.amount);
           const percentage = (balance / totalSupply) * 100;
-          
+
           logger.log({
             timestamp: getCurrentTimestamp(),
             type: 'info',
@@ -1187,9 +1187,199 @@ export class TokenFilters {
    * Минимальная фильтрация - только защита от honeypot и базовые проверки
    * Манипуляторы и гемы НЕ отбрасываются, а помечаются для торговли
    */
-  async simplifiedFilter(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any; tierInfo?: TierInfo | null; tokenType?: 'MANIPULATOR' | 'GEM' | 'REGULAR' }> {
+  /**
+   * ⭐ БЫСТРЫЙ ФИЛЬТР (MANIPULATOR MODE):
+   * Оптимизирован для скорости.
+   * 1. Пропускает полную историю транзакций (только последние 15).
+   * 2. Проверяет Freeze Authority (моментальный отказ если есть).
+   * 3. Использует только Bonding Curve для цены/капы.
+   */
+  async fastFilterManipulator(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any; tierInfo?: TierInfo | null; tokenType?: 'MANIPULATOR' | 'GEM' | 'REGULAR' }> {
     const details: any = {};
-    
+    const startTime = Date.now();
+
+    try {
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_check',
+        token: candidate.mint,
+        filterStage: 'fast_start',
+        message: `🚀 Starting FAST filter (MANIPULATOR Mode) for ${candidate.mint.substring(0, 8)}...`,
+      });
+
+      // 1. FAST HONEYPOT CHECK: Freeze Authority + Minimal Tx Scan
+      // Параллельно запускаем проверку Mint Info и последних транзакций
+      const mintPubkey = new PublicKey(candidate.mint);
+      const connection = this.rpcPool.getConnection();
+
+      const [mintInfo, signatures] = await Promise.all([
+        connection.getParsedAccountInfo(mintPubkey),
+        connection.getSignaturesForAddress(mintPubkey, { limit: 15 }), // Только 15 последних
+      ]);
+
+      // 1.1 Проверка Freeze Authority (мгновенный бан)
+      const parsedInfo = mintInfo.value?.data as ParsedAccountData;
+      if (parsedInfo?.parsed?.info?.freezeAuthority) {
+        // Исключение: если freezeAuth это pump.fun программа (маловероятно, но на всякий случай)
+        // Обычно у pump.fun токенов freezeAuth отключен (null)
+        const freezeAuth = parsedInfo.parsed.info.freezeAuthority;
+        // Проверяем, не является ли freeze authority самой программой (хотя обычно она null)
+        if (freezeAuth !== 'TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaUx1eVD' && // Token 2022
+          freezeAuth !== 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') { // Token Program
+          const reason = `Freeze Authority enabled: ${freezeAuth}`;
+          logger.log({
+            timestamp: getCurrentTimestamp(),
+            type: 'filter_failed',
+            token: candidate.mint,
+            filterStage: 'fast_freeze_check',
+            message: `❌ Token rejected: ${reason}`,
+          });
+          return { passed: false, reason, details };
+        }
+      }
+
+      // 1.2 Минимальный скан транзакций (есть ли другие покупатели?)
+      const buyerAddresses = new Set<string>();
+      let hasSellTransactions = false;
+
+      // Батчинг не нужен для 15 транзакций, качаем параллельно
+      const txPromises = signatures.map(async (sigInfo) => {
+        try {
+          return await connection.getTransaction(sigInfo.signature, {
+            commitment: 'confirmed',
+            maxSupportedTransactionVersion: 0,
+          });
+        } catch (e) { return null; }
+      });
+
+      const transactions = await Promise.all(txPromises);
+
+      for (const tx of transactions) {
+        if (!tx) continue;
+        const logs = tx.meta?.logMessages || [];
+
+        // Ищем продажу
+        if (logs.some(l => l.toLowerCase().includes('sell') || (l.toLowerCase().includes('swap') && l.toLowerCase().includes('out')))) {
+          hasSellTransactions = true;
+        }
+
+        // Ищем покупателей
+        const accountKeys = tx.transaction.message.getAccountKeys().staticAccountKeys.map(k => k.toString());
+        accountKeys.forEach(addr => {
+          if (addr && addr !== candidate.mint &&
+            addr !== '11111111111111111111111111111111' && // System Program
+            addr !== 'So11111111111111111111111111111111111111112' && // Wrapped SOL
+            addr !== 'computeBudget111111111111111111111111111111') { // Compute Budget
+            buyerAddresses.add(addr);
+          }
+        });
+      }
+
+      details.uniqueBuyers = buyerAddresses.size;
+      details.hasSells = hasSellTransactions;
+
+      // Очень мягкая проверка Honeypot: хотя бы 2 уникальных участника (кромe бота)
+      if (buyerAddresses.size < 2) {
+        // Warning но пропускаем, если это САМЫЙ первый блок?
+        // Нет, лучше немного подождать. Но для снайпинга 2 уник. адреса (дева + кто-то еще) - это минимум.
+        // Если только дев - риск 100%.
+        const reason = `High Suspicion: Only ${buyerAddresses.size} unique participant(s) in last 15 txs`;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_warning',
+          token: candidate.mint,
+          filterStage: 'fast_honeypot',
+          message: `⚠️ ${reason} (Risk accepted for MANIPULATOR mode)`,
+        });
+        // В режиме MANIPULATOR мы принимаем этот риск (или можно вернуть warn)
+        // Возвращаем true, но с пометкой риска в details? Нет, продолжаем.
+      }
+
+
+      // 2. TOKEN TYPE & DATA (From Bonding Curve Direct)
+      // Получаем данные bonding curve (цена, капа)
+      // Мы можем использовать getTradingVolume, но это долго.
+      // Лучше получить цену и капу от price-fetcher, который уже оптимизирован.
+      const { priceFetcher } = await import('./price-fetcher');
+      // Используем true для skipCache если нужно супер-свежее, но priceFetcher кэширует на 1с, это ок.
+      const currentPrice = await priceFetcher.getPrice(candidate.mint);
+      const marketData = await priceFetcher.getMarketData(candidate.mint);
+      const marketCap = marketData?.marketCap || 0;
+
+      // Оценка ликвидности (Volume) по количеству транзакций в блоке (косвенно)
+      // В fastFilter мы не будем качать весь объем за 5 минут, это долго.
+      // Используем эвристику: 15 последних транзакций за короткое время = активность.
+      const lastTxTime = signatures[0]?.blockTime || 0;
+      const firstTxTime = signatures[signatures.length - 1]?.blockTime || 0;
+      const txDensity = (signatures.length) / Math.max(1, (lastTxTime - firstTxTime)); // Tx per second
+
+      // Эмуляция volumeUsd для совместимости с Tier системой
+      // Если плотность > 0.5 tx/sec (активный токен) -> ставим высокий вирт. объем
+      const estimatedVolumeUsd = txDensity > 0.5 ? 2000 : 500;
+
+      details.volumeUsd = estimatedVolumeUsd;
+      details.marketCap = marketCap;
+
+      // Тип всегда MANIPULATOR в этом режиме (или GEM если explosive)
+      // Но мы вызываем этот метод только для быстрой ветки.
+
+      const tokenType = 'MANIPULATOR';
+
+      // 3. MARKET CAP CHECK
+      if (marketCap < 1500) { // $1500 soft limit для совсем мусора
+        const reason = `Market Cap too low: $${marketCap.toFixed(2)}`;
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'filter_failed',
+          token: candidate.mint,
+          filterStage: 'fast_mcap',
+          message: `❌ Token rejected: ${reason}`,
+        });
+        return { passed: false, reason, details };
+      }
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'filter_passed',
+        token: candidate.mint,
+        filterStage: 'fast_check',
+        message: `✅ FAST Filter PASSED: ${candidate.mint.substring(0, 8)}... | Cap=$${marketCap.toFixed(0)} | Active=${buyerAddresses.size} users | Time=${Date.now() - startTime}ms`,
+      });
+
+      // Формируем Tier Info (Агрессивный)
+      const tierInfo: TierInfo = {
+        tier: 1, // Считаем его топ-тиером для скорости
+        liquidity: estimatedVolumeUsd,
+        holders: buyerAddresses.size,
+        positionSizeMultiplier: 1.0,
+        allowsPartialSells: true,
+        minEffectiveMultiplier: 1.05, // Низкий порог, т.к. вход по импульсу
+      };
+
+      return { passed: true, details, tierInfo, tokenType };
+
+    } catch (error: any) {
+      const reason = `Fast Filter error: ${error?.message}`;
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'error',
+        token: candidate.mint,
+        filterStage: 'fast_error',
+        message: `❌ Error in fast filter: ${reason}`,
+      });
+      return { passed: false, reason, details };
+    }
+  }
+
+  async simplifiedFilter(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any; tierInfo?: TierInfo | null; tokenType?: 'MANIPULATOR' | 'GEM' | 'REGULAR' }> {
+    // ВЫЗОВ FAST FILTER ЕСЛИ ВКЛЮЧЕН РЕЖИМ IMMEDIATE ENTRY
+    if (config.immediateEntry) {
+      return this.fastFilterManipulator(candidate);
+    }
+
+    // ... СТАРАЯ ЛОГИКА ...
+    const details: any = {};
+
     try {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -1232,14 +1422,14 @@ export class TokenFilters {
       const currentPrice = await priceFetcher.getPrice(candidate.mint);
       const marketData = await priceFetcher.getMarketData(candidate.mint);
       const marketCap = marketData?.marketCap || 0;
-      
+
       // Признаки гема: быстрый рост цены, объема, капитализации
       const ageSeconds = (Date.now() - candidate.createdAt) / 1000;
       const priceMultiplier = currentPrice > 0 ? currentPrice / 0.000000028 : 1; // От начальной цены pump.fun
       const isGem = priceMultiplier >= 2.0 && volumeUsd >= 500 && ageSeconds < 300; // Рост 2x+, объем >$500, возраст <5мин
-      
+
       let tokenType: 'MANIPULATOR' | 'GEM' | 'REGULAR' = 'REGULAR';
-      
+
       if (hasConcentratedLiquidity) {
         tokenType = 'MANIPULATOR';
         logger.log({
@@ -1259,7 +1449,7 @@ export class TokenFilters {
       }
 
       details.tokenType = tokenType;
-      
+
       // ⭐ КРИТИЧНО: Проверяем market cap ЗДЕСЬ, до того как токен попадет в очередь
       // Это предотвращает ситуацию, когда токен проходит фильтры, но потом отклоняется в tryOpenPosition
       const marketCapThreshold = tokenType === 'MANIPULATOR' ? 1500 : 2000;
@@ -1276,7 +1466,7 @@ export class TokenFilters {
           details,
         };
       }
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -1286,7 +1476,7 @@ export class TokenFilters {
 
       // 4. Классификация по Tier (для манипуляторов и гемов требования мягче)
       let tierInfo: TierInfo | null = null;
-      
+
       if (tokenType === 'MANIPULATOR') {
         // Для манипуляторов: минимальная ликвидность $500 (ранние точки входа важны)
         if (volumeUsd >= 500) {
@@ -1374,19 +1564,19 @@ export class TokenFilters {
 
     // Симулятор торговли: получаем реальную цену для имитации открытия позиции
     // НЕ делаем реальные транзакции, только получаем данные для симуляции
-    
+
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         // RPC pool управляет rate limiting, задержка не нужна
         if (!isPriority) {
           await sleep(config.rpcRequestDelay);
         }
-        
+
         // Получаем цену напрямую из bonding curve контракта pump.fun
         // НЕ используем Jupiter API - новые токены не индексируются сразу
         const { priceFetcher } = await import('./price-fetcher');
         const price = await priceFetcher.getPrice(mint);
-        
+
         if (price > 0) {
           logger.log({
             timestamp: getCurrentTimestamp(),
@@ -1408,7 +1598,7 @@ export class TokenFilters {
         return fallbackPrice;
       } catch (error: any) {
         lastError = error;
-        
+
         // Если 429 - ждем и повторяем
         if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
           const retryDelay = config.rateLimitRetryDelay * (attempt + 1);
@@ -1445,7 +1635,7 @@ export class TokenFilters {
       token: mint,
       message: `All attempts failed, using fallback price ${fallbackPrice.toFixed(8)} SOL for simulation. Last error: ${lastError?.message || String(lastError)}`,
     });
-    
+
     return fallbackPrice; // Возвращаем минимальную цену вместо 0, чтобы симулятор мог продолжить
   }
 

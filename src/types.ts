@@ -65,7 +65,7 @@ export interface Batch {
 
 export interface TradeLog {
   timestamp: string;
-  type: 'buy' | 'sell' | 'batch_complete' | 'batch_start' | 'error' | 'warning' | 'info' | 'token_received' | 'filter_check' | 'filter_passed' | 'filter_failed' | 'token_added' | 'token_rejected';
+  type: 'buy' | 'sell' | 'batch_complete' | 'batch_start' | 'error' | 'warning' | 'info' | 'token_received' | 'filter_check' | 'filter_passed' | 'filter_failed' | 'token_added' | 'token_rejected' | 'filter_warning' | 'sell_signal';
   batchId?: number;
   token?: string;
   investedSol?: number;
@@ -120,11 +120,15 @@ export interface Config {
   minLiquidityUsd: number; // ⭐ Минимальная базовая ликвидность для входа
   maxSingleHolderPct: number; // ⭐ Максимальный % токенов у одного держателя
   minEntryMultiplier: number; // ⭐ КРИТИЧНО: Минимальный multiplier для входа
+  immediateEntry?: boolean;
   takeProfitMultiplier: number;
   exitTimerSeconds: number;
+  momentumExitSensitivity: number; // ⭐ Чувствительность выхода по импульсу (0.1 - 1.0)
   trailingStopPct: number;
   priorityFee: number;
   signatureFee: number;
+  jitoEnabled: boolean;
+  jitoTipAmount: number;
   slippageMin: number;
   slippageMax: number;
   exitSlippageMin: number; // ⭐ Минимальный slippage при выходе
@@ -150,24 +154,24 @@ export interface Config {
   tradingMode: 'real' | 'paper';
   realTradingEnabled: boolean; // Legacy
   walletMnemonic: string;
-  
+
   // Sell strategy
   sellStrategy: 'single' | 'partial_50_50';
   partialSellDelayMs: number;
-  
+
   // Impact/Slippage model
   paperImpactThresholdSol: number;
   paperImpactPower: number;
   paperImpactBase: number;
   paperImpactK: number;
-  
+
   // Risk-aware sizing
   maxExpectedImpact: number;
   skipIfImpactTooHigh: boolean;
-  
+
   // Write-off threshold
   writeOffThresholdPct: number;
-  
+
   // Network configuration
   testnetMode: boolean;
 }
