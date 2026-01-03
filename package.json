@@ -22,6 +22,8 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@pump-fun/pump-sdk": "^1.24.0",
+    "@solana/web3.js": "^1.98.4",
     "ccxt": "^4.5.29",
     "dotenv": "^16.4.5",
     "ioredis": "^5.4.1",
