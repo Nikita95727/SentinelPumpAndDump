@@ -13,6 +13,7 @@ import { RealTradingAdapter } from './trading/real-trading-adapter';
 import { checkTokenReadiness } from './readiness-checker';
 import { BalanceManager } from './balance-manager';
 import { redisState } from './redis-state';
+import { telegramNotifier } from './telegram-notifier';
 
 // Используем config.maxOpenPositions вместо хардкода
 const MAX_HOLD_TIME = 45_000; // ⭐ 45 секунд (уменьшено с 90 для уменьшения slippage - SLIPPAGE_SOLUTIONS.md)
@@ -1518,6 +1519,25 @@ export class PositionManager {
       token: position.token,
       message: `🔍 [DEBUG] monitorPosition started`,
     });
+
+    // Notify Telegram about new position (Fire-and-forget)
+    // Try to get market cap, if fails use 0
+    priceFetcher.getMarketData(position.token).then(data => {
+      telegramNotifier.notifyTradeOpened(
+        position.token,
+        position.investedSol,
+        data?.marketCap || 0,
+        this.adapter.getMode() === 'paper'
+      ).catch(() => { });
+    }).catch(() => {
+      telegramNotifier.notifyTradeOpened(
+        position.token,
+        position.investedSol,
+        0,
+        this.adapter.getMode() === 'paper'
+      ).catch(() => { });
+    });
+
     let lastPriceCheck = Date.now();
     let loopCount = 0;
 
@@ -2057,6 +2077,17 @@ export class PositionManager {
           reason: 'abandoned_unprofitable_exit',
         });
 
+        // Notify Telegram (Fire-and-forget)
+        telegramNotifier.notifyTradeClosed(
+          position.token,
+          investedSol,
+          -investedSol, // Profit (Loss)
+          -1.0, // -100%
+          0, // Exit MCap unknown/irrelevant
+          'abandoned_unprofitable_exit',
+          this.adapter.getMode() === 'paper'
+        ).catch(() => { });
+
         // ⭐ MANDATORY: Additional detailed logging for abandoned positions (for future analysis)
         console.log(`[ABANDONED POSITION] ${position.token.substring(0, 12)}... | entrySOL: ${investedSol.toFixed(6)}, expectedExitSOL: ${expectedProceedsAfterSlippage.toFixed(6)}, expectedSlippage: ${(estimatedImpact * 100).toFixed(2)}%, estimatedFees: ${allFees.toFixed(6)} SOL, netProfit: ${netProfit.toFixed(6)} SOL, reason: abandoned_unprofitable_exit | investedSol=${investedSol.toFixed(6)} SOL permanently lost`);
 
@@ -2343,10 +2374,36 @@ export class PositionManager {
         proceeds = grossReturn - exitFeeCheck;
       }
 
-      // Ensure proceeds >= 0
       if (proceeds < 0) {
         proceeds = 0;
       }
+
+      // Calculate final profit
+      const profitSol = proceeds - totalPositionCost;
+      const profitPct = totalPositionCost > 0 ? profitSol / totalPositionCost : 0;
+
+      // Notify Telegram (Fire-and-forget)
+      priceFetcher.getMarketData(position.token).then(data => {
+        telegramNotifier.notifyTradeClosed(
+          position.token,
+          positionInvestedAmount,
+          profitSol,
+          profitPct,
+          data?.marketCap || 0,
+          reason,
+          this.adapter.getMode() === 'paper'
+        ).catch(() => { });
+      }).catch(() => {
+        telegramNotifier.notifyTradeClosed(
+          position.token,
+          positionInvestedAmount,
+          profitSol,
+          profitPct,
+          0,
+          reason,
+          this.adapter.getMode() === 'paper'
+        ).catch(() => { });
+      });
 
       // ✅ FIX: Release funds and add back proceeds to deposit
       // Используем reservedAmount для освобождения заблокированных средств

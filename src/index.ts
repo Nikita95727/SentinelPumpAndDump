@@ -12,6 +12,7 @@ import { RealTradingAdapter } from './trading/real-trading-adapter';
 import { GemTracker } from './gem-tracker';
 import { TokenFilters } from './filters';
 import { ConcentratedLiquidityTracker } from './concentrated-liquidity-tracker';
+import { telegramNotifier } from './telegram-notifier';
 
 class PumpFunSniper {
   private scanner: TokenScanner | null = null;
@@ -167,6 +168,40 @@ class PumpFunSniper {
         }
       }, 10_000);
 
+      // Hourly Telegram Report
+      let lastHourlyReportTime = Date.now();
+      let lastHourlyBalance = initialDeposit;
+      let lastHourlyTradesCount = 0;
+
+      setInterval(async () => {
+        if (this.positionManager && !this.isShuttingDown) {
+          const currentBalance = await this.positionManager.getCurrentDeposit();
+          const stats = logger.getDailyStats();
+          const currentTradesCount = stats ? stats.totalTrades : 0;
+          const tradesInHour = currentTradesCount - lastHourlyTradesCount;
+
+          const params = {
+            balance: currentBalance,
+            startBalance: lastHourlyBalance,
+            activePositions: this.positionManager.getStats().activePositions,
+            tradesCount: tradesInHour,
+            isPaper: config.tradingMode === 'paper'
+          };
+
+          await telegramNotifier.notifyHourlyStatus(
+            params.balance,
+            params.startBalance,
+            params.activePositions,
+            params.tradesCount,
+            params.isPaper
+          );
+
+          lastHourlyBalance = currentBalance;
+          lastHourlyTradesCount = currentTradesCount;
+          lastHourlyReportTime = Date.now();
+        }
+      }, 3600_000); // 1 hour
+
       console.log('✅ Pump.fun Sniper Bot is running...');
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -310,6 +345,15 @@ class PumpFunSniper {
           this.positionManager.setPendingTierInfo(candidate.mint, filterResult.tierInfo);
         }
         await this.positionManager.tryOpenPosition(candidate);
+
+        // Notify Telegram about candidate or potential gem
+        // Only notify if we haven't already notified (TODO: maybe add tracking, but scanner is fast)
+        // Using fire-and-forget
+        telegramNotifier.notifyTokenDetected(
+          candidate.mint,
+          tokenType as 'GEM' | 'MANIPULATOR' | 'CANDIDATE',
+          filterResult.details?.volumeUsd
+        ).catch(() => { });
       }
     } catch (error) {
       console.error(`[${new Date().toLocaleTimeString()}] ERROR | Error handling new token ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`);

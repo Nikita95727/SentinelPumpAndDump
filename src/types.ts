@@ -178,6 +178,10 @@ export interface Config {
   hardStopLossPct: number;
   momentumExitSensitivity: number;
 
+  // Notifications
+  telegramBotToken?: string;
+  telegramChatId?: string;
+
   // Network configuration
   testnetMode: boolean;
 }

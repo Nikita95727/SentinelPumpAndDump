@@ -146,6 +146,10 @@ export const config: Config = {
   hardStopLossPct: parseFloat(process.env.HARD_STOP_LOSS_PCT || '10'),
   momentumExitSensitivity: parseInt(process.env.MOMENTUM_EXIT_SENSITIVITY || '1', 10), // ⭐ EXPERT REC: 1 drop = exit (High Sensitivity)
 
+  // Notifications
+  telegramBotToken: process.env.TELEGRAM_BOT_ID || '', // Note: User said ID but format implies Token (ID:Token)
+  telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
+
   // Network configuration
   testnetMode: isTestnetMode(),
 };
