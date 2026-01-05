@@ -100,12 +100,11 @@ export const config: Config = {
   exitSlippageMin: 0.20,
   exitSlippageMax: 0.35,
 
-  // ... (rate limits)
-
-  rpcRequestDelay: parseInt(process.env.RPC_REQUEST_DELAY || '250', 10),
-  filterCheckDelay: parseInt(process.env.FILTER_CHECK_DELAY || '200', 10),
-  rateLimitRetryDelay: parseInt(process.env.RATE_LIMIT_RETRY_DELAY || '2000', 10),
-  notificationProcessDelay: parseInt(process.env.NOTIFICATION_PROCESS_DELAY || '500', 10),
+  // ~0.5 req/sec для публичного RPC (SAFETY MODE)
+  rpcRequestDelay: parseInt(process.env.RPC_REQUEST_DELAY || '2000', 10), // Increased to 2000ms for public RPC stability
+  filterCheckDelay: parseInt(process.env.FILTER_CHECK_DELAY || '500', 10), // Increased to 500ms
+  rateLimitRetryDelay: parseInt(process.env.RATE_LIMIT_RETRY_DELAY || '5000', 10), // Increased to 5000ms
+  notificationProcessDelay: parseInt(process.env.NOTIFICATION_PROCESS_DELAY || '500', 10), // Increased to 500ms
 
   primaryRpcWsUrl: networkConfig.wsUrl,
   primaryRpcHttpUrl: networkConfig.httpUrl,
