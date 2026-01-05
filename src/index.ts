@@ -211,6 +211,14 @@ class PumpFunSniper {
 
       // Обработка сигналов для graceful shutdown
       this.setupGracefulShutdown();
+
+      // Notify Telegram about bot start
+      await telegramNotifier.notifyBotStarted(
+        this.positionManager.getStats().activePositions > 0 ? await this.positionManager.getCurrentDeposit() : initialDeposit,
+        config.tradingMode,
+        config
+      );
+
     } catch (error) {
       console.error('❌ Failed to start sniper:', error);
       logger.log({

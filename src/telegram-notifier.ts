@@ -169,6 +169,24 @@ Trades (1h): <b>${tradesCount}</b>
 `;
         await this.sendMessage(msg);
     }
+    /**
+     * 5. Уведомление о запуске бота
+     */
+    async notifyBotStarted(balance: number, mode: 'real' | 'paper', initialConfig: any): Promise<void> {
+        const modeStr = mode === 'real' ? '🔴 REAL TRADING' : '📄 PAPER TRADING';
+        const msg = `
+<b>🤖 Bot Started</b>
+
+Mode: <b>${modeStr}</b>
+Initial Balance: <b>${balance.toFixed(4)} SOL</b>
+Network: <b>Mainnet</b>
+Positions Limit: <b>${initialConfig.maxOpenPositions}</b>
+Trailing Stop: <b>${initialConfig.trailingStopPct}%</b>
+
+<i>Bot is now monitoring new tokens...</i>
+`;
+        await this.sendMessage(msg);
+    }
 }
 
 export const telegramNotifier = new TelegramNotifier();
