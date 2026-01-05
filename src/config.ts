@@ -85,28 +85,28 @@ export const config: Config = {
   // ✅ ЕДИНАЯ ОЧЕРЕДЬ: Все токены обрабатываются через одну очередь
   // Фильтрация и readiness check определяют момент входа
   minPurchases: 5,
-  minMarketCap: 1500, // ⭐ Минимальная капитализация $1500
+  minMarketCap: 5000, // ⭐ EXPERT REC: Raised to $5000 to filter rugs
   minVolumeUsd: 2000,
-  minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '5000'), // ⭐ Минимальная базовая ликвидность для входа (увеличено до $5000 для снижения slippage)
-  maxSingleHolderPct: parseFloat(process.env.MAX_SINGLE_HOLDER_PCT || '50'), // ⭐ Максимальный % токенов у одного держателя (защита от надутой ликвидности)
-  minEntryMultiplier: parseFloat(process.env.MIN_ENTRY_MULTIPLIER || '1.12'), // ⭐ КРИТИЧНО: Минимальный multiplier для входа (гарантирует прибыль даже с slippage 35%)
-  takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '1.35'), // Цель 1.35x, но выход по импульсу
-  exitTimerSeconds: 45, // ⭐ Уменьшено с 90 до 45 секунд для уменьшения slippage (SLIPPAGE_SOLUTIONS.md)
+  minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '5000'),
+  maxSingleHolderPct: parseFloat(process.env.MAX_SINGLE_HOLDER_PCT || '50'),
+  minEntryMultiplier: parseFloat(process.env.MIN_ENTRY_MULTIPLIER || '1.02'), // ⭐ EXPERT REC: Lowered to 1.02x to enter earlier (avoid buying tops)
+  takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '1.35'),
+  exitTimerSeconds: 45,
   trailingStopPct: 25,
   priorityFee: 0.001,
   signatureFee: 0.000005,
   slippageMin: 0.01,
   slippageMax: 0.03,
-  exitSlippageMin: 0.20, // ⭐ Минимальный slippage при выходе (20% для токенов с хорошей ликвидностью)
-  exitSlippageMax: 0.35, // ⭐ Максимальный slippage при выходе (35% для токенов с низкой ликвидностью)
-  // Rate limiting: RPC provider limits vary
-  // Увеличенные задержки для стабильной работы в пределах лимитов
-  // ~3-5 req/sec для безопасной работы с запасом
-  rpcRequestDelay: parseInt(process.env.RPC_REQUEST_DELAY || '250', 10), // ms между RPC запросами (было 80)
-  filterCheckDelay: parseInt(process.env.FILTER_CHECK_DELAY || '200', 10), // ms между проверками фильтров (было 100)
-  rateLimitRetryDelay: parseInt(process.env.RATE_LIMIT_RETRY_DELAY || '2000', 10), // ms при 429 ошибке (было 1000)
-  notificationProcessDelay: parseInt(process.env.NOTIFICATION_PROCESS_DELAY || '500', 10), // ms между обработкой уведомлений
-  // Используем конфигурацию из текущего режима (testnet/mainnet)
+  exitSlippageMin: 0.20,
+  exitSlippageMax: 0.35,
+
+  // ... (rate limits)
+
+  rpcRequestDelay: parseInt(process.env.RPC_REQUEST_DELAY || '250', 10),
+  filterCheckDelay: parseInt(process.env.FILTER_CHECK_DELAY || '200', 10),
+  rateLimitRetryDelay: parseInt(process.env.RATE_LIMIT_RETRY_DELAY || '2000', 10),
+  notificationProcessDelay: parseInt(process.env.NOTIFICATION_PROCESS_DELAY || '500', 10),
+
   primaryRpcWsUrl: networkConfig.wsUrl,
   primaryRpcHttpUrl: networkConfig.httpUrl,
   pumpPortalWsUrl: process.env.PUMP_PORTAL_WS_URL || 'wss://pumpportal.fun/api/data',
@@ -114,42 +114,38 @@ export const config: Config = {
   redisPort: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT, 10) : undefined,
   redisPassword: process.env.REDIS_PASSWORD || undefined,
   logDir: process.env.LOG_DIR || './logs',
-  // Safety mechanisms
-  maxSolPerTrade: parseFloat(process.env.MAX_SOL_PER_TRADE || '0.05'), // Hard cap per trade (stealth) - безопасный размер, не влияет на цену
-  maxTradingBalance: parseFloat(process.env.MAX_TRADING_BALANCE || '0.3'), // Максимальный торговый баланс (излишек выводится)
-  minPositionSize: parseFloat(process.env.MIN_POSITION_SIZE || '0.004'), // Минимальный размер позиции: 0.004 SOL
-  maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.004'), // Максимальный размер позиции: 0.004 SOL (равен минимальному)
-  personalWalletAddress: process.env.PERSONAL_WALLET_ADDRESS || '', // Адрес личного кошелька для вывода излишка
-  maxReservePercent: parseFloat(process.env.MAX_RESERVE_PERCENT || '1.0'), // Max % of reserves per trade (if data available)
-  // Trading mode configuration
-  tradingMode: (process.env.TRADING_MODE || 'paper') as 'real' | 'paper', // По умолчанию paper mode
-  realTradingEnabled: process.env.REAL_TRADING_ENABLED === 'true', // Legacy, для обратной совместимости (не используется в логике)
-  walletMnemonic: process.env.WALLET_MNEMONIC || '', // Seed-фраза для кошелька (опционально, для реальной торговли)
+
+  maxSolPerTrade: parseFloat(process.env.MAX_SOL_PER_TRADE || '0.05'),
+  maxTradingBalance: parseFloat(process.env.MAX_TRADING_BALANCE || '0.3'),
+  minPositionSize: parseFloat(process.env.MIN_POSITION_SIZE || '0.004'),
+  maxPositionSize: parseFloat(process.env.MAX_POSITION_SIZE || '0.004'),
+  personalWalletAddress: process.env.PERSONAL_WALLET_ADDRESS || '',
+  maxReservePercent: parseFloat(process.env.MAX_RESERVE_PERCENT || '1.0'),
+
+  tradingMode: (process.env.TRADING_MODE || 'paper') as 'real' | 'paper',
+  realTradingEnabled: process.env.REAL_TRADING_ENABLED === 'true',
+  walletMnemonic: process.env.WALLET_MNEMONIC || '',
   jitoEnabled: process.env.JITO_ENABLED === 'true',
   jitoTipAmount: parseFloat(process.env.JITO_TIP_AMOUNT || '0.001'),
   secondaryRpcUrls: process.env.SECONDARY_RPC_URLS ? process.env.SECONDARY_RPC_URLS.split(',') : [],
 
-  // Sell strategy
   sellStrategy: (process.env.SELL_STRATEGY || 'single') as 'single' | 'partial_50_50',
   partialSellDelayMs: parseInt(process.env.PARTIAL_SELL_DELAY_MS || '15000', 10),
 
-  // Impact/Slippage model (для paper и оценки в real)
   paperImpactThresholdSol: parseFloat(process.env.PAPER_IMPACT_THRESHOLD_SOL || '0.0037'),
   paperImpactPower: parseFloat(process.env.PAPER_IMPACT_POWER || '2.2'),
   paperImpactBase: parseFloat(process.env.PAPER_IMPACT_BASE || '0.05'),
   paperImpactK: parseFloat(process.env.PAPER_IMPACT_K || '0.30'),
 
-  // Risk-aware sizing
-  maxExpectedImpact: parseFloat(process.env.MAX_EXPECTED_IMPACT || '0.25'), // Максимальный допустимый impact (25%)
+  maxExpectedImpact: parseFloat(process.env.MAX_EXPECTED_IMPACT || '0.25'),
   skipIfImpactTooHigh: process.env.SKIP_IF_IMPACT_TOO_HIGH === 'true',
 
-  // Write-off threshold
-  writeOffThresholdPct: parseFloat(process.env.WRITE_OFF_THRESHOLD_PCT || '0.3'), // Если ожидаемые proceeds < 30% от invested, write-off
+  writeOffThresholdPct: parseFloat(process.env.WRITE_OFF_THRESHOLD_PCT || '0.3'),
 
   // Panic Sell & Momentum
-  panicSellJitoTip: parseFloat(process.env.PANIC_SELL_JITO_TIP || '0.005'), // 5x higher than normal for speed
-  hardStopLossPct: parseFloat(process.env.HARD_STOP_LOSS_PCT || '10'), // 10% hard stop
-  momentumExitSensitivity: parseInt(process.env.MOMENTUM_EXIT_SENSITIVITY || '2', 10), // Consecutive drops to trigger exit
+  panicSellJitoTip: parseFloat(process.env.PANIC_SELL_JITO_TIP || '0.005'), // High base, but will be dynamically capped
+  hardStopLossPct: parseFloat(process.env.HARD_STOP_LOSS_PCT || '10'),
+  momentumExitSensitivity: parseInt(process.env.MOMENTUM_EXIT_SENSITIVITY || '1', 10), // ⭐ EXPERT REC: 1 drop = exit (High Sensitivity)
 
   // Network configuration
   testnetMode: isTestnetMode(),
