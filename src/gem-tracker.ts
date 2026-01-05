@@ -14,6 +14,7 @@ import { getCurrentTimestamp, sleep } from './utils';
 import { priceFetcher } from './price-fetcher';
 import { TokenFilters } from './filters';
 import { Connection } from '@solana/web3.js';
+import { config } from './config';
 
 interface GemObservation {
   mint: string;
@@ -22,23 +23,23 @@ interface GemObservation {
   initialVolume: number; // Начальный объем (USD)
   initialHolders: number; // Начальное количество держателей
   initialMarketCap: number; // Начальная капитализация (USD)
-  
+
   // Текущие значения
   currentPrice: number;
   currentVolume: number;
   currentHolders: number;
   currentMarketCap: number;
-  
+
   // История цен для расчета импульса
   priceHistory: Array<{ price: number; timestamp: number }>;
-  
+
   // Индикаторы
   priceMomentum: number; // Скорость роста цены (x/сек)
   volumeGrowth: number; // Рост объема (%)
   holderGrowth: number; // Рост держателей (%)
   marketCapGrowth: number; // Рост капитализации (%)
   gemScore: number; // Комбинированный индикатор самородка (0-1)
-  
+
   // Статус
   isGem: boolean; // Является ли самородком
   entryTriggered: boolean; // Был ли триггер входа
@@ -52,13 +53,13 @@ export class GemTracker {
   private readonly MIN_GEM_SCORE = 0.5; // Минимальный gem score для входа
   private readonly MIN_PRICE_MOMENTUM = 0.05; // Минимальная скорость роста (x/сек)
   private readonly MIN_VOLUME_GROWTH = 0.5; // Минимальный рост объема (50%)
-  private readonly MIN_ENTRY_MULTIPLIER = 2.0; // Минимальный multiplier для входа
+  // private readonly MIN_ENTRY_MULTIPLIER = 2.0; // REMOVED: Use config.minEntryMultiplier
   private onGemDetectedCallback: ((candidate: TokenCandidate, observation: GemObservation) => void) | null = null;
 
   constructor(
     private connection: Connection,
     private filters: TokenFilters
-  ) {}
+  ) { }
 
   /**
    * Устанавливает callback для уведомления о найденных самородках
@@ -252,7 +253,7 @@ export class GemTracker {
       const recentPrices = observation.priceHistory.slice(-3); // Последние 3 цены
       const priceChange = recentPrices[recentPrices.length - 1].price - recentPrices[0].price;
       const timeChange = (recentPrices[recentPrices.length - 1].timestamp - recentPrices[0].timestamp) / 1000; // секунды
-      
+
       if (timeChange > 0) {
         const currentMultiplier = observation.currentPrice / observation.initialPrice;
         observation.priceMomentum = (currentMultiplier - 1) / timeElapsed; // x/сек
@@ -302,8 +303,8 @@ export class GemTracker {
     const currentMultiplier = observation.currentPrice / observation.initialPrice;
 
     // Критерии самородка:
-    // 1. Multiplier ≥ 2.0x (токен уже показал рост)
-    if (currentMultiplier < this.MIN_ENTRY_MULTIPLIER) {
+    // 1. Multiplier ≥ config.minEntryMultiplier (токен уже показал рост)
+    if (currentMultiplier < config.minEntryMultiplier) {
       return false;
     }
 
@@ -346,11 +347,11 @@ export class GemTracker {
       const connection = this.filters['connection'] || this.connection;
       const { PublicKey } = await import('@solana/web3.js');
       const mintPubkey = new PublicKey(mint);
-      
+
       const signatures = await connection.getSignaturesForAddress(mintPubkey, {
         limit: 30,
       });
-      
+
       // Для упрощения считаем количество уникальных подписей как индикатор активности
       // В реальности нужно анализировать транзакции, но это медленно
       // Используем количество транзакций как приблизительный индикатор

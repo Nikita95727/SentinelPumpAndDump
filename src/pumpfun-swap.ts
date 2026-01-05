@@ -491,13 +491,14 @@ export class PumpFunSwap {
   async sell(
     wallet: Keypair,
     tokenMint: string,
-    amountTokens: number
+    amountTokens: number,
+    options?: { jitoTip?: number }
   ): Promise<{ success: boolean; signature?: string; error?: string; solReceived?: number }> {
     const MAX_RETRIES = 2;
     const RETRY_DELAY_MS = 200;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      const result = await this.executeSell(wallet, tokenMint, amountTokens, attempt);
+      const result = await this.executeSell(wallet, tokenMint, amountTokens, attempt, options);
 
       if (result.success) {
         return result;
@@ -555,7 +556,8 @@ export class PumpFunSwap {
     wallet: Keypair,
     tokenMint: string,
     amountTokens: number,
-    attempt: number
+    attempt: number,
+    options?: { jitoTip?: number }
   ): Promise<{ success: boolean; signature?: string; error?: string; solReceived?: number }> {
     const sellStartTime = Date.now();
 
@@ -706,9 +708,12 @@ export class PumpFunSwap {
           ];
 
           // Добавляем Tip Instruction для Jito
-          const tipLamports = Math.floor(config.jitoTipAmount * 1_000_000_000);
+          const tipAmount = options?.jitoTip || config.jitoTipAmount;
+          const tipLamports = Math.floor(tipAmount * 1_000_000_000);
           const tipInstruction = jitoService.createTipInstruction(wallet.publicKey, tipLamports);
           allInstructions.push(tipInstruction);
+
+          // Создаем VersionedTransaction
 
           // Создаем VersionedTransaction
           const messageV0 = new TransactionMessage({
@@ -722,7 +727,8 @@ export class PumpFunSwap {
 
           // Сериализуем и отправляем в Jito
           const serialized = Buffer.from(versionedTx.serialize()).toString('base64');
-          logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Sending Jito Bundle for SELL (Tip: ${config.jitoTipAmount} SOL)...` });
+          logger.log({ timestamp: getCurrentTimestamp(), type: 'info', token: tokenMint, message: `🌩️ Sending Jito Bundle for SELL (Tip: ${options?.jitoTip || config.jitoTipAmount} SOL)...` });
+
 
           const bundleId = await jitoService.sendBundle([serialized]);
 

@@ -116,6 +116,7 @@ export interface Config {
   minDelaySeconds: number;
   maxDelaySeconds: number;
   minPurchases: number;
+  minMarketCap: number;
   minVolumeUsd: number;
   minLiquidityUsd: number; // ⭐ Минимальная базовая ликвидность для входа
   maxSingleHolderPct: number; // ⭐ Максимальный % токенов у одного держателя
@@ -133,8 +134,9 @@ export interface Config {
   filterCheckDelay: number;
   rateLimitRetryDelay: number;
   notificationProcessDelay: number;
-  heliusWsUrl: string;
-  heliusHttpUrl: string;
+  primaryRpcWsUrl: string;
+  primaryRpcHttpUrl: string;
+  pumpPortalWsUrl: string;
   redisHost?: string;
   redisPort?: number;
   redisPassword?: string;
@@ -148,7 +150,6 @@ export interface Config {
   maxReservePercent: number;
   jitoEnabled: boolean;
   jitoTipAmount: number;
-  primaryRpcHttpUrl: string;
   secondaryRpcUrls: string[];
   // Trading mode configuration
   tradingMode: 'real' | 'paper';
@@ -171,6 +172,11 @@ export interface Config {
 
   // Write-off threshold
   writeOffThresholdPct: number;
+
+  // Panic Sell & Momentum
+  panicSellJitoTip: number;
+  hardStopLossPct: number;
+  momentumExitSensitivity: number;
 
   // Network configuration
   testnetMode: boolean;

@@ -23,7 +23,7 @@ export interface ITradingAdapter {
   /**
    * Выполняет продажу токена
    */
-  executeSell(tokenMint: string, amountTokens: number): Promise<TradeResult>;
+  executeSell(tokenMint: string, amountTokens: number, options?: { jitoTip?: number }): Promise<TradeResult>;
 
   /**
    * Получает режим работы адаптера

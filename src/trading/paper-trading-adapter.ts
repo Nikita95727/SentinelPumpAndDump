@@ -59,10 +59,10 @@ export class PaperTradingAdapter implements ITradingAdapter {
 
       // Рассчитываем ожидаемый impact
       const estimatedImpact = this.estimateImpact(amountSol);
-      
+
       // Рассчитываем execution price (с учетом impact)
       const executionPrice = calculateExecutionPrice(markPrice, estimatedImpact, true);
-      
+
       // Рассчитываем количество токенов (с учетом fees и impact)
       const tokensReceived = calculateTokensReceived(amountSol, markPrice, estimatedImpact, this.entryFees);
 
@@ -116,7 +116,7 @@ export class PaperTradingAdapter implements ITradingAdapter {
    * Симулирует продажу токена
    * Поддерживает partial sells если включено в конфиге
    */
-  async executeSell(mint: string, amountTokens: number): Promise<TradeResult> {
+  async executeSell(mint: string, amountTokens: number, options?: { jitoTip?: number }): Promise<TradeResult> {
     const startTime = Date.now();
 
     try {
@@ -144,10 +144,10 @@ export class PaperTradingAdapter implements ITradingAdapter {
       // Impact зависит от размера продажи в SOL эквиваленте
       const sellSizeSol = tokensToSell * markPrice;
       const estimatedImpact = this.estimateImpact(sellSizeSol);
-      
+
       // Рассчитываем execution price (с учетом impact)
       const executionPrice = calculateExecutionPrice(markPrice, estimatedImpact, false);
-      
+
       // Рассчитываем SOL полученный (с учетом fees и impact)
       const solReceived = calculateSolReceived(tokensToSell, markPrice, estimatedImpact, this.exitFees);
 

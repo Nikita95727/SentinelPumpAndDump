@@ -18,8 +18,8 @@ const PUMP_FUN_TESTNET_CONFIG = {
  */
 const PUMP_FUN_MAINNET_CONFIG = {
   programId: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-  wsUrl: process.env.HELIUS_WS_URL || '',
-  httpUrl: process.env.HELIUS_HTTP_URL || process.env.HELIUS_WS_URL?.replace('wss://', 'https://').replace('ws://', 'http://') || '',
+  wsUrl: process.env.PRIMARY_RPC_WS_URL || '',
+  httpUrl: process.env.PRIMARY_RPC_HTTP_URL || process.env.PRIMARY_RPC_WS_URL?.replace('wss://', 'https://').replace('ws://', 'http://') || '',
 };
 
 /**
@@ -65,7 +65,7 @@ const getNetworkConfig = () => {
 
   // Проверяем mainnet конфигурацию
   if (!PUMP_FUN_MAINNET_CONFIG.wsUrl) {
-    throw new Error('HELIUS_WS_URL is required in .env file for mainnet mode');
+    throw new Error('PRIMARY_RPC_WS_URL is required in .env file for mainnet mode');
   }
 
   return PUMP_FUN_MAINNET_CONFIG;
@@ -85,11 +85,12 @@ export const config: Config = {
   // ✅ ЕДИНАЯ ОЧЕРЕДЬ: Все токены обрабатываются через одну очередь
   // Фильтрация и readiness check определяют момент входа
   minPurchases: 5,
+  minMarketCap: 1500, // ⭐ Минимальная капитализация $1500
   minVolumeUsd: 2000,
   minLiquidityUsd: parseFloat(process.env.MIN_LIQUIDITY_USD || '5000'), // ⭐ Минимальная базовая ликвидность для входа (увеличено до $5000 для снижения slippage)
   maxSingleHolderPct: parseFloat(process.env.MAX_SINGLE_HOLDER_PCT || '50'), // ⭐ Максимальный % токенов у одного держателя (защита от надутой ликвидности)
-  minEntryMultiplier: parseFloat(process.env.MIN_ENTRY_MULTIPLIER || '2.5'), // ⭐ КРИТИЧНО: Минимальный multiplier для входа (гарантирует прибыль даже с slippage 35%)
-  takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '2.0'), // Снижено до 2.0x для безубыточности с учетом комиссий
+  minEntryMultiplier: parseFloat(process.env.MIN_ENTRY_MULTIPLIER || '1.12'), // ⭐ КРИТИЧНО: Минимальный multiplier для входа (гарантирует прибыль даже с slippage 35%)
+  takeProfitMultiplier: parseFloat(process.env.TAKE_PROFIT_MULTIPLIER || '1.35'), // Цель 1.35x, но выход по импульсу
   exitTimerSeconds: 45, // ⭐ Уменьшено с 90 до 45 секунд для уменьшения slippage (SLIPPAGE_SOLUTIONS.md)
   trailingStopPct: 25,
   priorityFee: 0.001,
@@ -98,7 +99,7 @@ export const config: Config = {
   slippageMax: 0.03,
   exitSlippageMin: 0.20, // ⭐ Минимальный slippage при выходе (20% для токенов с хорошей ликвидностью)
   exitSlippageMax: 0.35, // ⭐ Максимальный slippage при выходе (35% для токенов с низкой ликвидностью)
-  // Rate limiting: Helius free tier ~100-200 req/sec
+  // Rate limiting: RPC provider limits vary
   // Увеличенные задержки для стабильной работы в пределах лимитов
   // ~3-5 req/sec для безопасной работы с запасом
   rpcRequestDelay: parseInt(process.env.RPC_REQUEST_DELAY || '250', 10), // ms между RPC запросами (было 80)
@@ -106,8 +107,9 @@ export const config: Config = {
   rateLimitRetryDelay: parseInt(process.env.RATE_LIMIT_RETRY_DELAY || '2000', 10), // ms при 429 ошибке (было 1000)
   notificationProcessDelay: parseInt(process.env.NOTIFICATION_PROCESS_DELAY || '500', 10), // ms между обработкой уведомлений
   // Используем конфигурацию из текущего режима (testnet/mainnet)
-  heliusWsUrl: networkConfig.wsUrl,
-  heliusHttpUrl: networkConfig.httpUrl,
+  primaryRpcWsUrl: networkConfig.wsUrl,
+  primaryRpcHttpUrl: networkConfig.httpUrl,
+  pumpPortalWsUrl: process.env.PUMP_PORTAL_WS_URL || 'wss://pumpportal.fun/api/data',
   redisHost: process.env.REDIS_HOST,
   redisPort: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT, 10) : undefined,
   redisPassword: process.env.REDIS_PASSWORD || undefined,
@@ -125,7 +127,6 @@ export const config: Config = {
   walletMnemonic: process.env.WALLET_MNEMONIC || '', // Seed-фраза для кошелька (опционально, для реальной торговли)
   jitoEnabled: process.env.JITO_ENABLED === 'true',
   jitoTipAmount: parseFloat(process.env.JITO_TIP_AMOUNT || '0.001'),
-  primaryRpcHttpUrl: process.env.PRIMARY_RPC_HTTP_URL || '',
   secondaryRpcUrls: process.env.SECONDARY_RPC_URLS ? process.env.SECONDARY_RPC_URLS.split(',') : [],
 
   // Sell strategy
@@ -145,6 +146,11 @@ export const config: Config = {
   // Write-off threshold
   writeOffThresholdPct: parseFloat(process.env.WRITE_OFF_THRESHOLD_PCT || '0.3'), // Если ожидаемые proceeds < 30% от invested, write-off
 
+  // Panic Sell & Momentum
+  panicSellJitoTip: parseFloat(process.env.PANIC_SELL_JITO_TIP || '0.005'), // 5x higher than normal for speed
+  hardStopLossPct: parseFloat(process.env.HARD_STOP_LOSS_PCT || '10'), // 10% hard stop
+  momentumExitSensitivity: parseInt(process.env.MOMENTUM_EXIT_SENSITIVITY || '2', 10), // Consecutive drops to trigger exit
+
   // Network configuration
   testnetMode: isTestnetMode(),
 };
@@ -162,8 +168,8 @@ export const getNetworkInfo = () => {
   return {
     mode: useTestnet ? 'testnet' : 'mainnet',
     programId: PUMP_FUN_PROGRAM_ID,
-    wsUrl: config.heliusWsUrl,
-    httpUrl: config.heliusHttpUrl,
+    wsUrl: config.primaryRpcWsUrl,
+    httpUrl: config.primaryRpcHttpUrl,
   };
 };
 

@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection } from '@solana/web3.js';
 import { config, PUMP_FUN_PROGRAM_ID } from './config';
 import { TokenCandidate } from './types';
 import { logger } from './logger';
@@ -7,29 +7,37 @@ import { getCurrentTimestamp } from './utils';
 import { getRpcPool } from './rpc-pool';
 import { earlyActivityTracker } from './early-activity-tracker';
 
+/**
+ * TokenScanner — сканер новых токенов через PumpPortal WebSocket API
+ * 
+ * Подключается к wss://pumpportal.fun/api/data для получения:
+ * - Событий создания новых токенов (txType: "create")
+ * - Событий покупок/продаж на бондинг-кривой (txType: "buy"/"sell")
+ * 
+ * Это нативное решение для Pump.fun, не требующее Helius или других RPC провайдеров
+ * для обнаружения токенов.
+ */
 export class TokenScanner {
   private ws: WebSocket | null = null;
   private connection: Connection;
   private rpcPool = getRpcPool();
-  private subscriptionId: number | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
-  private reconnectDelay = 5000;
+  private maxReconnectAttempts = 20;
+  private baseReconnectDelay = 2000; // Минимальная задержка 2 сек
+  private maxReconnectDelay = 60000; // Максимальная задержка 60 сек
   private isShuttingDown = false;
   private onNewTokenCallback: (candidate: TokenCandidate) => void;
-  private tokenQueue: TokenCandidate[] = []; // Единая очередь токенов
+  private tokenQueue: TokenCandidate[] = [];
   private isProcessingQueue = false;
-  private processingTokens = new Set<string>(); // Токены, которые уже обрабатываются
-  // Deduplication для getTransaction calls
-  private processedSignatures = new Map<string, number>(); // signature -> timestamp
-  private processedMints = new Map<string, number>(); // mint -> timestamp
-  private readonly DEDUP_TTL_MS = 24 * 60 * 60 * 1000; // ⭐ 24 часа TTL (было 60 секунд) - предотвращает повторную покупку старых токенов
-  private readonly QUEUE_CLEANUP_INTERVAL_MS = 60_000; // Очистка очереди каждую минуту
-  private readonly MAX_QUEUE_AGE_MS = 5 * 60 * 1000; // Максимальный возраст токена в очереди: 5 минут
+  private processingTokens = new Set<string>();
+  private processedMints = new Map<string, number>();
+  private readonly DEDUP_TTL_MS = 24 * 60 * 60 * 1000; // 24 часа TTL
+  private readonly QUEUE_CLEANUP_INTERVAL_MS = 60_000;
+  private readonly MAX_QUEUE_AGE_MS = 5 * 60 * 1000;
 
   constructor(onNewToken: (candidate: TokenCandidate) => void) {
     this.onNewTokenCallback = onNewToken;
-    this.connection = new Connection(config.heliusHttpUrl, {
+    this.connection = new Connection(config.primaryRpcHttpUrl, {
       commitment: 'confirmed',
     });
   }
@@ -43,36 +51,21 @@ export class TokenScanner {
 
   /**
    * Жесткий сброс очереди при перезапуске
-   * Очищает все структуры данных в памяти для предотвращения дубликатов
-   * ⭐ КРИТИЧНО: Вызывается ПЕРЕД каждым запуском для полной очистки состояния
    */
   private resetQueue(): void {
     const queueSize = this.tokenQueue.length;
     const processingSize = this.processingTokens.size;
     const processedMintsSize = this.processedMints.size;
-    const processedSignaturesSize = this.processedSignatures.size;
 
-    // Останавливаем обработку очереди
     this.isProcessingQueue = false;
-
-    // Очищаем очередь токенов
     this.tokenQueue = [];
-
-    // Очищаем Set обрабатываемых токенов
     this.processingTokens.clear();
-
-    // ⭐ КРИТИЧНО: Очищаем Map обработанных токенов (дедупликация)
-    // Это предотвращает повторную обработку токенов между запусками
     this.processedMints.clear();
-
-    // ⭐ КРИТИЧНО: Очищаем Map обработанных сигнатур (дедупликация)
-    // Это предотвращает повторную обработку транзакций между запусками
-    this.processedSignatures.clear();
 
     logger.log({
       timestamp: getCurrentTimestamp(),
       type: 'info',
-      message: `🔄 Queue HARD RESET: cleared ${queueSize} queued tokens, ${processingSize} processing tokens, ${processedMintsSize} processed mints, ${processedSignaturesSize} processed signatures. All deduplication caches cleared.`,
+      message: `🔄 Queue HARD RESET: cleared ${queueSize} queued tokens, ${processingSize} processing tokens, ${processedMintsSize} processed mints. All deduplication caches cleared.`,
     });
   }
 
@@ -83,28 +76,22 @@ export class TokenScanner {
       message: 'Token scanner starting...',
     });
 
-    // ⭐ ЖЕСТКИЙ СБРОС ОЧЕРЕДИ ПРИ ПЕРЕЗАПУСКЕ
     this.resetQueue();
-
     await this.connect();
-    // Запускаем обработку единой очереди
     this.processTokenQueue();
-    // Запускаем периодическую очистку очереди от старых токенов
     this.startQueueCleanup();
   }
 
   /**
    * Периодическая очистка очереди от старых токенов
-   * Предотвращает засорение очереди токенами, которые висят там слишком долго
    */
   private startQueueCleanup(): void {
     setInterval(() => {
       if (this.isShuttingDown) return;
-      
+
       const now = Date.now();
       const initialLength = this.tokenQueue.length;
-      
-      // Удаляем токены старше MAX_QUEUE_AGE_MS
+
       this.tokenQueue = this.tokenQueue.filter(candidate => {
         const age = now - candidate.createdAt;
         if (age > this.MAX_QUEUE_AGE_MS) {
@@ -114,11 +101,11 @@ export class TokenScanner {
             token: candidate.mint,
             message: `Removing stale token from queue: ${candidate.mint.substring(0, 8)}... (age: ${(age / 1000).toFixed(1)}s)`,
           });
-          return false; // Удаляем токен
+          return false;
         }
-        return true; // Оставляем токен
+        return true;
       });
-      
+
       const removed = initialLength - this.tokenQueue.length;
       if (removed > 0) {
         logger.log({
@@ -130,33 +117,30 @@ export class TokenScanner {
     }, this.QUEUE_CLEANUP_INTERVAL_MS);
   }
 
+  /**
+   * Подключение к PumpPortal WebSocket
+   */
   private async connect(): Promise<void> {
     if (this.isShuttingDown) return;
 
     try {
-      let wsUrl = config.heliusWsUrl;
-      if (!wsUrl.startsWith('wss://') && !wsUrl.startsWith('ws://')) {
-        wsUrl = wsUrl.replace('https://', 'wss://').replace('http://', 'ws://');
-      }
-      if (wsUrl.startsWith('https://')) {
-        wsUrl = wsUrl.replace('https://', 'wss://');
-      }
-      
-      console.log(`Connecting to WebSocket: ${wsUrl.substring(0, 60)}...`);
-      
-      this.ws = new WebSocket(wsUrl, {
-        headers: {
-          'Origin': 'https://helius.dev',
-        },
+      const wsUrl = config.pumpPortalWsUrl || 'wss://pumpportal.fun/api/data';
+
+      console.log(`Connecting to PumpPortal WebSocket: ${wsUrl}`);
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        message: `🔄 Connecting to PumpPortal: ${wsUrl}`,
       });
 
+      this.ws = new WebSocket(wsUrl);
+
       this.ws.on('open', () => {
-        const networkMode = config.testnetMode ? 'Testnet' : 'Mainnet';
-        console.log(`WebSocket connected to Pump.fun ${networkMode}`);
+        console.log('WebSocket connected to PumpPortal');
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
-          message: `WebSocket connected to Pump.fun ${networkMode} (attempt ${this.reconnectAttempts + 1})`,
+          message: 'WebSocket connected to PumpPortal',
         });
         this.reconnectAttempts = 0;
         this.subscribe();
@@ -167,155 +151,143 @@ export class TokenScanner {
       });
 
       this.ws.on('error', (error: Error) => {
-        console.error('WebSocket error:', error);
+        console.error('PumpPortal WebSocket error:', error);
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'error',
-          message: `WebSocket error: ${error.message}`,
+          message: `PumpPortal error: ${error.message}`,
         });
       });
 
       this.ws.on('close', (code: number, reason: Buffer) => {
-        console.log('WebSocket closed');
+        console.log('PumpPortal WebSocket closed');
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'warning',
-          message: `WebSocket closed: code=${code}, reason=${reason.toString()}, reconnectAttempts=${this.reconnectAttempts}`,
+          message: `PumpPortal closed: code=${code}, reason=${reason.toString()}`,
         });
         if (!this.isShuttingDown && this.reconnectAttempts < this.maxReconnectAttempts) {
           this.reconnectAttempts++;
-          console.log(`Reconnecting in ${this.reconnectDelay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+          const delay = this.calculateReconnectDelay();
           logger.log({
             timestamp: getCurrentTimestamp(),
             type: 'info',
-            message: `WebSocket reconnecting in ${this.reconnectDelay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`,
+            message: `🔄 Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`,
           });
-          setTimeout(() => this.connect(), this.reconnectDelay);
-        } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'error',
-            message: `WebSocket max reconnection attempts (${this.maxReconnectAttempts}) reached`,
-          });
+          setTimeout(() => this.connect(), delay);
         }
       });
 
     } catch (error) {
-      console.error('Failed to connect WebSocket:', error);
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'error',
-        message: `Failed to connect WebSocket: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      
+      console.error('Failed to connect to PumpPortal:', error);
       if (!this.isShuttingDown && this.reconnectAttempts < this.maxReconnectAttempts) {
         this.reconnectAttempts++;
-        setTimeout(() => this.connect(), this.reconnectDelay);
+        const delay = this.calculateReconnectDelay();
+        setTimeout(() => this.connect(), delay);
       }
     }
   }
 
+  /**
+   * Расчет задержки с использованием экспоненциального отката и jitter
+   */
+  private calculateReconnectDelay(): number {
+    let delay = Math.min(
+      this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
+      this.maxReconnectDelay
+    );
+    const jitter = delay * 0.2;
+    const randomJitter = (Math.random() * 2 - 1) * jitter;
+    return Math.floor(delay + randomJitter);
+  }
+
+  /**
+   * Подписка на события PumpPortal
+   */
   private subscribe(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
     try {
-      const programId = new PublicKey(PUMP_FUN_PROGRAM_ID);
-      
-      const subscribeMessage = {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'logsSubscribe',
-        params: [
-          {
-            mentions: [programId.toBase58()],
-          },
-          {
-            commitment: 'confirmed',
-            encoding: 'jsonParsed',
-          },
-        ],
-      };
+      // Подписываемся на новые токены
+      this.ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
 
-      this.ws.send(JSON.stringify(subscribeMessage));
-      console.log('Subscribed to pump.fun program logs');
-    } catch (error) {
-      console.error('Failed to subscribe:', error);
+      // Подписываемся на все сделки (для early activity tracking)
+      this.ws.send(JSON.stringify({ method: 'subscribeAllTransactions' }));
+
+      console.log('Subscribed to PumpPortal: new tokens + transactions');
       logger.log({
         timestamp: getCurrentTimestamp(),
-        type: 'error',
-        message: `Failed to subscribe to logs: ${error instanceof Error ? error.message : String(error)}`,
+        type: 'info',
+        message: 'Subscribed to PumpPortal: subscribeNewToken, subscribeAllTransactions',
       });
+    } catch (error) {
+      console.error('Failed to subscribe to PumpPortal:', error);
     }
   }
 
+  /**
+   * Обработка сообщений от PumpPortal
+   * 
+   * Форматы сообщений:
+   * - Создание токена: { txType: "create", mint: "...", signature: "...", traderPublicKey: "..." }
+   * - Покупка: { txType: "buy", mint: "...", solAmount: 0.1, traderPublicKey: "..." }
+   * - Продажа: { txType: "sell", mint: "...", solAmount: 0.1, traderPublicKey: "..." }
+   */
   private handleMessage(data: WebSocket.Data): void {
     try {
       const message = JSON.parse(data.toString());
 
-      // Обработка ответа на подписку
-      if (message.id === 1 && message.result) {
-        this.subscriptionId = message.result;
-        console.log(`Subscription confirmed, ID: ${this.subscriptionId}`);
+      // Событие создания нового токена
+      if (message.txType === 'create') {
+        const mint = message.mint;
+        const now = Date.now();
+
+        // Дедупликация по mint
+        if (this.processedMints.has(mint)) return;
+        this.processedMints.set(mint, now);
+
+        // Начинаем отслеживание ранней активности
+        earlyActivityTracker.startObservation(mint);
+
+        const candidate: TokenCandidate = {
+          mint,
+          createdAt: now,
+          signature: message.signature || '',
+        };
+
+        // Проверяем дубликаты в очереди
+        const alreadyInQueue = this.tokenQueue.some(t => t.mint === mint);
+        if (alreadyInQueue) return;
+
+        if (this.processingTokens.has(mint)) return;
+
+        this.tokenQueue.push(candidate);
+
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
-          message: `WebSocket subscription confirmed, ID: ${this.subscriptionId}`,
+          token: mint,
+          message: `📄 NEW TOKEN (PumpPortal): ${mint.substring(0, 12)}... | Creator: ${message.traderPublicKey?.substring(0, 8) || 'unknown'}... | Queue: ${this.tokenQueue.length}`,
         });
-        return;
-      }
 
-      // Обработка уведомлений о логах
-      if (message.method === 'logsNotification' && message.params) {
-        const notification = message.params;
-        const logs = notification.result?.value?.logs || [];
-        
-        // Check for early activity (buy/swap transactions)
-        const hasBuySwapActivity = logs.some((log: string) => {
-          const lowerLog = log.toLowerCase();
-          return (
-            lowerLog.includes('swap') ||
-            lowerLog.includes('buy') ||
-            lowerLog.includes('instruction: buy') ||
-            lowerLog.includes('instruction: swap')
-          );
-        });
-        
-        if (hasBuySwapActivity) {
-          for (const log of logs) {
-            const mintMatches = log.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/g);
-            if (mintMatches) {
-              for (const potentialMint of mintMatches) {
-                if (potentialMint === '11111111111111111111111111111111' ||
-                    potentialMint === 'So11111111111111111111111111111111111111112') {
-                  continue;
-                }
-                earlyActivityTracker.recordActivity(potentialMint);
-              }
-            }
-          }
+        if (!this.isProcessingQueue) {
+          void this.processTokenQueue();
         }
-        
-        // Проверяем наличие событий создания токена
-        const hasTokenCreation = logs.some((log: string) => {
-          const lowerLog = log.toLowerCase();
-          return (
-            lowerLog.includes('instruction: initialize') ||
-            lowerLog.includes('instruction:create') ||
-            (lowerLog.includes('initialize') && lowerLog.includes('token')) ||
-            (lowerLog.includes('create') && (lowerLog.includes('token') || lowerLog.includes('mint'))) ||
-            (lowerLog.includes('mint') && lowerLog.includes('authority'))
+      }
+      // Событие покупки/продажи (для early activity)
+      else if (message.txType === 'buy' || message.txType === 'sell') {
+        if (message.mint) {
+          // Записываем активность (покупка/продажа) для трекера
+          earlyActivityTracker.recordActivity(
+            message.mint,
+            message.traderPublicKey,
+            message.solAmount,
+            message.txType
           );
-        });
-        
-        if (!hasTokenCreation) {
-          return; // Не создание токена - пропускаем
         }
-        
-        // Обрабатываем уведомление и добавляем в единую очередь
-        void this.processLogNotification(notification);
       }
     } catch (error) {
-      console.error('Error handling WebSocket message:', error);
+      // Игнорируем ошибки парсинга (могут быть системные сообщения)
     }
   }
 
@@ -324,7 +296,6 @@ export class TokenScanner {
    */
   private async processTokenQueue(): Promise<void> {
     if (this.isProcessingQueue || this.tokenQueue.length === 0) {
-      // Если очередь пуста, проверяем снова через 100ms
       if (!this.isShuttingDown) {
         setTimeout(() => this.processTokenQueue(), 100);
       }
@@ -332,7 +303,7 @@ export class TokenScanner {
     }
 
     this.isProcessingQueue = true;
-    const maxConcurrent = 8; // Параллельная обработка до 8 токенов
+    const maxConcurrent = 8;
     const processingPromises: Array<{ promise: Promise<void>; index: number }> = [];
     let promiseIndex = 0;
 
@@ -341,7 +312,6 @@ export class TokenScanner {
         const candidate = this.tokenQueue.shift();
         if (!candidate) continue;
 
-        // Проверяем, не обрабатывается ли уже этот токен
         if (this.processingTokens.has(candidate.mint)) {
           continue;
         }
@@ -367,220 +337,24 @@ export class TokenScanner {
             }
           }
         })();
-        
+
         processingPromises.push({ promise, index: currentIndex });
       }
 
-      // Ждем завершения хотя бы одного обработчика
       if (processingPromises.length >= maxConcurrent && processingPromises.length > 0) {
         await Promise.race(processingPromises.map(p => p.promise));
       }
 
-      // Небольшая задержка для избежания перегрузки
       if (this.tokenQueue.length > 0) {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
     }
 
-    // Ждем завершения всех оставшихся обработчиков
     await Promise.all(processingPromises.map(p => p.promise));
-
     this.isProcessingQueue = false;
 
-    // Продолжаем обработку очереди
     if (!this.isShuttingDown) {
       setTimeout(() => this.processTokenQueue(), 100);
-    }
-  }
-
-  private async processLogNotification(notification: any): Promise<void> {
-    const processStartTime = Date.now();
-    try {
-      const signature = notification.result.value.signature;
-      const logs = notification.result.value.logs || [];
-
-      // Deduplication
-      const now = Date.now();
-      const lastProcessed = this.processedSignatures.get(signature);
-      if (lastProcessed && (now - lastProcessed) < this.DEDUP_TTL_MS) {
-        return; // Skip - already processed recently
-      }
-
-      const hasTokenCreation = logs.some((log: string) => {
-        const lowerLog = log.toLowerCase();
-        return (
-          lowerLog.includes('instruction: initialize') ||
-          lowerLog.includes('instruction:create') ||
-          (lowerLog.includes('initialize') && lowerLog.includes('token')) ||
-          (lowerLog.includes('create') && (lowerLog.includes('token') || lowerLog.includes('mint'))) ||
-          (lowerLog.includes('mint') && lowerLog.includes('authority'))
-        );
-      });
-
-      if (!hasTokenCreation) {
-        return;
-      }
-
-      const rpcStartTime = Date.now();
-      try {
-        const connection = this.rpcPool.getConnection();
-        const tx = await connection.getTransaction(signature, {
-          commitment: 'confirmed',
-          maxSupportedTransactionVersion: 0,
-        });
-
-        if (!tx) {
-          return;
-        }
-
-        const mintAddress = this.extractMintFromTransaction(tx);
-        
-        if (mintAddress) {
-          // Deduplication по mint
-          const lastMintProcessed = this.processedMints.get(mintAddress);
-          if (lastMintProcessed && (now - lastMintProcessed) < this.DEDUP_TTL_MS) {
-            return;
-          }
-
-          // Mark as processed
-          this.processedSignatures.set(signature, now);
-          this.processedMints.set(mintAddress, now);
-
-          // Cleanup old entries periodically
-          if (this.processedSignatures.size > 1000) {
-            this.cleanupDedupCache();
-          }
-
-          // Start early activity observation
-          earlyActivityTracker.startObservation(mintAddress);
-          
-          // Используем время транзакции как время создания токена
-          const txTime = tx.blockTime ? tx.blockTime * 1000 : Date.now();
-          
-          const candidate: TokenCandidate = {
-            mint: mintAddress,
-            createdAt: txTime,
-            signature: signature,
-          };
-
-          // ⭐ ПРОВЕРКА: Не добавляем токен в очередь, если он уже там есть
-          const alreadyInQueue = this.tokenQueue.some(t => t.mint === mintAddress);
-          if (alreadyInQueue) {
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'info',
-              token: mintAddress,
-              message: `Token ${mintAddress.substring(0, 8)}... already in queue, skipping duplicate`,
-            });
-            return;
-          }
-
-          // ⭐ ПРОВЕРКА: Не добавляем токен, если он уже обрабатывается
-          if (this.processingTokens.has(mintAddress)) {
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'info',
-              token: mintAddress,
-              message: `Token ${mintAddress.substring(0, 8)}... already being processed, skipping duplicate`,
-            });
-            return;
-          }
-
-          // ✅ УБРАНА ЛОГИКА ПО ВОЗРАСТУ: Добавляем токен в единую очередь без фильтрации по возрасту
-          this.tokenQueue.push(candidate);
-          
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            token: mintAddress,
-            message: `Token ${mintAddress.substring(0, 8)}... added to queue (queue size: ${this.tokenQueue.length})`,
-          });
-          
-          // Запускаем обработку очереди если она еще не запущена
-          if (!this.isProcessingQueue) {
-            this.processTokenQueue();
-          }
-        }
-      } catch (error: any) {
-        if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
-          return;
-        }
-        if (!error?.message?.includes('not found')) {
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'error',
-            message: `Error getting transaction ${signature.substring(0, 8)}...: ${error?.message || String(error)}`,
-          });
-        }
-      }
-    } catch (error: any) {
-      const totalDuration = Date.now() - processStartTime;
-      if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          message: `Rate limited at top level, skipping notification, processing time: ${totalDuration}ms`,
-        });
-        return;
-      }
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'error',
-        message: `Error processing log notification: ${error?.message || String(error)}, processing time: ${totalDuration}ms`,
-      });
-      console.error('Error processing log notification:', error);
-    }
-  }
-
-  /**
-   * Извлекает mint address из транзакции
-   */
-  private extractMintFromTransaction(tx: any): string | null {
-    try {
-      // Приоритет 1: postTokenBalances
-      const tokenBalances = tx.meta?.postTokenBalances || [];
-      for (const balance of tokenBalances) {
-        if (balance.mint) {
-          return balance.mint;
-        }
-      }
-
-      // Приоритет 2: preTokenBalances
-      const preTokenBalances = tx.meta?.preTokenBalances || [];
-      for (const balance of preTokenBalances) {
-        if (balance.mint) {
-          return balance.mint;
-        }
-      }
-
-      // Приоритет 3: instruction accounts
-      const accountKeys = tx.transaction?.message?.accountKeys || [];
-      const accountKeysArray = accountKeys.map((acc: any) => 
-        typeof acc === 'string' ? acc : acc.pubkey
-      );
-      const instructions = tx.transaction?.message?.instructions || [];
-      for (const instruction of instructions) {
-        const programId = typeof instruction.programId === 'string' 
-          ? instruction.programId 
-          : instruction.programId?.toString();
-        
-        if (programId === PUMP_FUN_PROGRAM_ID) {
-          const accounts = instruction.accounts || [];
-          for (const accountIndex of accounts) {
-            if (typeof accountIndex === 'number' && accountKeysArray[accountIndex]) {
-              const potentialMint = accountKeysArray[accountIndex];
-              if (potentialMint && 
-                  potentialMint !== '11111111111111111111111111111111' &&
-                  potentialMint !== 'So11111111111111111111111111111111111111112') {
-                return potentialMint;
-              }
-            }
-          }
-        }
-      }
-      return null;
-    } catch (error) {
-      return null;
     }
   }
 
@@ -590,13 +364,7 @@ export class TokenScanner {
   private cleanupDedupCache(): void {
     const now = Date.now();
     const cutoff = now - this.DEDUP_TTL_MS;
-    
-    for (const [key, timestamp] of this.processedSignatures.entries()) {
-      if (timestamp < cutoff) {
-        this.processedSignatures.delete(key);
-      }
-    }
-    
+
     for (const [key, timestamp] of this.processedMints.entries()) {
       if (timestamp < cutoff) {
         this.processedMints.delete(key);
@@ -606,21 +374,6 @@ export class TokenScanner {
 
   async stop(): Promise<void> {
     this.isShuttingDown = true;
-
-    if (this.subscriptionId !== null && this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try {
-        const unsubscribeMessage = {
-          jsonrpc: '2.0',
-          id: 2,
-          method: 'logsUnsubscribe',
-          params: [this.subscriptionId],
-        };
-        this.ws.send(JSON.stringify(unsubscribeMessage));
-      } catch (error) {
-        console.error('Error unsubscribing:', error);
-      }
-    }
-
     if (this.ws) {
       this.ws.close();
       this.ws = null;

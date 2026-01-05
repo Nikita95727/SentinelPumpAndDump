@@ -51,7 +51,7 @@ export function formatUsd(sol: number): number {
 }
 
 export async function getConnection(): Promise<Connection> {
-  const connection = new Connection(config.heliusHttpUrl, {
+  const connection = new Connection(config.primaryRpcHttpUrl, {
     commitment: 'confirmed',
   });
   return connection;
@@ -61,4 +61,3 @@ export function calculateDrawdown(current: number, peak: number): number {
   if (peak === 0) return 0;
   return ((peak - current) / peak) * 100;
 }
-

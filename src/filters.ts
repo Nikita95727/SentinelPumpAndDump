@@ -15,215 +15,7 @@ export class TokenFilters {
     this.connection = connection;
   }
 
-  async filterCandidate(candidate: TokenCandidate): Promise<boolean> {
-    const filterDetails: any = {};
-    
-    try {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'start',
-        message: `Starting filter check for token ${candidate.mint.substring(0, 8)}...`,
-      });
 
-      // 1. Проверка задержки (10-30 секунд)
-      const age = (Date.now() - candidate.createdAt) / 1000;
-      filterDetails.age = age;
-      
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'age_check',
-        filterResult: age >= config.minDelaySeconds && age <= config.maxDelaySeconds,
-        filterDetails: { age },
-        message: `Age check: ${age.toFixed(1)}s (required: ${config.minDelaySeconds}-${config.maxDelaySeconds}s)`,
-      });
-
-      if (age < config.minDelaySeconds || age > config.maxDelaySeconds) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'age_check',
-          filterDetails: { ...filterDetails, rejectionReason: `Age ${age.toFixed(1)}s outside range ${config.minDelaySeconds}-${config.maxDelaySeconds}s` },
-          message: `Token rejected: age ${age.toFixed(1)}s not in range`,
-        });
-        return false;
-      }
-
-      // Задержка перед началом проверок
-      await sleep(config.filterCheckDelay);
-
-      // 2. Проверка количества покупок (минимум 5-10)
-      const purchaseCount = await this.getPurchaseCount(candidate.mint);
-      filterDetails.purchaseCount = purchaseCount;
-      
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'purchase_count',
-        filterResult: purchaseCount >= config.minPurchases,
-        filterDetails: { ...filterDetails },
-        message: `Purchase count: ${purchaseCount} (required: >= ${config.minPurchases})`,
-      });
-
-      if (purchaseCount < config.minPurchases) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'purchase_count',
-          filterDetails: { ...filterDetails, rejectionReason: `Only ${purchaseCount} purchases, need ${config.minPurchases}` },
-          message: `Token rejected: insufficient purchases (${purchaseCount} < ${config.minPurchases})`,
-        });
-        return false;
-      }
-
-      // Задержка между проверками
-      await sleep(config.filterCheckDelay);
-
-      // 3. Проверка объема торгов (>= 2000 USD)
-      const volumeUsd = await this.getTradingVolume(candidate.mint);
-      filterDetails.volumeUsd = volumeUsd;
-      
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'volume_check',
-        filterResult: volumeUsd >= config.minVolumeUsd,
-        filterDetails: { ...filterDetails },
-        message: `Trading volume: $${volumeUsd.toFixed(2)} (required: >= $${config.minVolumeUsd})`,
-      });
-
-      if (volumeUsd < config.minVolumeUsd) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'volume_check',
-          filterDetails: { ...filterDetails, rejectionReason: `Volume $${volumeUsd.toFixed(2)} < $${config.minVolumeUsd}` },
-          message: `Token rejected: insufficient volume ($${volumeUsd.toFixed(2)} < $${config.minVolumeUsd})`,
-        });
-        return false;
-      }
-
-      // Задержка между проверками
-      await sleep(config.filterCheckDelay);
-
-      // 4. Проверка LP burned и mint renounced
-      const isLpBurned = await this.isLpBurned(candidate.mint);
-      filterDetails.isLpBurned = isLpBurned;
-      
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'lp_burned',
-        filterResult: isLpBurned,
-        filterDetails: { ...filterDetails },
-        message: `LP burned check: ${isLpBurned}`,
-      });
-
-      if (!isLpBurned) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'lp_burned',
-          filterDetails: { ...filterDetails, rejectionReason: 'LP not burned' },
-          message: `Token rejected: LP not burned`,
-        });
-        return false;
-      }
-
-      await sleep(config.filterCheckDelay);
-
-      const isMintRenounced = await this.isMintRenounced(candidate.mint);
-      filterDetails.isMintRenounced = isMintRenounced;
-      
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'mint_renounced',
-        filterResult: isMintRenounced,
-        filterDetails: { ...filterDetails },
-        message: `Mint renounced check: ${isMintRenounced}`,
-      });
-
-      if (!isMintRenounced) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'mint_renounced',
-          filterDetails: { ...filterDetails, rejectionReason: 'Mint not renounced' },
-          message: `Token rejected: mint not renounced`,
-        });
-        return false;
-      }
-
-      await sleep(config.filterCheckDelay);
-
-      // 5. Проверка на снайперов (топ-5 холдеров, никто не держит >20%)
-      const hasSnipers = await this.hasSnipers(candidate.mint);
-      filterDetails.hasSnipers = hasSnipers;
-      
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'snipers_check',
-        filterResult: !hasSnipers,
-        filterDetails: { ...filterDetails },
-        message: `Snipers check: ${hasSnipers ? 'detected' : 'none'}`,
-      });
-
-      if (hasSnipers) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'snipers_check',
-          filterDetails: { ...filterDetails, rejectionReason: 'Snipers detected (>20% holders)' },
-          message: `Token rejected: snipers detected`,
-        });
-        return false;
-      }
-
-      // Все проверки пройдены
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_passed',
-        token: candidate.mint,
-        filterDetails: { ...filterDetails },
-        message: `Token passed all filters: ${candidate.mint.substring(0, 8)}...`,
-      });
-
-      return true;
-    } catch (error: any) {
-      console.error(`Error filtering candidate ${candidate.mint}:`, error);
-      
-      // Обработка rate limiting
-      if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
-        await sleep(config.rateLimitRetryDelay * 2);
-      }
-
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_failed',
-        token: candidate.mint,
-        filterStage: 'error',
-        filterDetails: { ...filterDetails, rejectionReason: error?.message || String(error) },
-        message: `Error filtering candidate ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      return false;
-    }
-  }
 
   /**
    * Проверка на honeypot и скам
@@ -232,7 +24,7 @@ export class TokenFilters {
   private async checkHoneypotAndScam(mint: string, isPriority: boolean = false): Promise<{ isHoneypot: boolean; uniqueBuyers: number; hasSells: boolean }> {
     try {
       const mintPubkey = new PublicKey(mint);
-      
+
       // Получаем транзакции токена
       // Для приоритетных очередей - минимальная задержка
       await sleep(isPriority ? 50 : config.rpcRequestDelay);
@@ -247,10 +39,10 @@ export class TokenFilters {
       // Батчинг getTransaction запросов для скорости (до 5 одновременно)
       const signaturesToCheck = signatures.slice(0, Math.min(signatures.length, 30));
       const batchSize = 5;
-      
+
       for (let i = 0; i < signaturesToCheck.length; i += batchSize) {
         const batch = signaturesToCheck.slice(i, i + batchSize);
-        
+
         // Параллельно получаем транзакции батча
         const txPromises = batch.map(async (sigInfo) => {
           try {
@@ -281,8 +73,8 @@ export class TokenFilters {
           // Проверяем логи на наличие продажи
           const hasSellLog = logs.some((log: string) => {
             const lowerLog = log.toLowerCase();
-            return lowerLog.includes('sell') || 
-                   (lowerLog.includes('swap') && lowerLog.includes('out'));
+            return lowerLog.includes('sell') ||
+              (lowerLog.includes('swap') && lowerLog.includes('out'));
           });
 
           if (hasSellLog) {
@@ -316,10 +108,10 @@ export class TokenFilters {
           }
 
           accountKeys.forEach((address: string) => {
-            if (address && 
-                address !== mint && 
-                address !== '11111111111111111111111111111111' &&
-                address !== 'So11111111111111111111111111111111111111112') {
+            if (address &&
+              address !== mint &&
+              address !== '11111111111111111111111111111111' &&
+              address !== 'So11111111111111111111111111111111111111112') {
               buyerAddresses.add(address);
             }
           });
@@ -351,229 +143,39 @@ export class TokenFilters {
    * Фильтрация для очереди 1 (0-5 сек) - минимальные проверки, но СТРОГАЯ защита от honeypot
    * Смягченные требования к объему, но гарантия что токен можно продать
    */
-  async filterQueue1Candidate(candidate: TokenCandidate): Promise<boolean> {
-    const filterDetails: any = {};
-    
-    try {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'queue1_start',
-        message: `Starting queue 1 filter check (0-5s) for token ${candidate.mint.substring(0, 8)}...`,
-      });
 
-      // 1. КРИТИЧНО: Проверка на honeypot - ГЛАВНЫЙ КРИТЕРИЙ
-      const honeypotCheck = await this.checkHoneypotAndScam(candidate.mint);
-      filterDetails.isHoneypot = honeypotCheck.isHoneypot;
-      filterDetails.uniqueBuyers = honeypotCheck.uniqueBuyers;
-      filterDetails.hasSells = honeypotCheck.hasSells;
 
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'queue1_honeypot',
-        filterResult: honeypotCheck.uniqueBuyers > 1, // Главный критерий: больше 1 владельца
-        filterDetails: { ...filterDetails },
-        message: `Honeypot check: uniqueBuyers=${honeypotCheck.uniqueBuyers}, hasSells=${honeypotCheck.hasSells}`,
-      });
 
-      // ГЛАВНОЕ: Отклоняем если меньше 2 уникальных владельцев (это honeypot/скам)
-      // Больше 1 уникального владельца = не honeypot, можно продать
-      if (honeypotCheck.uniqueBuyers <= 1) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'queue1_honeypot',
-          filterDetails: { ...filterDetails, rejectionReason: `Honeypot detected: only ${honeypotCheck.uniqueBuyers} unique buyer(s), cannot sell` },
-          message: `Token rejected: honeypot - insufficient unique buyers (${honeypotCheck.uniqueBuyers} <= 1)`,
-        });
-        return false;
-      }
-
-      // 2. Минимальная проверка объема (смягчено для ранних токенов)
-      // Для приоритетной очереди - минимальная задержка (50ms вместо 200ms)
-      await sleep(50);
-      const volumeUsd = await this.getTradingVolume(candidate.mint);
-      filterDetails.volumeUsd = volumeUsd;
-
-      // Для очереди 1 снижаем требования к объему: минимум $100 (вместо $2000)
-      // Главное - не honeypot, объем может быть маленьким на ранней стадии
-      if (volumeUsd < 100) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'queue1_volume',
-          filterDetails: { ...filterDetails, rejectionReason: `Volume too low: $${volumeUsd.toFixed(2)} < $100` },
-          message: `Token rejected: volume too low ($${volumeUsd.toFixed(2)} < $100)`,
-        });
-        return false;
-      }
-
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_passed',
-        token: candidate.mint,
-        filterStage: 'queue1',
-        filterDetails: { ...filterDetails },
-        message: `Token passed queue 1 filters (risky but sellable): ${candidate.mint.substring(0, 8)}..., uniqueBuyers=${honeypotCheck.uniqueBuyers}`,
-      });
-
-      return true;
-    } catch (error: any) {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_failed',
-        token: candidate.mint,
-        filterStage: 'queue1_error',
-        filterDetails: { ...filterDetails, rejectionReason: error?.message || String(error) },
-        message: `Error filtering queue 1 candidate ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      return false;
-    }
-  }
-
-  /**
-   * Фильтрация для очереди 2 (5-15 сек) - средние проверки, но СТРОГАЯ защита от honeypot
-   * Смягченные требования к покупкам и объему, но гарантия что токен можно продать
-   */
-  async filterQueue2Candidate(candidate: TokenCandidate): Promise<boolean> {
-    const filterDetails: any = {};
-    
-    try {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'queue2_start',
-        message: `Starting queue 2 filter check (5-15s) for token ${candidate.mint.substring(0, 8)}...`,
-      });
-
-      // 1. КРИТИЧНО: Проверка на honeypot - ГЛАВНЫЙ КРИТЕРИЙ
-      // Для приоритетной очереди - быстрая проверка
-      const honeypotCheck = await this.checkHoneypotAndScam(candidate.mint, true);
-      filterDetails.isHoneypot = honeypotCheck.isHoneypot;
-      filterDetails.uniqueBuyers = honeypotCheck.uniqueBuyers;
-      filterDetails.hasSells = honeypotCheck.hasSells;
-
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_check',
-        token: candidate.mint,
-        filterStage: 'queue2_honeypot',
-        filterResult: honeypotCheck.uniqueBuyers > 1, // Главный критерий: больше 1 владельца
-        filterDetails: { ...filterDetails },
-        message: `Honeypot check: uniqueBuyers=${honeypotCheck.uniqueBuyers}, hasSells=${honeypotCheck.hasSells}`,
-      });
-
-      // ГЛАВНОЕ: Отклоняем если меньше 2 уникальных владельцев (это honeypot/скам)
-      if (honeypotCheck.uniqueBuyers <= 1) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'queue2_honeypot',
-          filterDetails: { ...filterDetails, rejectionReason: `Honeypot detected: only ${honeypotCheck.uniqueBuyers} unique buyer(s), cannot sell` },
-          message: `Token rejected: honeypot - insufficient unique buyers (${honeypotCheck.uniqueBuyers} <= 1)`,
-        });
-        return false;
-      }
-
-      // Для приоритетной очереди - минимальная задержка
-      await sleep(50);
-
-      // 2. Проверка количества покупок (смягчено: минимум 2 вместо 3)
-      const purchaseCount = await this.getPurchaseCount(candidate.mint, true);
-      filterDetails.purchaseCount = purchaseCount;
-
-      if (purchaseCount < 2) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'queue2_purchase_count',
-          filterDetails: { ...filterDetails, rejectionReason: `Only ${purchaseCount} purchases, need 2` },
-          message: `Token rejected: insufficient purchases (${purchaseCount} < 2)`,
-        });
-        return false;
-      }
-
-      // Для приоритетной очереди - минимальная задержка
-      await sleep(50);
-
-      // 3. Проверка объема торгов (смягчено: >= $500 вместо $1000)
-      const volumeUsd = await this.getTradingVolume(candidate.mint, true);
-      filterDetails.volumeUsd = volumeUsd;
-
-      if (volumeUsd < 500) {
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'filter_failed',
-          token: candidate.mint,
-          filterStage: 'queue2_volume',
-          filterDetails: { ...filterDetails, rejectionReason: `Volume $${volumeUsd.toFixed(2)} < $500` },
-          message: `Token rejected: insufficient volume ($${volumeUsd.toFixed(2)} < $500)`,
-        });
-        return false;
-      }
-
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_passed',
-        token: candidate.mint,
-        filterStage: 'queue2',
-        filterDetails: { ...filterDetails },
-        message: `Token passed queue 2 filters (risky but sellable): ${candidate.mint.substring(0, 8)}..., uniqueBuyers=${honeypotCheck.uniqueBuyers}`,
-      });
-
-      return true;
-    } catch (error: any) {
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'filter_failed',
-        token: candidate.mint,
-        filterStage: 'queue2_error',
-        filterDetails: { ...filterDetails, rejectionReason: error?.message || String(error) },
-        message: `Error filtering queue 2 candidate ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      return false;
-    }
-  }
 
   /**
    * Упрощенная фильтрация для вторичной очереди (5-15 сек) - ОСТАВЛЕНО ДЛЯ ОБРАТНОЙ СОВМЕСТИМОСТИ
    * Используется filterQueue2Candidate вместо этого
    */
-  async filterSecondaryCandidate(candidate: TokenCandidate): Promise<boolean> {
-    return this.filterQueue2Candidate(candidate);
-  }
+
 
   private async getPurchaseCount(mint: string, isPriority: boolean = false): Promise<number> {
     const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
         message: `Getting purchase count for ${mint.substring(0, 8)}...`,
       });
-      
+
       // Получаем подписи для mint адреса
       // pump.fun использует определенные программы для торговли
       // Ищем транзакции покупки через getSignaturesForAddress
-      
+
       const sigStartTime = Date.now();
       const connection = this.rpcPool.getConnection(); // Используем пул соединений
       const signatures = await connection.getSignaturesForAddress(mintPubkey, {
         limit: 100,
       });
       const sigDuration = Date.now() - sigStartTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -590,10 +192,10 @@ export class TokenFilters {
       // Батчинг getTransaction запросов для скорости (до 3 одновременно)
       const batchSize = 3;
       const signaturesToCheck = signatures.slice(skipFirst ? 1 : 0, Math.min(signatures.length, 50));
-      
+
       for (let i = 0; i < signaturesToCheck.length; i += batchSize) {
         const batch = signaturesToCheck.slice(i, i + batchSize);
-        
+
         // Параллельно получаем транзакции батча
         const txPromises = batch.map(async (sigInfo) => {
           try {
@@ -634,7 +236,7 @@ export class TokenFilters {
           if (tx.meta.err) continue;
 
           // Проверяем наличие изменений в балансах токенов (признак покупки/продажи)
-          const hasTokenBalanceChanges = 
+          const hasTokenBalanceChanges =
             (tx.meta.postTokenBalances && tx.meta.postTokenBalances.length > 0) ||
             (tx.meta.preTokenBalances && tx.meta.preTokenBalances.length > 0);
 
@@ -679,14 +281,14 @@ export class TokenFilters {
     const startTime = Date.now();
     try {
       const mintPubkey = new PublicKey(mint);
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
         message: `Getting trading volume for ${mint.substring(0, 8)}...`,
       });
-      
+
       // Получаем все транзакции
       const sigStartTime = Date.now();
       const connection = this.rpcPool.getConnection(); // Используем пул соединений
@@ -694,7 +296,7 @@ export class TokenFilters {
         limit: 100,
       });
       const sigDuration = Date.now() - sigStartTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -742,7 +344,7 @@ export class TokenFilters {
 
       const volumeUsd = formatUsd(totalVolumeSol);
       const totalDuration = Date.now() - startTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -776,13 +378,13 @@ export class TokenFilters {
 
       // В pump.fun LP токены обычно сжигаются после создания
       // Проверяем, что LP аккаунт не существует или имеет нулевой баланс
-      
+
       const mintPubkey = new PublicKey(mint);
-      
+
       // Кеширование: mint info не меняется часто
       const cacheKey = `mint:${mint}`;
       const cached = await cache.get<{ supply: string; mintAuthority: string | null; decimals: number }>(cacheKey);
-      
+
       let mintInfo;
       if (cached) {
         mintInfo = {
@@ -796,7 +398,7 @@ export class TokenFilters {
         const connection = this.rpcPool.getConnection(); // Используем пул соединений
         mintInfo = await getMint(connection, mintPubkey);
         const rpcDuration = Date.now() - rpcStartTime;
-        
+
         // Кешируем результат на 10 секунд
         await cache.set(cacheKey, {
           supply: mintInfo.supply.toString(),
@@ -804,22 +406,22 @@ export class TokenFilters {
           decimals: mintInfo.decimals,
         }, 10);
       }
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
         message: `Mint info received for LP check`,
       });
-      
+
       // Проверяем связанные аккаунты
       // В pump.fun после создания токена LP обычно сжигается
       // Это упрощенная проверка, в реальности нужно проверять конкретные аккаунты pump.fun
-      
+
       // Для MVP считаем, что если токен существует и mint authority null, то LP burned
       const result = true; // Упрощенная проверка для MVP
       const totalDuration = Date.now() - startTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -852,11 +454,11 @@ export class TokenFilters {
       });
 
       const mintPubkey = new PublicKey(mint);
-      
+
       // Кеширование: mint authority не меняется
       const cacheKey = `mint:${mint}`;
       const cached = await cache.get<{ mintAuthority: string | null }>(cacheKey);
-      
+
       let mintInfo;
       if (cached) {
         mintInfo = { mintAuthority: cached.mintAuthority ? new PublicKey(cached.mintAuthority) : null } as any;
@@ -866,17 +468,17 @@ export class TokenFilters {
         const rpcStartTime = Date.now();
         mintInfo = await getMint(connection, mintPubkey);
         const rpcDuration = Date.now() - rpcStartTime;
-        
+
         // Кешируем результат на 10 секунд
         await cache.set(cacheKey, {
           mintAuthority: mintInfo.mintAuthority?.toString() || null,
         }, 10);
       }
-      
+
       // Если mintAuthority === null, то mint renounced
       const result = mintInfo.mintAuthority === null;
       const totalDuration = Date.now() - startTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -920,7 +522,7 @@ export class TokenFilters {
     try {
       const mintPubkey = new PublicKey(mint);
       const connection = this.rpcPool.getConnection();
-      
+
       // Получаем топ-5 холдеров
       const largestAccounts = await connection.getTokenLargestAccounts(mintPubkey);
       if (largestAccounts.value.length === 0) {
@@ -964,11 +566,11 @@ export class TokenFilters {
 
       await sleep(config.rpcRequestDelay);
       const mintPubkey = new PublicKey(mint);
-      
+
       // Кеширование: largest accounts меняются редко
       const cacheKey = `largest:${mint}`;
       const cached = await cache.get<Array<{ address: string; amount: string }>>(cacheKey);
-      
+
       let largestAccounts;
       if (cached) {
         largestAccounts = {
@@ -983,21 +585,21 @@ export class TokenFilters {
         const connection = this.rpcPool.getConnection(); // Используем пул соединений
         largestAccounts = await connection.getTokenLargestAccounts(mintPubkey);
         const accountsDuration = Date.now() - accountsStartTime;
-        
+
         // Кешируем результат на 5 секунд
         await cache.set(cacheKey, largestAccounts.value.map(acc => ({
           address: acc.address.toString(),
           amount: acc.amount.toString(),
         })), 5);
       }
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
         message: `Largest accounts received: ${largestAccounts.value.length}`,
       });
-      
+
       if (largestAccounts.value.length === 0) {
         return false;
       }
@@ -1005,7 +607,7 @@ export class TokenFilters {
       // Кеширование для supply
       const mintCacheKey = `mint:${mint}`;
       const mintCached = await cache.get<{ supply: string }>(mintCacheKey);
-      
+
       let mintInfo;
       let totalSupply;
       if (mintCached) {
@@ -1018,7 +620,7 @@ export class TokenFilters {
         mintInfo = await getMint(mintConnection, mintPubkey);
         const mintDuration = Date.now() - mintStartTime;
         totalSupply = Number(mintInfo.supply);
-        
+
         // Кешируем результат на 10 секунд
         await cache.set(mintCacheKey, {
           supply: mintInfo.supply.toString(),
@@ -1026,7 +628,7 @@ export class TokenFilters {
           decimals: mintInfo.decimals,
         }, 10);
       }
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
@@ -1041,32 +643,32 @@ export class TokenFilters {
       // BATCH ЗАПРОСЫ: Получаем все аккаунты за один раз через getMultipleAccountsInfo
       const accountsToCheck = largestAccounts.value.slice(0, Math.min(5, largestAccounts.value.length));
       const accountAddresses = accountsToCheck.map((acc: any) => acc.address);
-      
+
       // Используем batch запрос getMultipleAccountsInfo вместо множества getAccount
       await sleep(config.rpcRequestDelay);
       const connection = this.rpcPool.getConnection(); // Используем пул соединений
       const accountStartTime = Date.now();
       const accountInfos = await connection.getMultipleAccountsInfo(accountAddresses);
       const accountDuration = Date.now() - accountStartTime;
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: mint,
         message: `Batch accounts fetched: ${accountInfos.length}, RPC duration: ${accountDuration}ms`,
       });
-      
+
       // Проверяем, не держит ли кто-то >20%
       for (let idx = 0; idx < accountsToCheck.length; idx++) {
         const accountInfo = accountInfos[idx];
         if (!accountInfo) continue;
-        
+
         try {
           // Парсим данные аккаунта из batch результата
           const tokenAccount = unpackAccount(accountAddresses[idx], accountInfo);
           const balance = Number(tokenAccount.amount);
           const percentage = (balance / totalSupply) * 100;
-          
+
           logger.log({
             timestamp: getCurrentTimestamp(),
             type: 'info',
@@ -1189,7 +791,7 @@ export class TokenFilters {
    */
   async simplifiedFilter(candidate: TokenCandidate): Promise<{ passed: boolean; reason?: string; details?: any; tierInfo?: TierInfo | null; tokenType?: 'MANIPULATOR' | 'GEM' | 'REGULAR' }> {
     const details: any = {};
-    
+
     try {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -1232,14 +834,14 @@ export class TokenFilters {
       const currentPrice = await priceFetcher.getPrice(candidate.mint);
       const marketData = await priceFetcher.getMarketData(candidate.mint);
       const marketCap = marketData?.marketCap || 0;
-      
+
       // Признаки гема: быстрый рост цены, объема, капитализации
       const ageSeconds = (Date.now() - candidate.createdAt) / 1000;
       const priceMultiplier = currentPrice > 0 ? currentPrice / 0.000000028 : 1; // От начальной цены pump.fun
       const isGem = priceMultiplier >= 2.0 && volumeUsd >= 500 && ageSeconds < 300; // Рост 2x+, объем >$500, возраст <5мин
-      
+
       let tokenType: 'MANIPULATOR' | 'GEM' | 'REGULAR' = 'REGULAR';
-      
+
       if (hasConcentratedLiquidity) {
         tokenType = 'MANIPULATOR';
         logger.log({
@@ -1259,34 +861,34 @@ export class TokenFilters {
       }
 
       details.tokenType = tokenType;
-      
+
       // ⭐ КРИТИЧНО: Проверяем market cap ЗДЕСЬ, до того как токен попадет в очередь
       // Это предотвращает ситуацию, когда токен проходит фильтры, но потом отклоняется в tryOpenPosition
-      const marketCapThreshold = tokenType === 'MANIPULATOR' ? 1500 : 2000;
-      if (!marketData || marketCap < marketCapThreshold) {
+      // Используем единый порог для всех типов токенов
+      if (!marketData || marketCap < config.minMarketCap) {
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: candidate.mint,
-          message: `❌ MARKET CAP FILTER (simplifiedFilter): marketCap=$${marketCap.toFixed(2) || 'N/A'} < $${marketCapThreshold} USD (${tokenType}), rejecting token`,
+          message: `❌ MARKET CAP FILTER (simplifiedFilter): marketCap=$${marketCap.toFixed(2) || 'N/A'} < $${config.minMarketCap} USD (${tokenType}), rejecting token`,
         });
         return {
           passed: false,
-          reason: `Market cap too low: $${marketCap.toFixed(2) || 'N/A'} < $${marketCapThreshold} USD`,
+          reason: `Market cap too low: $${marketCap.toFixed(2) || 'N/A'} < $${config.minMarketCap} USD`,
           details,
         };
       }
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: candidate.mint,
-        message: `✅ MARKET CAP FILTER PASSED (simplifiedFilter): marketCap=$${marketCap.toFixed(2)} USD >= $${marketCapThreshold} USD (${tokenType})`,
+        message: `✅ MARKET CAP FILTER PASSED (simplifiedFilter): marketCap=$${marketCap.toFixed(2)} USD >= $${config.minMarketCap} USD (${tokenType})`,
       });
 
       // 4. Классификация по Tier (для манипуляторов и гемов требования мягче)
       let tierInfo: TierInfo | null = null;
-      
+
       if (tokenType === 'MANIPULATOR') {
         // Для манипуляторов: минимальная ликвидность $500 (ранние точки входа важны)
         if (volumeUsd >= 500) {
@@ -1374,19 +976,19 @@ export class TokenFilters {
 
     // Симулятор торговли: получаем реальную цену для имитации открытия позиции
     // НЕ делаем реальные транзакции, только получаем данные для симуляции
-    
+
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         // RPC pool управляет rate limiting, задержка не нужна
         if (!isPriority) {
           await sleep(config.rpcRequestDelay);
         }
-        
+
         // Получаем цену напрямую из bonding curve контракта pump.fun
         // НЕ используем Jupiter API - новые токены не индексируются сразу
         const { priceFetcher } = await import('./price-fetcher');
         const price = await priceFetcher.getPrice(mint);
-        
+
         if (price > 0) {
           logger.log({
             timestamp: getCurrentTimestamp(),
@@ -1408,7 +1010,7 @@ export class TokenFilters {
         return fallbackPrice;
       } catch (error: any) {
         lastError = error;
-        
+
         // Если 429 - ждем и повторяем
         if (error?.message?.includes('429') || error?.message?.includes('rate limit')) {
           const retryDelay = config.rateLimitRetryDelay * (attempt + 1);
@@ -1445,7 +1047,7 @@ export class TokenFilters {
       token: mint,
       message: `All attempts failed, using fallback price ${fallbackPrice.toFixed(8)} SOL for simulation. Last error: ${lastError?.message || String(lastError)}`,
     });
-    
+
     return fallbackPrice; // Возвращаем минимальную цену вместо 0, чтобы симулятор мог продолжить
   }
 

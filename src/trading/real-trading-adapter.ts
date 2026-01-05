@@ -52,17 +52,17 @@ export class RealTradingAdapter implements ITradingAdapter {
    */
   async initialize(mnemonic: string): Promise<boolean> {
     const success = await this.walletManager.initialize(mnemonic);
-    
+
     if (success) {
       const balance = await this.walletManager.getBalance();
       const address = this.walletManager.getPublicKeyString();
-      
+
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         message: `✅ Real trading wallet initialized: ${address}, Balance: ${balance.toFixed(6)} SOL`,
       });
-      
+
       console.log(`\n🔴 ===== REAL TRADING MODE ENABLED =====`);
       console.log(`Wallet: ${address}`);
       console.log(`Balance: ${balance.toFixed(6)} SOL`);
@@ -74,7 +74,7 @@ export class RealTradingAdapter implements ITradingAdapter {
         message: '❌ Failed to initialize real trading wallet',
       });
     }
-    
+
     return success;
   }
 
@@ -98,7 +98,7 @@ export class RealTradingAdapter implements ITradingAdapter {
   async executeBuy(mint: string, amountSol: number): Promise<TradeResult> {
     const buyStartTime = Date.now();
     const keypair = this.walletManager.getKeypair();
-    
+
     if (!keypair) {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -141,7 +141,7 @@ export class RealTradingAdapter implements ITradingAdapter {
       // outAmount возвращается в raw units (с учетом decimals токена, обычно 9 для pump.fun)
       const TOKEN_DECIMALS = 9; // pump.fun tokens обычно имеют 9 decimals
       const normalizedTokens = result.outAmount ? result.outAmount / Math.pow(10, TOKEN_DECIMALS) : 0;
-      
+
       // Рассчитываем execution price из фактического результата
       const executionPrice = normalizedTokens > 0
         ? amountSol / normalizedTokens
@@ -181,10 +181,10 @@ export class RealTradingAdapter implements ITradingAdapter {
    * Выполнить продажу (Token → SOL)
    * Поддерживает partial sells если включено в конфиге
    */
-  async executeSell(mint: string, amountTokens: number): Promise<TradeResult> {
+  async executeSell(mint: string, amountTokens: number, options?: { jitoTip?: number }): Promise<TradeResult> {
     const sellStartTime = Date.now();
     const keypair = this.walletManager.getKeypair();
-    
+
     if (!keypair) {
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -220,7 +220,7 @@ export class RealTradingAdapter implements ITradingAdapter {
     // Конвертируем нормализованные токены в raw tokens
     const TOKEN_DECIMALS = 9; // pump.fun tokens обычно имеют 9 decimals
     const rawTokensToSell = Math.floor(amountTokens * Math.pow(10, TOKEN_DECIMALS));
-    
+
     const tokenBalance = await this.getTokenBalance(mint); // tokenBalance уже в raw units
     const tokensToSell = Math.min(rawTokensToSell, tokenBalance);
 
@@ -243,13 +243,13 @@ export class RealTradingAdapter implements ITradingAdapter {
       message: `🔄 Converting tokens for sell: normalized=${amountTokens.toFixed(6)}, raw=${tokensToSell}, balance=${tokenBalance}`,
     });
 
-    const result = await this.pumpFunSwap.sell(keypair, mint, tokensToSell);
+    const result = await this.pumpFunSwap.sell(keypair, mint, tokensToSell, options);
     const sellDuration = Date.now() - sellStartTime;
     const balanceAfter = await this.getBalance().catch(() => balanceBefore);
 
     if (result.success) {
       const solReceived = result.solReceived || 0;
-      
+
       // ⭐ КРИТИЧНО: Рассчитываем execution price из фактического результата
       // tokensToSell в raw units, но для расчета цены нужны нормализованные токены
       const TOKEN_DECIMALS = 9; // pump.fun tokens обычно имеют 9 decimals
@@ -418,7 +418,7 @@ export class RealTradingAdapter implements ITradingAdapter {
 
     const { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = await import('@solana/spl-token');
     const { PublicKey } = await import('@solana/web3.js');
-    
+
     const tokenAccount = await getAssociatedTokenAddress(
       new PublicKey(mint),
       publicKey,
@@ -426,13 +426,13 @@ export class RealTradingAdapter implements ITradingAdapter {
       TOKEN_PROGRAM_ID,
       ASSOCIATED_TOKEN_PROGRAM_ID
     );
-    
+
     try {
       const accountInfo = await this.connection.getTokenAccountBalance(tokenAccount);
       const balance = parseInt(accountInfo.value.amount);
-      
+
       this.tokenBalanceCache.set(mint, { balance, timestamp: now });
-      
+
       return balance;
     } catch (error) {
       return 0;
@@ -445,7 +445,7 @@ export class RealTradingAdapter implements ITradingAdapter {
   async healthCheck(): Promise<{ healthy: boolean; balance?: number; error?: string }> {
     try {
       const balance = await this.getBalance();
-      
+
       if (balance < 0.01) {
         return {
           healthy: false,

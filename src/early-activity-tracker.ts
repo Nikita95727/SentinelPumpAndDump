@@ -9,6 +9,9 @@ interface TokenObservation {
   detectedAt: number;
   activityCount: number; // Number of transactions seen for this token
   hasActivity: boolean;
+  uniqueBuyers: Set<string>; // Unique buyer addresses
+  totalVolumeSol: number; // Total volume in SOL
+  hasSells: boolean; // Whether any sells were detected
 }
 
 export class EarlyActivityTracker {
@@ -45,6 +48,9 @@ export class EarlyActivityTracker {
       detectedAt: now,
       activityCount: 0,
       hasActivity: false,
+      uniqueBuyers: new Set<string>(),
+      totalVolumeSol: 0,
+      hasSells: false,
     });
 
     // Allow entry immediately (we'll observe in background)
@@ -53,12 +59,32 @@ export class EarlyActivityTracker {
   }
 
   /**
-   * Record activity for a token (called when we see another transaction)
+   * Record activity for a token (called when we see another transaction from PumpPortal)
+   * @param mint - Token mint address
+   * @param traderPublicKey - Trader's public key (optional)
+   * @param solAmount - Amount in SOL (optional)
+   * @param txType - Transaction type: 'buy' or 'sell' (optional)
    */
-  recordActivity(mint: string): void {
+  recordActivity(mint: string, traderPublicKey?: string, solAmount?: number, txType?: 'buy' | 'sell'): void {
     const observation = this.observations.get(mint);
     if (observation) {
       observation.activityCount++;
+
+      // Track unique buyers
+      if (traderPublicKey && txType === 'buy') {
+        observation.uniqueBuyers.add(traderPublicKey);
+      }
+
+      // Track volume
+      if (solAmount && solAmount > 0) {
+        observation.totalVolumeSol += solAmount;
+      }
+
+      // Track sells
+      if (txType === 'sell') {
+        observation.hasSells = true;
+      }
+
       if (observation.activityCount >= this.MIN_ACTIVITY_COUNT) {
         observation.hasActivity = true;
       }

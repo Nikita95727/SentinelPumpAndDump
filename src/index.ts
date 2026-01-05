@@ -28,7 +28,7 @@ class PumpFunSniper {
 
   async start(): Promise<void> {
     console.log('🚀 Starting Pump.fun Sniper Bot (Optimized)...');
-    
+
     // Показываем информацию о режиме сети
     const { getNetworkInfo } = await import('./config');
     const networkInfo = getNetworkInfo();
@@ -87,7 +87,7 @@ class PumpFunSniper {
         this.adapter
       );
       console.log(`✅ Position Manager initialized with ${initialDeposit.toFixed(6)} SOL`);
-      
+
       // ⭐ Восстанавливаем мониторинг загруженных активных позиций
       const loadedPositions = this.positionManager.getLoadedActivePositions();
       if (loadedPositions.length > 0) {
@@ -99,7 +99,7 @@ class PumpFunSniper {
             signature: (position as any).buySignature || '',
             createdAt: position.entryTime,
           };
-          
+
           // Возобновляем мониторинг позиции
           this.positionManager.tryOpenPosition(candidate).catch(err => {
             logger.log({
@@ -112,7 +112,7 @@ class PumpFunSniper {
         }
         console.log(`✅ Monitoring restored for ${loadedPositions.length} positions`);
       }
-      
+
       // ⭐ КРИТИЧНО: Очищаем pendingTierInfo в PositionManager
       // Это предотвращает использование старых данных о Tier между запусками
       this.positionManager.clearPendingTierInfo();
@@ -120,7 +120,7 @@ class PumpFunSniper {
       // ⭐ Инициализируем фильтры для honeypot check
       this.filters = new TokenFilters(this.connection);
       this.concentratedLiquidityTracker = new ConcentratedLiquidityTracker(this.connection, this.filters);
-      
+
       // ⭐ Инициализируем Gem Tracker (система выявления самородков)
       this.gemTracker = new GemTracker(this.connection, this.filters);
       this.gemTracker.setOnGemDetected(async (candidate: TokenCandidate, observation) => {
@@ -200,21 +200,21 @@ class PumpFunSniper {
         const observationsSize = earlyActivityTracker.clearAll();
         console.log(`   • EarlyActivityTracker: cleared ${observationsSize} observations`);
       }
-      
+
       // Очищаем cache (singleton) - кеш фильтров и RPC запросов
       const { cache } = require('./cache');
       if (cache) {
-        cache.clear().catch(() => {}); // Неблокирующая очистка
+        cache.clear().catch(() => { }); // Неблокирующая очистка
         console.log('   • Cache: cleared (memory + Redis if available)');
       }
-      
+
       // Очищаем priceFetcher кеш (singleton) - кеш цен токенов
       const { priceFetcher } = require('./price-fetcher');
       if (priceFetcher && priceFetcher.clearCache) {
         priceFetcher.clearCache();
         console.log('   • PriceFetcher: cleared price cache');
       }
-      
+
       console.log('✅ All caches and data structures cleared before startup');
       logger.log({
         timestamp: getCurrentTimestamp(),
@@ -253,9 +253,27 @@ class PumpFunSniper {
       // ⭐ НОВАЯ ЛОГИКА: Упрощенная фильтрация для поиска МАНИПУЛЯТОРОВ и ГЕМОВ
       // Фильтр ищет манипуляторов и гемов, а не отбрасывает их
       const filterResult = await this.filters.simplifiedFilter(candidate);
-      
+
       if (!filterResult.passed) {
         // Токен не прошел фильтр (только honeypot или слишком низкая ликвидность)
+        // Но если это не honeypot/скам, начинаем отслеживать его как потенциальный GEM
+        const isHoneypot = filterResult.details?.uniqueBuyers <= 1 || filterResult.reason?.includes('Honeypot');
+
+        if (!isHoneypot && this.gemTracker && !this.isShuttingDown) {
+          // Запускаем мониторинг в фоне (fire and forget)
+          this.gemTracker.startMonitoring(candidate).catch(err => {
+            // Логируем только важные ошибки
+            if (err?.message && !err.message.includes('already being monitored')) {
+              logger.log({
+                timestamp: getCurrentTimestamp(),
+                type: 'error',
+                token: candidate.mint,
+                message: `Failed to start gem monitoring: ${err.message}`
+              });
+            }
+          });
+        }
+
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
@@ -264,6 +282,7 @@ class PumpFunSniper {
         });
         return;
       }
+
 
       // ⭐ Токен прошел фильтр - определяем тип и отправляем в очередь для торговли
       const tokenType = filterResult.tokenType || 'REGULAR';
@@ -280,6 +299,11 @@ class PumpFunSniper {
 
       // ⭐ Отправляем в очередь для торговли (манипуляторы, гемы и обычные токены)
       if (this.positionManager && !this.isShuttingDown) {
+        // ⭐ Также запускаем мониторинг как GEM (на случай если не сможем войти сейчас или для повторного входа)
+        if (this.gemTracker) {
+          this.gemTracker.startMonitoring(candidate).catch(() => { });
+        }
+
         // ⭐ КРИТИЧНО: Сохраняем tierInfo в pendingTierInfo перед вызовом tryOpenPosition
         // Это необходимо, так как tierInfo используется в openPositionWithReadinessCheck
         if (filterResult.tierInfo) {
@@ -325,7 +349,7 @@ class PumpFunSniper {
           await sleep(2000);
           stats = this.positionManager.getStats();
         }
-        
+
         console.log('Closing all remaining positions...');
         await this.positionManager.closeAllPositions();
         console.log('✅ All positions closed');
@@ -344,13 +368,13 @@ class PumpFunSniper {
         // В реальной торговле получаем баланс из кошелька, в симуляции - из PositionManager
         let finalDeposit: number;
         let peakDeposit: number;
-        
+
         if (this.adapter && this.adapter.getMode() === 'real') {
           // 🔴 РЕАЛЬНАЯ ТОРГОВЛЯ: Используем реальный баланс кошелька
           const realAdapter = this.adapter as RealTradingAdapter;
           finalDeposit = await realAdapter.getBalance();
           peakDeposit = this.positionManager.getPeakDeposit(); // Peak из PositionManager (может быть выше реального)
-          
+
           console.log('\n=== Final Statistics (REAL TRADING) ===');
           console.log(`Date: ${stats.date}`);
           console.log(`Initial Deposit (Real Wallet): ${this.initialDeposit.toFixed(6)} SOL`);
@@ -360,14 +384,14 @@ class PumpFunSniper {
           // 📄 СИМУЛЯЦИЯ: Используем баланс из PositionManager
           finalDeposit = await this.positionManager.getCurrentDeposit();
           peakDeposit = this.positionManager.getPeakDeposit();
-          
+
           console.log('\n=== Final Statistics (SIMULATION) ===');
           console.log(`Date: ${stats.date}`);
           console.log(`Initial Deposit: ${this.initialDeposit.toFixed(6)} SOL`);
           console.log(`Final Deposit: ${finalDeposit.toFixed(6)} SOL`);
           console.log(`Peak Deposit: ${peakDeposit.toFixed(6)} SOL`);
         }
-        
+
         console.log(`Total Trades: ${stats.totalTrades}`);
         console.log(`Hits Above 3x: ${stats.hitsAbove3x}`);
         console.log(`Max Drawdown: ${calculateDrawdown(finalDeposit, peakDeposit).toFixed(2)}%`);
