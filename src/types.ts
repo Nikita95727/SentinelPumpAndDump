@@ -9,18 +9,73 @@ export interface TierInfo {
   minEffectiveMultiplier?: number; // Минимальный эффективный multiplier для входа (для Tier 2/3)
 }
 
-export type TokenType = 'MANIPULATOR' | 'GEM' | 'REGULAR';
+export type TokenType = 'MANIPULATOR' | 'GEM' | 'MID' | 'TRASH';
 
 export interface TokenCandidate {
   mint: string;
   createdAt: number; // timestamp в миллисекундах
   signature: string; // signature создания токена
-  isRisky?: boolean; // Флаг для рискованных токенов (не honeypot, но требуют осторожности)
-  tokenType?: TokenType; // Тип токена: манипулятор, самородок или обычный
+  rawLogs?: any[]; // Сырые логи из pump.fun (опционально)
+}
+
+// Метрики токена после сбора данных
+export interface TokenMetrics {
+  liquidityUSD: number;
+  marketCapUSD: number;
+  holdersCount: number;
+  price: number;
+  multiplier: number; // от стартовой цены pump.fun
+  hasConcentratedLiquidity: boolean;
+  earlyActivityScore?: number;
+  volumeUSD?: number;
+  uniqueBuyers: number;
+}
+
+// Классифицированный токен
+export interface ClassifiedToken {
+  candidate: TokenCandidate;
+  type: TokenType;
+  metrics: TokenMetrics;
+  classifiedAt: number;
+}
+
+// Контекст для стратегий
+export interface StrategyContext {
+  token: string;
+  metrics: TokenMetrics;
+  position?: Position;
+  currentPrice?: number;
+  timestamp: number;
+}
+
+// Параметры входа в позицию
+export interface EntryParams {
+  positionSize: number; // SOL
+  stopLossPct: number;
+  takeProfitMultiplier?: number;
+  timeoutSeconds?: number;
+  trailingStopPct?: number;
+}
+
+// Решение мониторинга позиции
+export interface MonitorDecision {
+  action: 'hold' | 'exit';
+  reason?: string;
+  exitNow?: boolean; // срочный выход
+}
+
+// План выхода из позиции
+export interface ExitPlan {
+  exitType: 'take_profit' | 'stop_loss' | 'timeout' | 'momentum_loss' | 'structure_break' | 'panic';
+  jitoTip?: number;
+  slippage?: number;
+  urgent: boolean;
 }
 
 export interface Position {
   token: string;
+  tokenType: TokenType; // тип токена
+  strategyId: string; // идентификатор стратегии
   batchId?: number; // Опционально для обратной совместимости
   entryPrice: number;
   executionPrice?: number; // Реальная цена исполнения (с учетом slippage)
@@ -43,6 +98,19 @@ export interface Position {
   errorCount?: number;
   // Price history for momentum calculation
   priceHistory?: Array<{ price: number; timestamp: number }>; // Последние 2-3 цены для расчета импульса
+  // Структура для GEM
+  structure?: {
+    higherHighs: number[];
+    higherLows: number[];
+    lastHigh: number;
+    lastLow: number;
+  };
+  // Импульс
+  impulse?: {
+    velocity: number; // скорость изменения цены
+    acceleration: number; // ускорение
+    consecutiveDrops: number; // количество падений подряд
+  };
 }
 
 export interface PositionStats {

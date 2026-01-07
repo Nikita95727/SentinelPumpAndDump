@@ -253,6 +253,7 @@ export class TokenScanner {
           mint,
           createdAt: now,
           signature: message.signature || '',
+          rawLogs: message, // сохраняем сырые данные
         };
 
         // Проверяем дубликаты в очереди
@@ -267,7 +268,7 @@ export class TokenScanner {
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: mint,
-          message: `📄 NEW TOKEN (PumpPortal): ${mint.substring(0, 12)}... | Creator: ${message.traderPublicKey?.substring(0, 8) || 'unknown'}... | Queue: ${this.tokenQueue.length}`,
+          message: `🔔 CANDIDATE_DETECTED: ${mint.substring(0, 12)}... | Creator: ${message.traderPublicKey?.substring(0, 8) || 'unknown'}... | Queue: ${this.tokenQueue.length}`,
         });
 
         if (!this.isProcessingQueue) {

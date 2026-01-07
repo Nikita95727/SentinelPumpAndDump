@@ -1,6 +1,6 @@
 import { getConnection } from './utils';
 import { TokenScanner } from './scanner';
-import { PositionManager } from './position-manager';
+import { PositionManagerNew } from './position-manager-new';
 import { logger } from './logger';
 import { tradeLogger } from './trade-logger';
 import { getCurrentTimestamp, sleep, calculateDrawdown } from './utils';
@@ -9,26 +9,41 @@ import { TokenCandidate } from './types';
 import { createTradingAdapter } from './trading/adapter-factory';
 import { ITradingAdapter } from './trading/trading-adapter.interface';
 import { RealTradingAdapter } from './trading/real-trading-adapter';
-import { GemTracker } from './gem-tracker';
-import { TokenFilters } from './filters';
-import { ConcentratedLiquidityTracker } from './concentrated-liquidity-tracker';
 import { telegramNotifier } from './telegram-notifier';
+import { AntiHoneypotFilter } from './anti-honeypot-filter';
+import { MetricsCollector } from './metrics-collector';
+import { TokenClassifier } from './token-classifier';
+import { StrategyRouter } from './strategy-router';
 
+/**
+ * NEW PIPELINE:
+ * 
+ * Scanner
+ *  → AntiHoneypotFilter (REJECT if honeypot)
+ *  → MetricsCollector (collect metrics)
+ *  → TokenClassifier (classify: MANIPULATOR/GEM/MID/TRASH)
+ *  → StrategyRouter (route to strategy)
+ *  → PositionManager (orchestrate: slots, balance, readiness, buy, monitor)
+ *  → ExecutionAdapter (paper | real, Jito)
+ */
 class PumpFunSniper {
   private scanner: TokenScanner | null = null;
-  private positionManager: PositionManager | null = null;
+  private positionManager: PositionManagerNew | null = null;
   private connection: Awaited<ReturnType<typeof getConnection>> | null = null;
   private statsInterval: NodeJS.Timeout | null = null;
   private isShuttingDown = false;
   private lastBalanceLogTime: number = 0;
   private adapter?: ITradingAdapter;
-  private initialDeposit: number = 0; // Сохраняем реальный начальный баланс
-  private gemTracker: GemTracker | null = null; // ⭐ Система выявления самородков
-  private filters: TokenFilters | null = null; // Для honeypot check
-  private concentratedLiquidityTracker: ConcentratedLiquidityTracker | null = null; // ⭐ Трекер токенов с концентрированной ликвидностью
+  private initialDeposit: number = 0;
+
+  // NEW PIPELINE MODULES
+  private antiHoneypotFilter: AntiHoneypotFilter | null = null;
+  private metricsCollector: MetricsCollector | null = null;
+  private tokenClassifier: TokenClassifier | null = null;
+  private strategyRouter: StrategyRouter | null = null;
 
   async start(): Promise<void> {
-    console.log('🚀 Starting Pump.fun Sniper Bot (Optimized)...');
+    console.log('🚀 Starting Pump.fun Sniper Bot (REFACTORED PIPELINE)...');
 
     // Показываем информацию о режиме сети
     const { getNetworkInfo } = await import('./config');
@@ -64,12 +79,10 @@ class PumpFunSniper {
           throw new Error('❌ Failed to initialize real trading wallet');
         }
 
-        // Получаем реальный баланс из кошелька
         initialDeposit = await realAdapter.getBalance();
-        this.initialDeposit = initialDeposit; // Сохраняем для финальной статистики
+        this.initialDeposit = initialDeposit;
         console.log(`✅ Real wallet balance: ${initialDeposit.toFixed(6)} SOL ($${(initialDeposit * config.solUsdRate).toFixed(2)})`);
 
-        // Health check
         const health = await realAdapter.healthCheck();
         if (!health.healthy) {
           console.warn(`⚠️ Wallet health warning: ${health.error}`);
@@ -78,69 +91,40 @@ class PumpFunSniper {
         console.log('📄 Paper Trading Mode (Simulation)');
         console.log(`Initial Deposit: ${config.initialDeposit} SOL ($${(config.initialDeposit * config.solUsdRate).toFixed(2)})`);
         initialDeposit = config.initialDeposit;
-        this.initialDeposit = initialDeposit; // Сохраняем для финальной статистики
+        this.initialDeposit = initialDeposit;
       }
 
-      // Инициализируем PositionManager с адаптером
-      this.positionManager = new PositionManager(
+      // ====================================
+      // ИНИЦИАЛИЗАЦИЯ NEW PIPELINE MODULES
+      // ====================================
+      
+      console.log('\n🔧 Initializing pipeline modules...');
+      
+      // 1. AntiHoneypotFilter
+      this.antiHoneypotFilter = new AntiHoneypotFilter(this.connection);
+      console.log('✅ AntiHoneypotFilter initialized');
+
+      // 2. MetricsCollector
+      this.metricsCollector = new MetricsCollector(this.connection);
+      console.log('✅ MetricsCollector initialized');
+
+      // 3. TokenClassifier
+      this.tokenClassifier = new TokenClassifier();
+      console.log('✅ TokenClassifier initialized');
+
+      // 4. StrategyRouter
+      this.strategyRouter = new StrategyRouter();
+      console.log('✅ StrategyRouter initialized');
+
+      // 5. PositionManager (оркестратор)
+      this.positionManager = new PositionManagerNew(
         this.connection,
         initialDeposit,
         this.adapter
       );
-      console.log(`✅ Position Manager initialized with ${initialDeposit.toFixed(6)} SOL`);
+      console.log('✅ PositionManager initialized (orchestrator)');
 
-      // ⭐ Восстанавливаем мониторинг загруженных активных позиций
-      const loadedPositions = this.positionManager.getLoadedActivePositions();
-      if (loadedPositions.length > 0) {
-        console.log(`🔄 Restoring monitoring for ${loadedPositions.length} active positions...`);
-        for (const position of loadedPositions) {
-          // Создаем TokenCandidate из загруженной позиции
-          const candidate: TokenCandidate = {
-            mint: position.token,
-            signature: (position as any).buySignature || '',
-            createdAt: position.entryTime,
-          };
-
-          // Возобновляем мониторинг позиции
-          this.positionManager.tryOpenPosition(candidate).catch(err => {
-            logger.log({
-              timestamp: getCurrentTimestamp(),
-              type: 'error',
-              token: position.token,
-              message: `❌ Failed to restore monitoring for position ${position.token.substring(0, 8)}...: ${err instanceof Error ? err.message : String(err)}`,
-            });
-          });
-        }
-        console.log(`✅ Monitoring restored for ${loadedPositions.length} positions`);
-      }
-
-      // ⭐ КРИТИЧНО: Очищаем pendingTierInfo в PositionManager
-      // Это предотвращает использование старых данных о Tier между запусками
-      this.positionManager.clearPendingTierInfo();
-
-      // ⭐ Инициализируем фильтры для honeypot check
-      this.filters = new TokenFilters(this.connection);
-      this.concentratedLiquidityTracker = new ConcentratedLiquidityTracker(this.connection, this.filters);
-
-      // ⭐ Инициализируем Gem Tracker (система выявления самородков)
-      this.gemTracker = new GemTracker(this.connection, this.filters);
-      this.gemTracker.setOnGemDetected(async (candidate: TokenCandidate, observation) => {
-        // Когда самородок обнаружен - открываем позицию
-        if (this.positionManager && !this.isShuttingDown) {
-          logger.log({
-            timestamp: getCurrentTimestamp(),
-            type: 'info',
-            token: candidate.mint,
-            message: `💎 GEM TRIGGER: Opening position for detected gem ${candidate.mint.substring(0, 8)}... | multiplier=${(observation.currentPrice / observation.initialPrice).toFixed(3)}x, gemScore=${observation.gemScore.toFixed(3)}`,
-          });
-          await this.positionManager.tryOpenPosition(candidate);
-        }
-      });
-      console.log('✅ Gem Tracker initialized (GEM DETECTION STRATEGY enabled)');
-
-      // ⭐ КРИТИЧНО: Очищаем все кеши и структуры данных перед запуском
-      // Это предотвращает повторную обработку токенов между запусками
-      this.clearAllCaches();
+      console.log('✅ All pipeline modules initialized\n');
 
       // Инициализируем сканер
       this.scanner = new TokenScanner(async (candidate: TokenCandidate) => {
@@ -148,9 +132,9 @@ class PumpFunSniper {
       });
 
       await this.scanner.start();
-      console.log('✅ Token scanner started (all caches cleared)');
+      console.log('✅ Token scanner started');
 
-      // Периодическая статистика (каждые 10 секунд)
+      // Периодическая статистика
       this.statsInterval = setInterval(() => {
         if (this.positionManager && !this.isShuttingDown) {
           const stats = this.positionManager.getStats();
@@ -160,7 +144,6 @@ class PumpFunSniper {
               console.log(`   ${p.token}: ${p.multiplier} (${p.age})`);
             });
             console.log(`   Available slots: ${stats.availableSlots}/${config.maxOpenPositions}`);
-            // Используем синхронную версию для периодической статистики (не блокируем)
             const deposit = this.positionManager.getCurrentDepositSync();
             console.log(`   Deposit: ${deposit.toFixed(6)} SOL`);
             console.log(`   Peak: ${this.positionManager.getPeakDeposit().toFixed(6)} SOL\n`);
@@ -168,51 +151,15 @@ class PumpFunSniper {
         }
       }, 10_000);
 
-      // Hourly Telegram Report
-      let lastHourlyReportTime = Date.now();
-      let lastHourlyBalance = initialDeposit;
-      let lastHourlyTradesCount = 0;
-
-      setInterval(async () => {
-        if (this.positionManager && !this.isShuttingDown) {
-          const currentBalance = await this.positionManager.getCurrentDeposit();
-          const stats = logger.getDailyStats();
-          const currentTradesCount = stats ? stats.totalTrades : 0;
-          const tradesInHour = currentTradesCount - lastHourlyTradesCount;
-
-          const params = {
-            balance: currentBalance,
-            startBalance: lastHourlyBalance,
-            activePositions: this.positionManager.getStats().activePositions,
-            tradesCount: tradesInHour,
-            isPaper: config.tradingMode === 'paper'
-          };
-
-          await telegramNotifier.notifyHourlyStatus(
-            params.balance,
-            params.startBalance,
-            params.activePositions,
-            params.tradesCount,
-            params.isPaper
-          );
-
-          lastHourlyBalance = currentBalance;
-          lastHourlyTradesCount = currentTradesCount;
-          lastHourlyReportTime = Date.now();
-        }
-      }, 3600_000); // 1 hour
-
-      console.log('✅ Pump.fun Sniper Bot is running...');
+      console.log('✅ Pump.fun Sniper Bot is running (REFACTORED PIPELINE)...');
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
-        message: 'Sniper bot started (optimized version)',
+        message: 'Sniper bot started (refactored pipeline)',
       });
 
-      // Обработка сигналов для graceful shutdown
       this.setupGracefulShutdown();
 
-      // Notify Telegram about bot start
       await telegramNotifier.notifyBotStarted(
         this.positionManager.getStats().activePositions > 0 ? await this.positionManager.getCurrentDeposit() : initialDeposit,
         config.tradingMode,
@@ -231,138 +178,188 @@ class PumpFunSniper {
   }
 
   /**
-   * ⭐ КРИТИЧНО: Очищает все кеши и структуры данных перед запуском
-   * Вызывается ПЕРЕД каждым запуском для предотвращения повторной обработки токенов
-   * Это гарантирует, что бот не будет входить в одни и те же токены несколько раз
+   * NEW PIPELINE: handleNewToken
+   * 
+   * Scanner → AntiHoneypotFilter → MetricsCollector → TokenClassifier → StrategyRouter → PositionManager
    */
-  private clearAllCaches(): void {
-    try {
-      // Очищаем earlyActivityTracker (singleton) - наблюдения за ранней активностью
-      const { earlyActivityTracker } = require('./early-activity-tracker');
-      if (earlyActivityTracker && earlyActivityTracker.clearAll) {
-        const observationsSize = earlyActivityTracker.clearAll();
-        console.log(`   • EarlyActivityTracker: cleared ${observationsSize} observations`);
-      }
-
-      // Очищаем cache (singleton) - кеш фильтров и RPC запросов
-      const { cache } = require('./cache');
-      if (cache) {
-        cache.clear().catch(() => { }); // Неблокирующая очистка
-        console.log('   • Cache: cleared (memory + Redis if available)');
-      }
-
-      // Очищаем priceFetcher кеш (singleton) - кеш цен токенов
-      const { priceFetcher } = require('./price-fetcher');
-      if (priceFetcher && priceFetcher.clearCache) {
-        priceFetcher.clearCache();
-        console.log('   • PriceFetcher: cleared price cache');
-      }
-
-      console.log('✅ All caches and data structures cleared before startup');
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'info',
-        message: '🔄 All caches and data structures cleared before startup (earlyActivityTracker, cache, priceFetcher)',
-      });
-    } catch (error) {
-      console.warn('⚠️ Warning: Error clearing some caches:', error instanceof Error ? error.message : String(error));
-      logger.log({
-        timestamp: getCurrentTimestamp(),
-        type: 'warning',
-        message: `Warning: Error clearing some caches: ${error instanceof Error ? error.message : String(error)}`,
-      });
-    }
-  }
-
   private async handleNewToken(candidate: TokenCandidate): Promise<void> {
-    if (!this.positionManager || !this.gemTracker || !this.filters || this.isShuttingDown) return;
+    if (!this.positionManager || !this.antiHoneypotFilter || !this.metricsCollector || 
+        !this.tokenClassifier || !this.strategyRouter || this.isShuttingDown) {
+      return;
+    }
 
-    // Проверяем баланс перед обработкой токена
-    // Если баланса нет, не обрабатываем токен (не засоряем очередь)
+    // Проверяем баланс
     if (!this.positionManager.hasEnoughBalanceForTrading()) {
-      // Логируем периодически для диагностики
       const now = Date.now();
-      if (!this.lastBalanceLogTime || (now - this.lastBalanceLogTime) > 60000) { // Раз в минуту
-        // Получаем детальную информацию о балансе для диагностики (используем синхронную версию)
+      if (!this.lastBalanceLogTime || (now - this.lastBalanceLogTime) > 60000) {
         const deposit = this.positionManager.getCurrentDepositSync();
-        const required = 0.004692; // Минимальный требуемый резерв
-        console.log(`[${new Date().toLocaleTimeString()}] INFO | Insufficient balance for trading. Current deposit: ${deposit.toFixed(6)} SOL, Required: ${required.toFixed(6)} SOL, Has enough: ${deposit >= required}`);
+        const required = 0.004692;
+        console.log(`[${new Date().toLocaleTimeString()}] INFO | Insufficient balance for trading. Current deposit: ${deposit.toFixed(6)} SOL, Required: ${required.toFixed(6)} SOL`);
         this.lastBalanceLogTime = now;
       }
       return;
     }
 
     try {
-      // ⭐ НОВАЯ ЛОГИКА: Упрощенная фильтрация для поиска МАНИПУЛЯТОРОВ и ГЕМОВ
-      // Фильтр ищет манипуляторов и гемов, а не отбрасывает их
-      const filterResult = await this.filters.simplifiedFilter(candidate);
-
-      if (!filterResult.passed) {
-        // Токен не прошел фильтр (только honeypot или слишком низкая ликвидность)
-        // Но если это не honeypot/скам, начинаем отслеживать его как потенциальный GEM
-        const isHoneypot = filterResult.details?.uniqueBuyers <= 1 || filterResult.reason?.includes('Honeypot');
-
-        if (!isHoneypot && this.gemTracker && !this.isShuttingDown) {
-          // Запускаем мониторинг в фоне (fire and forget)
-          this.gemTracker.startMonitoring(candidate).catch(err => {
-            // Логируем только важные ошибки
-            if (err?.message && !err.message.includes('already being monitored')) {
-              logger.log({
-                timestamp: getCurrentTimestamp(),
-                type: 'error',
-                token: candidate.mint,
-                message: `Failed to start gem monitoring: ${err.message}`
-              });
-            }
-          });
-        }
-
-        logger.log({
-          timestamp: getCurrentTimestamp(),
-          type: 'info',
-          token: candidate.mint,
-          message: `❌ Token rejected: ${filterResult.reason || 'Unknown reason'}`,
-        });
-        return;
-      }
-
-
-      // ⭐ Токен прошел фильтр - определяем тип и отправляем в очередь для торговли
-      const tokenType = filterResult.tokenType || 'REGULAR';
-      candidate.tokenType = tokenType; // Сохраняем тип токена в candidate
-
-      // Логируем тип токена
-      const typeEmoji = tokenType === 'MANIPULATOR' ? '🎯' : (tokenType === 'GEM' ? '💎' : '📊');
+      // =====================================
+      // STEP 1: ANTI-HONEYPOT FILTER (REJECT)
+      // =====================================
       logger.log({
         timestamp: getCurrentTimestamp(),
         type: 'info',
         token: candidate.mint,
-        message: `${typeEmoji} Token PASSED: Type=${tokenType}, Tier=${filterResult.tierInfo?.tier || 'N/A'}, liquidity=$${filterResult.details?.volumeUsd?.toFixed(2) || 'N/A'}, sending to position manager for entry`,
+        message: `🔍 [PIPELINE STEP 1/5] ANTI-HONEYPOT CHECK: ${candidate.mint.substring(0, 8)}...`,
       });
 
-      // ⭐ Отправляем в очередь для торговли (манипуляторы, гемы и обычные токены)
-      if (this.positionManager && !this.isShuttingDown) {
-        // ⭐ Также запускаем мониторинг как GEM (на случай если не сможем войти сейчас или для повторного входа)
-        if (this.gemTracker) {
-          this.gemTracker.startMonitoring(candidate).catch(() => { });
-        }
+      const honeypotResult = await this.antiHoneypotFilter.check(candidate);
+      
+      if (!honeypotResult.passed) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `❌ FILTER_REJECT: ${honeypotResult.reason}`,
+        });
 
-        // ⭐ КРИТИЧНО: Сохраняем tierInfo в pendingTierInfo перед вызовом tryOpenPosition
-        // Это необходимо, так как tierInfo используется в openPositionWithReadinessCheck
-        if (filterResult.tierInfo) {
-          this.positionManager.setPendingTierInfo(candidate.mint, filterResult.tierInfo);
-        }
-        await this.positionManager.tryOpenPosition(candidate);
-
-        // Notify Telegram about candidate or potential gem
-        // Only notify if we haven't already notified (TODO: maybe add tracking, but scanner is fast)
-        // Using fire-and-forget
-        telegramNotifier.notifyTokenDetected(
-          candidate.mint,
-          tokenType as 'GEM' | 'MANIPULATOR' | 'CANDIDATE',
-          filterResult.details?.volumeUsd
-        ).catch(() => { });
+        // CANDIDATE_FLOW лог
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `📋 CANDIDATE_FLOW: ${candidate.mint.substring(0, 8)}... | REJECTED at ANTI-HONEYPOT | reason: ${honeypotResult.reason}`,
+        });
+        return;
       }
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `✅ [STEP 1/5] ANTI-HONEYPOT PASSED: ${honeypotResult.uniqueBuyers} unique buyers`,
+      });
+
+      // =====================================
+      // STEP 2: METRICS COLLECTOR
+      // =====================================
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `📊 [PIPELINE STEP 2/5] METRICS COLLECTION: ${candidate.mint.substring(0, 8)}...`,
+      });
+
+      const metrics = await this.metricsCollector.collectMetrics(candidate);
+      
+      if (!metrics) {
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `❌ FILTER_REJECT: Metrics collection failed`,
+        });
+
+        // CANDIDATE_FLOW лог
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `📋 CANDIDATE_FLOW: ${candidate.mint.substring(0, 8)}... | REJECTED at METRICS | reason: metrics collection failed`,
+        });
+        return;
+      }
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `✅ [STEP 2/5] METRICS COLLECTED: price=${metrics.price.toFixed(10)}, multiplier=${metrics.multiplier.toFixed(2)}x, liquidity=$${metrics.liquidityUSD.toFixed(2)}, marketCap=$${metrics.marketCapUSD.toFixed(2)}`,
+      });
+
+      // =====================================
+      // STEP 3: TOKEN CLASSIFIER
+      // =====================================
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `🏷️ [PIPELINE STEP 3/5] TOKEN CLASSIFICATION: ${candidate.mint.substring(0, 8)}...`,
+      });
+
+      const classified = this.tokenClassifier.classify(candidate, metrics);
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `✅ [STEP 3/5] CLASSIFIED: ${classified.type} | multiplier=${metrics.multiplier.toFixed(2)}x, liquidity=$${metrics.liquidityUSD.toFixed(2)}, marketCap=$${metrics.marketCapUSD.toFixed(2)}`,
+      });
+
+      // =====================================
+      // STEP 4: STRATEGY ROUTER
+      // =====================================
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `🎯 [PIPELINE STEP 4/5] STRATEGY ROUTING: ${candidate.mint.substring(0, 8)}... | type=${classified.type}`,
+      });
+
+      const strategy = this.strategyRouter.getStrategy(classified);
+
+      if (!strategy) {
+        // TRASH токен - не торгуем
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `🗑️ NOT TRADING: ${classified.type}`,
+        });
+
+        // CANDIDATE_FLOW лог
+        logger.log({
+          timestamp: getCurrentTimestamp(),
+          type: 'info',
+          token: candidate.mint,
+          message: `📋 CANDIDATE_FLOW: ${candidate.mint.substring(0, 8)}... | type=${classified.type} | NOT TRADING (TRASH)`,
+        });
+        return;
+      }
+
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `✅ [STEP 4/5] STRATEGY SELECTED: ${strategy.type}`,
+      });
+
+      // =====================================
+      // STEP 5: POSITION MANAGER (ORCHESTRATE)
+      // =====================================
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `🚀 [PIPELINE STEP 5/5] POSITION MANAGER: ${candidate.mint.substring(0, 8)}... | strategy=${classified.type}`,
+      });
+
+      // CANDIDATE_FLOW лог (полный путь)
+      logger.log({
+        timestamp: getCurrentTimestamp(),
+        type: 'info',
+        token: candidate.mint,
+        message: `📋 CANDIDATE_FLOW: ${candidate.mint.substring(0, 8)}... | ANTI-HONEYPOT ✅ → METRICS ✅ → CLASSIFIED: ${classified.type} → STRATEGY: ${strategy.type} → POSITION_MANAGER`,
+      });
+
+      // Передаем в PositionManager вместе со стратегией и классификацией
+      await this.positionManager.tryOpenPosition(candidate, classified, strategy);
+
+      // Notify Telegram
+      telegramNotifier.notifyTokenDetected(
+        candidate.mint,
+        classified.type as 'GEM' | 'MANIPULATOR' | 'CANDIDATE',
+        metrics.liquidityUSD
+      ).catch(() => {});
+
     } catch (error) {
       console.error(`[${new Date().toLocaleTimeString()}] ERROR | Error handling new token ${candidate.mint}: ${error instanceof Error ? error.message : String(error)}`);
       logger.log({
@@ -373,7 +370,6 @@ class PumpFunSniper {
     }
   }
 
-
   private setupGracefulShutdown(): void {
     const shutdown = async (signal: string) => {
       if (this.isShuttingDown) return;
@@ -381,19 +377,16 @@ class PumpFunSniper {
 
       console.log(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
 
-      // Останавливаем сканер
       if (this.scanner) {
         await this.scanner.stop();
         console.log('✅ Scanner stopped');
       }
 
-      // Останавливаем статистику
       if (this.statsInterval) {
         clearInterval(this.statsInterval);
         this.statsInterval = null;
       }
 
-      // Ждем закрытия всех позиций
       if (this.positionManager) {
         let stats = this.positionManager.getStats();
         while (stats.activePositions > 0) {
@@ -407,25 +400,16 @@ class PumpFunSniper {
         console.log('✅ All positions closed');
       }
 
-      // Останавливаем трекер концентрированной ликвидности
-      if (this.concentratedLiquidityTracker) {
-        this.concentratedLiquidityTracker.stop();
-        console.log('✅ Concentrated liquidity tracker stopped');
-      }
-
-      // Сохраняем финальную статистику
       await logger.saveStats();
       const stats = logger.getDailyStats();
       if (stats && this.positionManager) {
-        // В реальной торговле получаем баланс из кошелька, в симуляции - из PositionManager
         let finalDeposit: number;
         let peakDeposit: number;
 
         if (this.adapter && this.adapter.getMode() === 'real') {
-          // 🔴 РЕАЛЬНАЯ ТОРГОВЛЯ: Используем реальный баланс кошелька
           const realAdapter = this.adapter as RealTradingAdapter;
           finalDeposit = await realAdapter.getBalance();
-          peakDeposit = this.positionManager.getPeakDeposit(); // Peak из PositionManager (может быть выше реального)
+          peakDeposit = this.positionManager.getPeakDeposit();
 
           console.log('\n=== Final Statistics (REAL TRADING) ===');
           console.log(`Date: ${stats.date}`);
@@ -433,7 +417,6 @@ class PumpFunSniper {
           console.log(`Final Deposit (Real Wallet): ${finalDeposit.toFixed(6)} SOL`);
           console.log(`Peak Deposit (Tracked): ${peakDeposit.toFixed(6)} SOL`);
         } else {
-          // 📄 СИМУЛЯЦИЯ: Используем баланс из PositionManager
           finalDeposit = await this.positionManager.getCurrentDeposit();
           peakDeposit = this.positionManager.getPeakDeposit();
 
@@ -449,7 +432,6 @@ class PumpFunSniper {
         console.log(`Max Drawdown: ${calculateDrawdown(finalDeposit, peakDeposit).toFixed(2)}%`);
       }
 
-      // Закрываем loggers
       await logger.close();
       await tradeLogger.close();
       console.log('✅ Graceful shutdown complete');
