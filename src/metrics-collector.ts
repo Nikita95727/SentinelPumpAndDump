@@ -73,8 +73,8 @@ export class MetricsCollector {
 
       // 6. Проверяем early activity
       const { earlyActivityTracker } = await import('./early-activity-tracker');
-      const earlyStats = earlyActivityTracker.getStats(candidate.mint);
-      const earlyActivityScore = this.calculateEarlyActivityScore(earlyStats);
+      const hasActivity = earlyActivityTracker.hasEarlyActivity(candidate.mint);
+      const earlyActivityScore = hasActivity ? 1.0 : 0.5;
 
       // 7. Вычисляем multiplier
       const multiplier = price / this.PUMP_FUN_START_PRICE;
@@ -350,25 +350,5 @@ export class MetricsCollector {
     }
   }
 
-  /**
-   * Вычисляет score ранней активности
-   */
-  private calculateEarlyActivityScore(earlyStats: any): number {
-    if (!earlyStats) return 0;
-
-    const {
-      totalBuys = 0,
-      totalSells = 0,
-      uniqueBuyers = 0,
-      avgBuyAmount = 0,
-    } = earlyStats;
-
-    // Простая формула: больше покупок, больше уникальных покупателей = выше score
-    const buyRatio = totalBuys > 0 ? totalBuys / (totalBuys + totalSells) : 0;
-    const uniqueBuyersScore = Math.min(uniqueBuyers / 10, 1); // нормализуем до 1
-    const avgBuyScore = Math.min(avgBuyAmount / 0.1, 1); // нормализуем до 1 (0.1 SOL = 1)
-
-    return (buyRatio * 0.4 + uniqueBuyersScore * 0.4 + avgBuyScore * 0.2);
-  }
 }
 

@@ -51,7 +51,7 @@ export interface StrategyContext {
 // Параметры входа в позицию
 export interface EntryParams {
   positionSize: number; // SOL
-  stopLossPct: number;
+  stopLossPct?: number; // опционально для GEM
   takeProfitMultiplier?: number;
   timeoutSeconds?: number;
   trailingStopPct?: number;

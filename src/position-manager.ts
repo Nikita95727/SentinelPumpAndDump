@@ -100,13 +100,13 @@ export class PositionManagerNew {
       }
 
       // GATE 4: Readiness
-      const readinessResult = await checkTokenReadiness(mint);
-      if (!readinessResult.ready) {
+      const isReady = await checkTokenReadiness(this.connection, mint);
+      if (!isReady) {
         logger.log({
           timestamp: getCurrentTimestamp(),
           type: 'info',
           token: mint,
-          message: `❌ OPEN_SKIPPED: not ready: ${readinessResult.reason}`,
+          message: `❌ OPEN_SKIPPED: token not ready`,
         });
         return;
       }
@@ -134,10 +134,9 @@ export class PositionManagerNew {
       }
 
       // GATE 5: Buy
-      const buyResult = await this.adapter.buy(
+      const buyResult = await this.adapter.executeBuy(
         mint,
-        entryParams.positionSize,
-        0.20, // slippage
+        entryParams.positionSize
       );
 
       if (!buyResult.success) {
@@ -154,20 +153,21 @@ export class PositionManagerNew {
 
       // Создаём позицию
       const now = Date.now();
+      const entryPrice = buyResult.executionPrice || buyResult.markPrice || 0;
       const position: Position = {
         token: mint,
         tokenType: classified.type,
         strategyId: strategy.type,
-        entryPrice: buyResult.entryPrice || 0,
+        entryPrice: entryPrice,
         executionPrice: buyResult.executionPrice,
-        investedSol: buyResult.investedSol || entryParams.positionSize,
+        investedSol: entryParams.positionSize,
         reservedAmount: entryParams.positionSize,
         entryTime: now,
-        peakPrice: buyResult.entryPrice || 0,
+        peakPrice: entryPrice,
         lastRealPriceUpdate: now,
         status: 'active',
-        stopLossTarget: entryParams.stopLossPct ? (buyResult.entryPrice || 0) * (1 - entryParams.stopLossPct / 100) : undefined,
-        takeProfitTarget: entryParams.takeProfitMultiplier ? (buyResult.entryPrice || 0) * entryParams.takeProfitMultiplier : undefined,
+        stopLossTarget: entryParams.stopLossPct ? entryPrice * (1 - entryParams.stopLossPct / 100) : undefined,
+        takeProfitTarget: entryParams.takeProfitMultiplier ? entryPrice * entryParams.takeProfitMultiplier : undefined,
         exitTimer: entryParams.timeoutSeconds ? now + entryParams.timeoutSeconds * 1000 : undefined,
         priceHistory: [],
       };
@@ -183,11 +183,12 @@ export class PositionManagerNew {
         message: `✅ OPEN_SUCCESS: ${strategy.type} | invested=${position.investedSol.toFixed(6)} SOL, price=${position.entryPrice.toFixed(10)}`,
       });
 
-      tradeLogger.logBuy({
+      // Log trade open
+      tradeLogger.logTradeOpen({
+        tradeId: mint,
         token: mint,
         investedSol: position.investedSol,
         entryPrice: position.entryPrice,
-        signature: buyResult.signature || '',
       });
 
       // Запускаем мониторинг
@@ -307,17 +308,19 @@ export class PositionManagerNew {
         message: `🚪 EXIT_DECISION: ${exitPlan.exitType} | reason=${reason}, jitoTip=${exitPlan.jitoTip}, slippage=${exitPlan.slippage}, urgent=${exitPlan.urgent}`,
       });
 
-      // Продаём
-      const sellResult = await this.adapter.sell(
+      // Продаём (передаем tokens amount - получаем из position если есть, иначе 0)
+      const tokensAmount = (position as any).tokensReceived || 0;
+      const sellResult = await this.adapter.executeSell(
         position.token,
-        exitPlan.slippage || 0.25,
-        exitPlan.jitoTip,
+        tokensAmount,
+        { jitoTip: exitPlan.jitoTip }
       );
 
       if (sellResult.success) {
-        const proceeds = sellResult.receivedSol || 0;
-        const multiplier = sellResult.exitPrice && position.entryPrice > 0 
-          ? sellResult.exitPrice / position.entryPrice 
+        const proceeds = sellResult.solReceived || 0;
+        const exitPrice = sellResult.executionPrice || 0;
+        const multiplier = exitPrice && position.entryPrice > 0 
+          ? exitPrice / position.entryPrice 
           : 0;
 
         // Освобождаем резерв и добавляем proceeds
@@ -327,18 +330,20 @@ export class PositionManagerNew {
           timestamp: getCurrentTimestamp(),
           type: 'sell',
           token: position.token,
-          exitPrice: sellResult.exitPrice,
+          exitPrice: exitPrice,
           multiplier,
           profitSol: proceeds - position.investedSol,
           message: `✅ SELL_SUCCESS: ${strategy.type} | proceeds=${proceeds.toFixed(6)} SOL, multiplier=${multiplier.toFixed(2)}x, profit=${(proceeds - position.investedSol).toFixed(6)} SOL`,
         });
 
-        tradeLogger.logSell({
+        // Log trade close
+        tradeLogger.logTradeClose({
+          tradeId: position.token,
           token: position.token,
-          exitPrice: sellResult.exitPrice || 0,
-          receivedSol: proceeds,
+          exitPrice: exitPrice,
+          multiplier: multiplier,
           profitSol: proceeds - position.investedSol,
-          signature: sellResult.signature || '',
+          reason: reason,
         });
 
         position.status = 'closed';

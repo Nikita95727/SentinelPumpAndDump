@@ -1,6 +1,6 @@
 import { getConnection } from './utils';
 import { TokenScanner } from './scanner';
-import { PositionManagerNew } from './position-manager-new';
+import { PositionManagerNew } from './position-manager';
 import { logger } from './logger';
 import { tradeLogger } from './trade-logger';
 import { getCurrentTimestamp, sleep, calculateDrawdown } from './utils';
@@ -140,7 +140,7 @@ class PumpFunSniper {
           const stats = this.positionManager.getStats();
           if (stats.activePositions > 0) {
             console.log('\n📊 === ACTIVE POSITIONS ===');
-            stats.positions.forEach(p => {
+            stats.positions.forEach((p: any) => {
               console.log(`   ${p.token}: ${p.multiplier} (${p.age})`);
             });
             console.log(`   Available slots: ${stats.availableSlots}/${config.maxOpenPositions}`);
